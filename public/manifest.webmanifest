@@ -1,0 +1,17 @@
+{
+  "name": "Miu — Student Focus Workspace",
+  "short_name": "Miu",
+  "description": "All-in-one local-first student workspace dengan Dynamic Island, Block Editor, Pomodoro, Hybrid Spotify + LRCLIB, White Noise Mixer, Cermin, Lazytype, Lazyshot & External AI BYOK.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#EBF5FF",
+  "theme_color": "#38BDF8",
+  "icons": [
+    {
+      "src": "/miu-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

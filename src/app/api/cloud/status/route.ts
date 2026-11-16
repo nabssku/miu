@@ -1,0 +1,25 @@
+import { NextResponse } from 'next/server';
+import {
+  ensureServerNeonSchema,
+  getServerCloudEnv,
+  isServerCloudinaryConfigured,
+  isServerNeonConfigured
+} from '@/lib/serverCloud';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET() {
+  const env = getServerCloudEnv();
+  return NextResponse.json({
+    dbReady: isServerNeonConfigured(),
+    mediaReady: isServerCloudinaryConfigured(),
+    aiReady: Boolean(env.groqApiKey),
+    aiModel: env.groqModel,
+    googleClientId: env.googleClientId
+  });
+}
+
+export async function POST() {
+  const ok = await ensureServerNeonSchema();
+  return NextResponse.json({ ok }, { status: ok ? 200 : 503 });
+}
