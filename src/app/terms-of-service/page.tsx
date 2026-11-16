@@ -1,12 +1,14 @@
 import type { Metadata } from 'next';
 import React from 'react';
 import { LegalPageShell, type LegalSection } from '@/components/legal/LegalPageShell';
+import { buildPageMetadata } from '@/lib/seo';
 
-export const metadata: Metadata = {
-  title: 'Terms of Service — Miu Workspace',
+export const metadata: Metadata = buildPageMetadata({
+  title: 'Terms of Service',
   description:
-    'Syarat dan Ketentuan Layanan Miu Workspace (miu.kodelokal.store) terkait penggunaan editor catatan, Kanban, Kalender, Google Calendar, dan layanan AI.'
-};
+    'Syarat dan Ketentuan Layanan Miu Workspace (miu.kodelokal.store) terkait penggunaan editor catatan, Kanban, Kalender, Google Calendar, dan layanan AI.',
+  path: '/terms-of-service'
+});
 
 const TERMS_SECTIONS: LegalSection[] = [
   {

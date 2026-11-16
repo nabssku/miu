@@ -1,12 +1,14 @@
 import type { Metadata } from 'next';
 import React from 'react';
 import { LegalPageShell, type LegalSection } from '@/components/legal/LegalPageShell';
+import { buildPageMetadata } from '@/lib/seo';
 
-export const metadata: Metadata = {
-  title: 'Privacy Policy — Miu Workspace',
+export const metadata: Metadata = buildPageMetadata({
+  title: 'Privacy Policy',
   description:
-    'Kebijakan Privasi Miu Workspace (miu.kodelokal.store): penyimpanan lokal, sinkronisasi cloud opsional, integrasi Google Account & Google Calendar, serta perlindungan data pengguna.'
-};
+    'Kebijakan Privasi Miu Workspace (miu.kodelokal.store): penyimpanan lokal, sinkronisasi cloud opsional, integrasi Google Account & Google Calendar, serta perlindungan data pengguna.',
+  path: '/privacy-policy'
+});
 
 const PRIVACY_SECTIONS: LegalSection[] = [
   {

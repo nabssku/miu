@@ -17,6 +17,7 @@ import {
   Timer
 } from 'lucide-react';
 import { useMiu } from '../../context/MiuContext';
+import { LANDING_FAQ_ITEMS } from '../../lib/seo';
 import { MiuMascot } from '../island/MiuMascot';
 
 const QUICK_TRY_FEATURES = [
@@ -29,28 +30,8 @@ const QUICK_TRY_FEATURES = [
   { id: 'settings' as const, label: '8 Posisi & Tema', Icon: Settings }
 ];
 
-const FAQ_ITEMS = [
-  {
-    q: 'Beneran gratis selamanya?',
-    a: 'Ya, 100% gratis tanpa iklan dan tanpa wajib login. Fitur AI menggunakan API Key milikmu sendiri (BYOK).'
-  },
-  {
-    q: 'Apakah catatan dan suara saya aman?',
-    a: 'Seluruh catatan, To-do, Board, Screen Time, dan dikte suara disimpan dan diproses 100% lokal di browser perangkatmu.'
-  },
-  {
-    q: 'Berat nggak di laptop?',
-    a: 'Sangat ringan. Saat tab tidak aktif, animasi otomatis dijeda. Fitur seperti dikte suara dan OCR hanya dimuat saat kamu menyalakannya.'
-  },
-  {
-    q: 'Bisa dipakai tanpa internet?',
-    a: 'Bisa. Mencatat, Pomodoro, To-do, Board, White Noise, Lazytype, dan Lazyshot berjalan penuh secara offline.'
-  }
-];
-
 export const LandingPage: React.FC = () => {
   const {
-    setViewMode,
     activePopover,
     setActivePopover,
     startPomodoro,
@@ -94,14 +75,13 @@ export const LandingPage: React.FC = () => {
 
           {/* Primary Actions */}
           <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-            <button
-              type="button"
-              onClick={() => setViewMode('workspace')}
+            <Link
+              href="/app"
               className="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-accent-strong text-white dark:text-slate-950 font-bold text-sm shadow-sm hover:opacity-95 transition active:scale-[0.98]"
             >
               Mulai Mencatat
               <ArrowRight className="w-4 h-4" />
-            </button>
+            </Link>
 
             <button
               type="button"
@@ -154,7 +134,7 @@ export const LandingPage: React.FC = () => {
         {/* Simple Minimalist FAQ */}
         <section className="max-w-xl mx-auto text-left pt-4 border-t border-border-subtle">
           <div className="divide-y divide-border-subtle">
-            {FAQ_ITEMS.map((item, idx) => {
+            {LANDING_FAQ_ITEMS.map((item, idx) => {
               const isOpen = openFaqIdx === idx;
               return (
                 <div key={item.q}>

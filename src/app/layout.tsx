@@ -2,20 +2,79 @@ import type { Metadata, Viewport } from 'next';
 import React from 'react';
 import { MiuProvider } from '@/context/MiuContext';
 import { MiuShell } from '@/components/shell/MiuShell';
+import {
+  SITE_DESCRIPTION_DEFAULT,
+  SITE_KEYWORDS,
+  SITE_NAME,
+  SITE_TITLE_DEFAULT,
+  SITE_URL
+} from '@/lib/seo';
 import './globals.css';
 
+const GOOGLE_SITE_VERIFICATION =
+  process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION?.trim() ||
+  'TLq0v856mAv1_JumRHtJ4YDUwcuwXM9ZGUAOCmcN5RU';
+
 export const metadata: Metadata = {
-  title: 'Miu — Dynamic Ambient Workspace untuk Fokus & Catatan',
-  description:
-    'Ruang belajar dan catatan bersih dengan Dynamic Island ambien, Pomodoro, Spotify, pengingat cerdas, dan integrasi Cloud Catatan serta AI.',
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: SITE_TITLE_DEFAULT,
+    template: `%s | ${SITE_NAME}`
+  },
+  description: SITE_DESCRIPTION_DEFAULT,
+  applicationName: SITE_NAME,
+  keywords: SITE_KEYWORDS,
+  authors: [{ name: SITE_NAME, url: SITE_URL }],
+  creator: SITE_NAME,
+  publisher: SITE_NAME,
+  category: 'Productivity',
   manifest: '/manifest.webmanifest',
   icons: {
-    icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐱</text></svg>"
-  }
+    icon: [
+      { url: '/miu-icon.svg', type: 'image/svg+xml' },
+      { url: '/icon', sizes: '192x192', type: 'image/png' }
+    ],
+    shortcut: '/miu-icon.svg',
+    apple: [{ url: '/apple-icon', sizes: '180x180', type: 'image/png' }]
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+      'max-video-preview': -1,
+      'max-image-preview': 'large',
+      'max-snippet': -1
+    }
+  },
+  openGraph: {
+    type: 'website',
+    locale: 'id_ID',
+    url: SITE_URL,
+    siteName: SITE_NAME,
+    title: SITE_TITLE_DEFAULT,
+    description: SITE_DESCRIPTION_DEFAULT
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: SITE_TITLE_DEFAULT,
+    description: SITE_DESCRIPTION_DEFAULT
+  },
+  ...(GOOGLE_SITE_VERIFICATION
+    ? {
+        verification: {
+          google: GOOGLE_SITE_VERIFICATION
+        }
+      }
+    : {})
 };
 
 export const viewport: Viewport = {
-  themeColor: '#EBF5FF',
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#EBF5FF' },
+    { media: '(prefers-color-scheme: dark)', color: '#161412' }
+  ],
   width: 'device-width',
   initialScale: 1
 };

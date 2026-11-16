@@ -61,11 +61,15 @@ Seluruh kredensial **Cloud Catatan**, **Media Cloud**, dan **AI Key default** di
 │   │   │   ├── notes/route.ts        # CRUD catatan terisolasi & validasi izin share
 │   │   │   └── upload/route.ts       # Upload media server-side
 │   │   ├── app/page.tsx              # Rute Workspace (/app)
+│   │   ├── opengraph-image.tsx       # SMO Open Graph banner (1200x630 PNG)
+│   │   ├── twitter-image.tsx         # SMO Twitter/X summary card PNG
+│   │   ├── robots.ts                 # Crawler directives (/robots.txt)
+│   │   ├── sitemap.ts                # Sitemap XML dinamis (/sitemap.xml)
 │   │   ├── privacy-policy/page.tsx   # Kebijakan Privasi (/privacy-policy)
 │   │   ├── terms-of-service/page.tsx # Syarat Layanan (/terms-of-service)
 │   │   ├── globals.css
 │   │   ├── layout.tsx
-│   │   └── page.tsx                  # Landing Page (/)
+│   │   └── page.tsx                  # Landing Page (/) & JSON-LD SEO
 │   ├── components/                   # Komponen UI (Dynamic Island, Editor, AI Drawer, dll.)
 │   ├── context/MiuContext.tsx        # State global aplikasi
 │   ├── db/database.ts                # Skema IndexedDB (Dexie)

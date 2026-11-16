@@ -1,19 +1,15 @@
-'use client';
-
+import type { Metadata } from 'next';
 import React from 'react';
-import { useMiu } from '@/context/MiuContext';
-import { BlockEditor } from '@/components/workspace/BlockEditor';
-import { ExternalAIDrawer } from '@/components/ai/ExternalAIDrawer';
+import { WorkspaceView } from '@/components/workspace/WorkspaceView';
+import { buildPageMetadata } from '@/lib/seo';
+
+export const metadata: Metadata = buildPageMetadata({
+  title: 'Workspace Catatan, Kanban & Kalender',
+  description:
+    'Tulis catatan blok & LaTeX, kelola tugas di Kanban, atur deadline /deadline yang otomatis masuk Kalender & Google Calendar, dan berdiskusi dengan Voice AI ElevenLabs.',
+  path: '/app'
+});
 
 export default function WorkspacePage() {
-  const { isAIDrawerOpen } = useMiu();
-
-  return (
-    <main className="w-full min-h-screen flex bg-surface text-text-primary">
-      <div className="flex-1 min-w-0">
-        <BlockEditor />
-      </div>
-      {isAIDrawerOpen && <ExternalAIDrawer />}
-    </main>
-  );
+  return <WorkspaceView />;
 }
