@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import Link from 'next/link';
 import {
   ArrowRight,
   BarChart3,
@@ -185,7 +186,13 @@ export const LandingPage: React.FC = () => {
       <footer className="pt-6 border-t border-border-subtle flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-text-secondary">
         <span>Miu v2.1 • 100% Lokal &amp; Gratis Selamanya</span>
 
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center justify-center gap-4">
+          <Link href="/privacy-policy" className="hover:text-text-primary transition">
+            Privacy Policy
+          </Link>
+          <Link href="/terms-of-service" className="hover:text-text-primary transition">
+            Terms of Service
+          </Link>
           <button
             type="button"
             onClick={() => setIsSupportModalOpen('coffee')}

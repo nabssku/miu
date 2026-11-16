@@ -61,6 +61,8 @@ Seluruh kredensial **Cloud Catatan**, **Media Cloud**, dan **AI Key default** di
 │   │   │   ├── notes/route.ts        # CRUD catatan terisolasi & validasi izin share
 │   │   │   └── upload/route.ts       # Upload media server-side
 │   │   ├── app/page.tsx              # Rute Workspace (/app)
+│   │   ├── privacy-policy/page.tsx   # Kebijakan Privasi (/privacy-policy)
+│   │   ├── terms-of-service/page.tsx # Syarat Layanan (/terms-of-service)
 │   │   ├── globals.css
 │   │   ├── layout.tsx
 │   │   └── page.tsx                  # Landing Page (/)
