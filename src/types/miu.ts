@@ -41,6 +41,7 @@ export type BlockType =
   | 'bullet'
   | 'numbered'
   | 'todo'
+  | 'deadline'
   | 'toggle'
   | 'callout'
   | 'code'
@@ -48,6 +49,7 @@ export type BlockType =
   | 'quote'
   | 'divider'
   | 'image'
+  | 'video'
   | 'pdf'
   | 'subpage';
 
@@ -67,9 +69,14 @@ export interface NoteBlock {
   pdfPages?: number;
   subpageId?: string;
   subpageIcon?: string;
+  dueDate?: string; // YYYY-MM-DD for Todo/Deadline blocks
+  dueTime?: string; // HH:mm optional
+  googleEventId?: string;
 }
 
 export type SharePermission = 'view' | 'comment' | 'edit';
+
+export type NoteKanbanStatus = 'todo' | 'in_progress' | 'done';
 
 export interface SharedCollaborator {
   email: string;
@@ -120,6 +127,10 @@ export interface NoteRecord {
   icon?: string;
   cover?: string;
   isFavorite?: boolean;
+  kanbanStatus?: NoteKanbanStatus;
+  dueDate?: string; // YYYY-MM-DD note deadline
+  dueTime?: string; // HH:mm optional
+  googleEventId?: string;
   blocks: NoteBlock[];
   shareSettings?: NoteShareSettings;
   comments?: NoteComment[];
@@ -201,6 +212,11 @@ export type AIProviderId =
   | 'openrouter'
   | 'openai'
   | 'ollama';
+
+export interface AIChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 export interface HotkeyConfig {
   commandBar: string;

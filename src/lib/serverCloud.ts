@@ -24,6 +24,10 @@ export interface ServerCloudEnv {
   cloudinaryUploadPreset: string;
   groqApiKey: string;
   groqModel: string;
+  elevenLabsApiKey: string;
+  elevenLabsVoiceId: string;
+  elevenLabsModelId: string;
+  elevenLabsCustomLlmSecret: string;
 }
 
 export function getServerCloudEnv(): ServerCloudEnv {
@@ -68,6 +72,23 @@ export function getServerCloudEnv(): ServerCloudEnv {
       process.env.GROQ_MODEL ||
       process.env.VITE_GROQ_MODEL ||
       'qwen/qwen3.8-27b'
+    ).trim(),
+    elevenLabsApiKey: (
+      process.env.ELEVENLABS_API_KEY ||
+      process.env.XI_API_KEY ||
+      ''
+    ).trim(),
+    elevenLabsVoiceId: (
+      process.env.ELEVENLABS_VOICE_ID ||
+      'JBFqnCBsd6RMkjVDRZzb'
+    ).trim(),
+    elevenLabsModelId: (
+      process.env.ELEVENLABS_MODEL_ID ||
+      'eleven_flash_v2_5'
+    ).trim(),
+    elevenLabsCustomLlmSecret: (
+      process.env.ELEVENLABS_CUSTOM_LLM_SECRET ||
+      ''
     ).trim()
   };
 }
@@ -169,6 +190,10 @@ export async function ensureServerNeonSchema(): Promise<boolean> {
         icon TEXT DEFAULT '📄',
         cover TEXT DEFAULT '',
         is_favorite BOOLEAN DEFAULT FALSE,
+        kanban_status TEXT DEFAULT 'todo',
+        due_date TEXT DEFAULT '',
+        due_time TEXT DEFAULT '',
+        google_event_id TEXT DEFAULT '',
         blocks JSONB NOT NULL DEFAULT '[]'::jsonb,
         share_settings JSONB NOT NULL DEFAULT '{"isPublicLink":false,"publicRole":"view","collaborators":[]}'::jsonb,
         comments JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -191,6 +216,18 @@ export async function ensureServerNeonSchema(): Promise<boolean> {
     `);
     await executeServerNeonQuery(`
       ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS comments JSONB NOT NULL DEFAULT '[]'::jsonb;
+    `);
+    await executeServerNeonQuery(`
+      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS kanban_status TEXT DEFAULT 'todo';
+    `);
+    await executeServerNeonQuery(`
+      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS due_date TEXT DEFAULT '';
+    `);
+    await executeServerNeonQuery(`
+      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS due_time TEXT DEFAULT '';
+    `);
+    await executeServerNeonQuery(`
+      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS google_event_id TEXT DEFAULT '';
     `);
     await executeServerNeonQuery(`
       CREATE INDEX IF NOT EXISTS idx_miu_notes_user_id ON miu_notes(user_id);
@@ -230,6 +267,10 @@ interface NeonNoteRow {
   icon: string | null;
   cover: string | null;
   is_favorite: boolean | null;
+  kanban_status?: string | null;
+  due_date?: string | null;
+  due_time?: string | null;
+  google_event_id?: string | null;
   blocks: unknown;
   share_settings: unknown;
   comments: unknown;
@@ -283,6 +324,13 @@ function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
     icon: r.icon || '📄',
     cover: r.cover || '',
     isFavorite: Boolean(r.is_favorite),
+    kanbanStatus:
+      r.kanban_status === 'in_progress' || r.kanban_status === 'done'
+        ? r.kanban_status
+        : 'todo',
+    dueDate: r.due_date || '',
+    dueTime: r.due_time || '',
+    googleEventId: r.google_event_id || '',
     blocks: Array.isArray(r.blocks)
       ? (r.blocks as NoteRecord['blocks'])
       : typeof r.blocks === 'string'
@@ -394,7 +442,7 @@ export async function fetchServerNotes(
   const { rows } = await executeServerNeonQuery<NeonNoteRow>(
     `WITH RECURSIVE accessible_notes AS (
        SELECT id, user_id, owner_email, owner_name, parent_id, semester_id, course_id,
-              title, icon, cover, is_favorite, blocks, share_settings, comments, created_at, updated_at
+              title, icon, cover, is_favorite, kanban_status, due_date, due_time, google_event_id, blocks, share_settings, comments, created_at, updated_at
        FROM miu_notes
        WHERE user_id = $1
           OR (
@@ -405,7 +453,7 @@ export async function fetchServerNotes(
           )
        UNION
        SELECT child.id, child.user_id, child.owner_email, child.owner_name, child.parent_id, child.semester_id, child.course_id,
-              child.title, child.icon, child.cover, child.is_favorite, child.blocks, child.share_settings, child.comments, child.created_at, child.updated_at
+              child.title, child.icon, child.cover, child.is_favorite, child.kanban_status, child.due_date, child.due_time, child.google_event_id, child.blocks, child.share_settings, child.comments, child.created_at, child.updated_at
        FROM miu_notes child
        INNER JOIN accessible_notes parent ON child.parent_id = parent.id
      )
@@ -433,12 +481,12 @@ export async function fetchServerSharedNote(
   const { rows } = await executeServerNeonQuery<NeonNoteRow>(
     `WITH RECURSIVE descendants AS (
        SELECT id, user_id, owner_email, owner_name, parent_id, semester_id, course_id,
-              title, icon, cover, is_favorite, blocks, share_settings, comments, created_at, updated_at
+              title, icon, cover, is_favorite, kanban_status, due_date, due_time, google_event_id, blocks, share_settings, comments, created_at, updated_at
        FROM miu_notes
        WHERE id = $1
        UNION
        SELECT child.id, child.user_id, child.owner_email, child.owner_name, child.parent_id, child.semester_id, child.course_id,
-              child.title, child.icon, child.cover, child.is_favorite, child.blocks, child.share_settings, child.comments, child.created_at, child.updated_at
+              child.title, child.icon, child.cover, child.is_favorite, child.kanban_status, child.due_date, child.due_time, child.google_event_id, child.blocks, child.share_settings, child.comments, child.created_at, child.updated_at
        FROM miu_notes child
        INNER JOIN descendants parent ON child.parent_id = parent.id
      )
@@ -491,15 +539,19 @@ export async function saveServerNote(
   await executeServerNeonQuery(
     `INSERT INTO miu_notes (
        id, user_id, owner_email, owner_name, parent_id, semester_id, course_id,
-       title, icon, cover, is_favorite, blocks, share_settings, comments, created_at, updated_at
+       title, icon, cover, is_favorite, kanban_status, due_date, due_time, google_event_id, blocks, share_settings, comments, created_at, updated_at
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17::jsonb, $18::jsonb, $19, $20)
      ON CONFLICT (id) DO UPDATE SET
        parent_id = EXCLUDED.parent_id,
        title = EXCLUDED.title,
        icon = EXCLUDED.icon,
        cover = EXCLUDED.cover,
        is_favorite = EXCLUDED.is_favorite,
+       kanban_status = EXCLUDED.kanban_status,
+       due_date = EXCLUDED.due_date,
+       due_time = EXCLUDED.due_time,
+       google_event_id = EXCLUDED.google_event_id,
        blocks = EXCLUDED.blocks,
        share_settings = EXCLUDED.share_settings,
        comments = EXCLUDED.comments,
@@ -516,6 +568,10 @@ export async function saveServerNote(
       note.icon || '📄',
       note.cover || '',
       Boolean(note.isFavorite),
+      note.kanbanStatus || 'todo',
+      note.dueDate || '',
+      note.dueTime || '',
+      note.googleEventId || '',
       JSON.stringify(note.blocks || []),
       JSON.stringify(nextShareSettings),
       JSON.stringify(note.comments || []),

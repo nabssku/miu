@@ -15,7 +15,10 @@ export async function GET() {
     mediaReady: isServerCloudinaryConfigured(),
     aiReady: Boolean(env.groqApiKey),
     aiModel: env.groqModel,
-    googleClientId: env.googleClientId
+    googleClientId: env.googleClientId,
+    elevenlabsReady: Boolean(env.elevenLabsApiKey),
+    elevenlabsVoiceId: env.elevenLabsVoiceId,
+    elevenlabsModelId: env.elevenLabsModelId
   });
 }
 

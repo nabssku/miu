@@ -6,15 +6,19 @@ import katex from 'katex';
 import {
   ArrowDown,
   ArrowUp,
+  Calendar,
+  CalendarDays,
   Check,
   CheckSquare,
   ChevronDown,
   ChevronRight,
   Cloud,
   Code2,
+  Columns3,
   Copy,
   Database,
   Download,
+  ExternalLink,
   Eye,
   FilePlus2,
   FileText,
@@ -46,7 +50,8 @@ import {
   Star,
   Trash2,
   Type,
-  UploadCloud
+  UploadCloud,
+  Video
 } from 'lucide-react';
 import { db } from '../../db/database';
 import { useMiu } from '../../context/MiuContext';
@@ -63,14 +68,23 @@ import type {
   BlockType,
   NoteBlock,
   NoteComment,
+  NoteKanbanStatus,
   NoteRecord,
   NoteShareSettings,
   SharePermission
 } from '../../types/miu';
 import { parseMarkdownToNotionBlocks, renderInlineMarkdown } from '../../utils/markdown';
 import { PdfDocumentPreview, processAndUploadPdf } from '../../utils/pdfHelper';
+import { parseVideoEmbedUrl } from '../../utils/videoHelper';
+import { formatLocalYYYYMMDD } from '../../services/googleCalendarService';
+import { CalendarBoardView } from './CalendarBoardView';
 import { NotesAuthModal } from './NotesAuthModal';
 import { ShareNoteModal } from './ShareNoteModal';
+import {
+  KANBAN_COLUMNS,
+  KanbanBoardView,
+  renderKanbanStatusIcon
+} from './KanbanBoardView';
 
 const PAGE_ICONS = [
   '📄', '📝', '📘', '💡', '⚡', '🧠', '🎓', '🧪',
@@ -98,10 +112,18 @@ const SLASH_OPTIONS: Array<{
   { type: 'h2', label: 'Heading 2', shortcut: '##', desc: 'Judul bagian sedang', Icon: Heading2 },
   { type: 'h3', label: 'Heading 3', shortcut: '###', desc: 'Judul bagian kecil', Icon: Heading3 },
   { type: 'todo', label: 'To-do List', shortcut: '[]', desc: 'Checklist tugas', Icon: CheckSquare },
+  {
+    type: 'deadline',
+    label: 'Deadline Tugas',
+    shortcut: 'deadline',
+    desc: 'Blok deadline tugas yang otomatis masuk ke Kalender',
+    Icon: CalendarDays
+  },
   { type: 'bullet', label: 'Bulleted List', shortcut: '-', desc: 'Daftar poin bullet', Icon: List },
   { type: 'numbered', label: 'Numbered List', shortcut: '1.', desc: 'Daftar poin bernomor', Icon: ListOrdered },
   { type: 'toggle', label: 'Toggle List', shortcut: '>', desc: 'Lipatan materi buka-tutup', Icon: ChevronRight },
   { type: 'image', label: 'Gambar', shortcut: 'img', desc: 'Unggah gambar ke Cloud Catatan', Icon: ImageIcon },
+  { type: 'video', label: 'Video / YouTube', shortcut: 'yt', desc: 'Sematkan YouTube atau URL video (.mp4)', Icon: Video },
   { type: 'pdf', label: 'Dokumen PDF', shortcut: 'pdf', desc: 'Unggah file PDF & ekstrak teks untuk AI', Icon: FileText },
   { type: 'subpage', label: 'Subhalaman Baru', shortcut: 'sub', desc: 'Buat subhalaman di dalam halaman ini', Icon: FilePlus2 },
   { type: 'callout', label: 'Callout', shortcut: '!', desc: 'Kotak sorotan penting', Icon: Lightbulb },
@@ -154,6 +176,7 @@ export const BlockEditor: React.FC = () => {
   const activeNote = queriedNote || allNotes[0];
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [mainViewMode, setMainViewMode] = useState<'document' | 'kanban' | 'calendar'>('document');
   const [searchQuery, setSearchQuery] = useState('');
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [showCoverPicker, setShowCoverPicker] = useState(false);
@@ -176,6 +199,8 @@ export const BlockEditor: React.FC = () => {
   const [menuBlockId, setMenuBlockId] = useState<string | null>(null);
   const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
   const [editingMathId, setEditingMathId] = useState<string | null>(null);
+  const [editingVideoId, setEditingVideoId] = useState<string | null>(null);
+  const [videoUrlDrafts, setVideoUrlDrafts] = useState<Record<string, string>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [pendingFocusBlockId, setPendingFocusBlockId] = useState<string | null>(null);
   const [isSelectMode, setIsSelectMode] = useState(false);
@@ -192,6 +217,11 @@ export const BlockEditor: React.FC = () => {
 
   const blockRefs = useRef<Record<string, HTMLInputElement | HTMLTextAreaElement | null>>({});
   const neonDebounceRef = useRef<number | null>(null);
+
+  const openDocumentNote = (noteId: string) => {
+    setActiveNoteId(noteId);
+    setMainViewMode('document');
+  };
 
   // Clear block selection when switching notes
   useEffect(() => {
@@ -252,18 +282,15 @@ export const BlockEditor: React.FC = () => {
     );
   }, [myNotes, allNotes, searchQuery]);
 
-  // Effective permission role for active note (inherits from ancestor shared page if subpage)
-  const effectiveRole: 'owner' | SharePermission = useMemo(() => {
-    if (!activeNote) return 'owner';
-    if (currentUser && (!activeNote.ownerId || activeNote.ownerId === currentUser.id)) {
+  // Effective permission role helper for any note (inherits from ancestor shared page if subpage)
+  const resolveNotePermission = (targetNote: NoteRecord): 'owner' | SharePermission => {
+    if (currentUser && (!targetNote.ownerId || targetNote.ownerId === currentUser.id)) {
       return 'owner';
     }
-    if (!currentUser && !activeNote.ownerId) {
+    if (!currentUser && !targetNote.ownerId) {
       return 'owner';
     }
-
-    // Walk from activeNote up to root ancestor to resolve collaborator/public share permission
-    let curr: NoteRecord | undefined = activeNote;
+    let curr: NoteRecord | undefined = targetNote;
     const visited = new Set<string>();
     while (curr && !visited.has(curr.id)) {
       visited.add(curr.id);
@@ -279,6 +306,12 @@ export const BlockEditor: React.FC = () => {
       curr = curr.parentId ? allNotes.find((n) => n.id === curr?.parentId) : undefined;
     }
     return 'view';
+  };
+
+  // Effective permission role for active note (inherits from ancestor shared page if subpage)
+  const effectiveRole: 'owner' | SharePermission = useMemo(() => {
+    if (!activeNote) return 'owner';
+    return resolveNotePermission(activeNote);
   }, [activeNote, allNotes, currentUser]);
 
   const isOwner = effectiveRole === 'owner';
@@ -408,7 +441,9 @@ export const BlockEditor: React.FC = () => {
   // Create a clean blank Notion page (root or nested subpage) & sync to Neon
   const handleCreateNote = async (
     parentId: string | null = null,
-    switchToNew = true
+    switchToNew = true,
+    kanbanStatus: NoteKanbanStatus = 'todo',
+    dueDate = ''
   ): Promise<string | null> => {
     if (!parentId && !currentUser) return null;
     if (parentId && !canEdit) return null;
@@ -427,16 +462,27 @@ export const BlockEditor: React.FC = () => {
       semesterId: activeSemesterId || 'sem-1',
       courseId: activeCourseId || 'course-default',
       title: '',
-      icon: parentId ? '📑' : '📄',
+      icon: parentId ? '📑' : dueDate ? '📅' : '📄',
       isFavorite: false,
+      kanbanStatus,
+      dueDate: '',
+      dueTime: '',
       createdAt: now,
       updatedAt: now,
       blocks: [
-        {
-          id: firstBlockId,
-          type: 'text',
-          content: ''
-        }
+        dueDate
+          ? {
+              id: firstBlockId,
+              type: 'deadline',
+              content: '',
+              checked: false,
+              dueDate
+            }
+          : {
+              id: firstBlockId,
+              type: 'text',
+              content: ''
+            }
       ]
     };
 
@@ -467,6 +513,7 @@ export const BlockEditor: React.FC = () => {
 
     if (switchToNew) {
       setActiveNoteId(newId);
+      setMainViewMode('document');
     }
     setSlashState(null);
     setMenuBlockId(null);
@@ -725,8 +772,14 @@ export const BlockEditor: React.FC = () => {
       return {
         ...b,
         type,
-        content: type === 'image' || type === 'pdf' ? '' : cleanContent,
+        content: type === 'image' || type === 'pdf' || type === 'video' ? '' : cleanContent,
         ...(type === 'todo' ? { checked: Boolean(b.checked) } : {}),
+        ...(type === 'deadline'
+          ? {
+              checked: Boolean(b.checked),
+              dueDate: b.dueDate || formatLocalYYYYMMDD(new Date())
+            }
+          : {}),
         ...(type === 'callout' ? { calloutIcon: b.calloutIcon || '💡' } : {}),
         ...(type === 'code' ? { language: b.language || 'javascript' } : {}),
         ...(type === 'toggle' ? { toggleOpen: true, toggleBody: b.toggleBody || '' } : {})
@@ -734,7 +787,9 @@ export const BlockEditor: React.FC = () => {
     });
 
     await updateNoteBlocks(next);
-    if (type !== 'image' && type !== 'pdf') {
+    if (type === 'video') {
+      setEditingVideoId(blockId);
+    } else if (type !== 'image' && type !== 'pdf') {
       setPendingFocusBlockId(blockId);
     }
   };
@@ -747,6 +802,9 @@ export const BlockEditor: React.FC = () => {
       type,
       content: '',
       ...(type === 'todo' ? { checked: false } : {}),
+      ...(type === 'deadline'
+        ? { checked: false, dueDate: formatLocalYYYYMMDD(new Date()) }
+        : {}),
       ...(type === 'callout' ? { calloutIcon: '💡' } : {}),
       ...(type === 'code' ? { language: 'javascript' } : {}),
       ...(type === 'toggle' ? { toggleOpen: true, toggleBody: '' } : {})
@@ -897,7 +955,7 @@ export const BlockEditor: React.FC = () => {
       e.preventDefault();
       if (
         !block.content.trim() &&
-        ['bullet', 'numbered', 'todo', 'quote'].includes(block.type)
+        ['bullet', 'numbered', 'todo', 'deadline', 'quote'].includes(block.type)
       ) {
         void handleBlockChange(block.id, { type: 'text' });
         return;
@@ -928,8 +986,12 @@ export const BlockEditor: React.FC = () => {
       else if (b.type === 'h3') mdLines.push(`### ${b.content}\n`);
       else if (b.type === 'bullet') mdLines.push(`- ${b.content}`);
       else if (b.type === 'numbered') mdLines.push(`1. ${b.content}`);
-      else if (b.type === 'todo') mdLines.push(`- [${b.checked ? 'x' : ' '}] ${b.content}`);
-      else if (b.type === 'toggle')
+      else if (b.type === 'todo') {
+        mdLines.push(`- [${b.checked ? 'x' : ' '}] ${b.content}`);
+      } else if (b.type === 'deadline') {
+        const dStr = b.dueDate ? ` (Deadline: ${b.dueDate}${b.dueTime ? ` ${b.dueTime}` : ''})` : '';
+        mdLines.push(`- [${b.checked ? 'x' : ' '}] ${b.content}${dStr}`);
+      } else if (b.type === 'toggle')
         mdLines.push(`<details><summary>${b.content}</summary>\n\n${b.toggleBody || ''}\n</details>\n`);
       else if (b.type === 'callout') mdLines.push(`> ${b.calloutIcon || '💡'} ${b.content}\n`);
       else if (b.type === 'quote') mdLines.push(`> ${b.content}\n`);
@@ -937,6 +999,7 @@ export const BlockEditor: React.FC = () => {
       else if (b.type === 'code') mdLines.push(`\`\`\`${b.language || ''}\n${b.content}\n\`\`\`\n`);
       else if (b.type === 'math') mdLines.push(`$$\n${b.content}\n$$\n`);
       else if (b.type === 'image') mdLines.push(`![${b.caption || 'Image'}](${b.content})\n`);
+      else if (b.type === 'video') mdLines.push(`[${b.caption || 'Video'}](${b.content})\n`);
       else mdLines.push(`${b.content}\n`);
     }
     const blob = new Blob([mdLines.join('\n')], { type: 'text/markdown;charset=utf-8' });
@@ -997,6 +1060,76 @@ export const BlockEditor: React.FC = () => {
     await db.notes.update(sourceId, { parentId: targetParentId, updatedAt });
     scheduleNeonSave({ ...sourceNote, parentId: targetParentId, updatedAt });
   };
+
+  // Move a note between Kanban columns in the sidebar
+  const handleMoveNoteKanbanStatus = async (
+    noteId: string,
+    targetStatus: NoteKanbanStatus
+  ) => {
+    const targetNote = allNotes.find((n) => n.id === noteId);
+    if (!targetNote) return;
+    const perm = resolveNotePermission(targetNote);
+    if (perm !== 'owner' && perm !== 'edit') return;
+    if ((targetNote.kanbanStatus || 'todo') === targetStatus) return;
+
+    const updatedAt = Date.now();
+    await db.notes.update(noteId, { kanbanStatus: targetStatus, updatedAt });
+    scheduleNeonSave({ ...targetNote, kanbanStatus: targetStatus, updatedAt });
+  };
+
+  const handleToggleTodoDeadlineFromCalendar = async (
+    noteId: string,
+    blockId: string,
+    nextChecked: boolean
+  ) => {
+    const targetNote = allNotes.find((n) => n.id === noteId);
+    if (!targetNote) return;
+    const perm = resolveNotePermission(targetNote);
+    if (perm !== 'owner' && perm !== 'edit') return;
+
+    const updatedAt = Date.now();
+    const nextBlocks = targetNote.blocks.map((b) =>
+      b.id === blockId ? { ...b, checked: nextChecked } : b
+    );
+    await db.notes.update(noteId, { blocks: nextBlocks, updatedAt });
+    scheduleNeonSave({ ...targetNote, blocks: nextBlocks, updatedAt });
+  };
+
+  const handleSaveGoogleSyncIdFromCalendar = async ({
+    noteId,
+    blockId,
+    googleEventId
+  }: {
+    noteId: string;
+    blockId?: string;
+    googleEventId: string;
+  }) => {
+    const targetNote = await db.notes.get(noteId);
+    if (!targetNote) return;
+    const updatedAt = Date.now();
+
+    if (blockId) {
+      const nextBlocks = targetNote.blocks.map((b) =>
+        b.id === blockId ? { ...b, googleEventId } : b
+      );
+      await db.notes.update(noteId, { blocks: nextBlocks, updatedAt });
+      scheduleNeonSave({ ...targetNote, blocks: nextBlocks, updatedAt });
+    } else {
+      await db.notes.update(noteId, { googleEventId, updatedAt });
+      scheduleNeonSave({ ...targetNote, googleEventId, updatedAt });
+    }
+  };
+
+  const scheduledDeadlineCount = useMemo(() => {
+    let count = 0;
+    for (const n of [...myNotes, ...sharedWithMeNotes]) {
+      if (n.dueDate) count += 1;
+      for (const b of n.blocks || []) {
+        if (b.dueDate) count += 1;
+      }
+    }
+    return count;
+  }, [myNotes, sharedWithMeNotes]);
 
   // Insert one or more blocks at a specific drop position (or at end of active note)
   const insertBlocksAtDropPoint = async (
@@ -1213,12 +1346,12 @@ export const BlockEditor: React.FC = () => {
               e.stopPropagation();
               void handleMoveNoteParent(sourceId, note.id);
             }}
-            onClick={() => setActiveNoteId(note.id)}
+            onClick={() => openDocumentNote(note.id)}
             style={{ paddingLeft: `${8 + depth * 14}px` }}
             className={`group flex items-center justify-between gap-1 pr-1.5 py-1.5 rounded-lg text-xs cursor-pointer transition ${
               isPageDropTarget
                 ? 'bg-accent-strong/15 ring-1 ring-accent-strong text-text-primary'
-                : isSelected
+                : isSelected && mainViewMode === 'document'
                   ? 'bg-surface font-semibold text-text-primary shadow-sm'
                   : 'text-text-secondary hover:bg-surface/60 hover:text-text-primary'
             } ${draggedNoteId === note.id ? 'opacity-50' : ''}`}
@@ -1408,15 +1541,55 @@ export const BlockEditor: React.FC = () => {
                 />
               </div>
 
-              {/* New Page Button */}
-              <button
-                type="button"
-                onClick={() => void handleCreateNote()}
-                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-surface text-xs font-medium text-text-secondary hover:text-text-primary transition"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Halaman baru</span>
-              </button>
+              {/* New Page Button & Regular Kanban + Calendar Sidebar Menu Items */}
+              <div className="space-y-0.5">
+                <button
+                  type="button"
+                  onClick={() => void handleCreateNote()}
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-surface text-xs font-medium text-text-secondary hover:text-text-primary transition"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Halaman baru</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setMainViewMode('kanban')}
+                  className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-xs transition ${
+                    mainViewMode === 'kanban'
+                      ? 'bg-surface font-semibold text-text-primary shadow-sm'
+                      : 'font-medium text-text-secondary hover:bg-surface/60 hover:text-text-primary'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-2 min-w-0">
+                    <Columns3 className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">Kanban</span>
+                  </span>
+                  <span className="text-[10px] font-mono text-text-secondary/80 shrink-0">
+                    {myNotes.length + sharedWithMeNotes.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setMainViewMode('calendar')}
+                  className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-xs transition ${
+                    mainViewMode === 'calendar'
+                      ? 'bg-surface font-semibold text-text-primary shadow-sm'
+                      : 'font-medium text-text-secondary hover:bg-surface/60 hover:text-text-primary'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-2 min-w-0">
+                    <Calendar className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">Kalender</span>
+                  </span>
+                  {scheduledDeadlineCount > 0 && (
+                    <span className="text-[10px] font-mono text-text-secondary/80 shrink-0">
+                      {scheduledDeadlineCount}
+                    </span>
+                  )}
+                </button>
+              </div>
 
               {/* Favorites */}
               {favoriteNotes.length > 0 && !searchQuery && (
@@ -1428,9 +1601,9 @@ export const BlockEditor: React.FC = () => {
                     <button
                       key={`fav-${note.id}`}
                       type="button"
-                      onClick={() => setActiveNoteId(note.id)}
+                      onClick={() => openDocumentNote(note.id)}
                       className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-left transition ${
-                        note.id === activeNoteId
+                        note.id === activeNoteId && mainViewMode === 'document'
                           ? 'bg-surface font-semibold text-text-primary shadow-sm'
                           : 'text-text-secondary hover:bg-surface/60 hover:text-text-primary'
                       }`}
@@ -1489,11 +1662,11 @@ export const BlockEditor: React.FC = () => {
 
                 {searchQuery.trim() ? (
                   visibleNotes.map((note) => {
-                    const isSelected = note.id === activeNoteId;
+                    const isSelected = note.id === activeNoteId && mainViewMode === 'document';
                     return (
                       <div
                         key={note.id}
-                        onClick={() => setActiveNoteId(note.id)}
+                        onClick={() => openDocumentNote(note.id)}
                         className={`group flex items-center justify-between gap-1 px-2 py-1.5 rounded-lg text-xs cursor-pointer transition ${
                           isSelected
                             ? 'bg-surface font-semibold text-text-primary shadow-sm'
@@ -1570,49 +1743,65 @@ export const BlockEditor: React.FC = () => {
                 </button>
               )}
 
-              {/* Breadcrumbs Navigation across Subpages */}
-              <div className="flex items-center gap-1 min-w-0">
-                {breadcrumbPath.map((crumb, idx) => {
-                  const isLast = idx === breadcrumbPath.length - 1;
-                  return (
-                    <React.Fragment key={crumb.id}>
-                      {idx > 0 && <span className="text-text-secondary/50 select-none">/</span>}
-                      <button
-                        type="button"
-                        onClick={() => setActiveNoteId(crumb.id)}
-                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md truncate max-w-[160px] transition ${
-                          isLast
-                            ? 'font-semibold text-text-primary'
-                            : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
-                        }`}
-                      >
-                        <span className="shrink-0">{crumb.icon || '📄'}</span>
-                        <span className="truncate">{crumb.title || 'Tanpa Judul'}</span>
-                      </button>
-                    </React.Fragment>
-                  );
-                })}
-              </div>
+              {/* Breadcrumbs Navigation across Subpages vs Kanban / Calendar Title */}
+              {mainViewMode === 'kanban' ? (
+                <div className="inline-flex items-center gap-1.5 font-semibold text-text-primary px-1.5 py-0.5">
+                  <Columns3 className="w-3.5 h-3.5 text-accent-strong" />
+                  <span>Papan Kanban</span>
+                </div>
+              ) : mainViewMode === 'calendar' ? (
+                <div className="inline-flex items-center gap-1.5 font-semibold text-text-primary px-1.5 py-0.5">
+                  <Calendar className="w-3.5 h-3.5 text-accent-strong" />
+                  <span>Kalender &amp; Deadline</span>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-1 min-w-0">
+                    {breadcrumbPath.map((crumb, idx) => {
+                      const isLast = idx === breadcrumbPath.length - 1;
+                      return (
+                        <React.Fragment key={crumb.id}>
+                          {idx > 0 && (
+                            <span className="text-text-secondary/50 select-none">/</span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => openDocumentNote(crumb.id)}
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md truncate max-w-[160px] transition ${
+                              isLast
+                                ? 'font-semibold text-text-primary'
+                                : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
+                            }`}
+                          >
+                            <span className="shrink-0">{crumb.icon || '📄'}</span>
+                            <span className="truncate">{crumb.title || 'Tanpa Judul'}</span>
+                          </button>
+                        </React.Fragment>
+                      );
+                    })}
+                  </div>
 
-              {!isOwner && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-500/15 text-sky-600 dark:text-sky-300 shrink-0">
-                  {effectiveRole === 'edit' ? (
-                    <>
-                      <Pencil className="w-2.5 h-2.5" />
-                      <span>Bisa Edit</span>
-                    </>
-                  ) : effectiveRole === 'comment' ? (
-                    <>
-                      <MessageSquare className="w-2.5 h-2.5" />
-                      <span>Komentar</span>
-                    </>
-                  ) : (
-                    <>
-                      <Eye className="w-2.5 h-2.5" />
-                      <span>Hanya Lihat</span>
-                    </>
+                  {!isOwner && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-500/15 text-sky-600 dark:text-sky-300 shrink-0">
+                      {effectiveRole === 'edit' ? (
+                        <>
+                          <Pencil className="w-2.5 h-2.5" />
+                          <span>Bisa Edit</span>
+                        </>
+                      ) : effectiveRole === 'comment' ? (
+                        <>
+                          <MessageSquare className="w-2.5 h-2.5" />
+                          <span>Komentar</span>
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="w-2.5 h-2.5" />
+                          <span>Hanya Lihat</span>
+                        </>
+                      )}
+                    </span>
                   )}
-                </span>
+                </>
               )}
             </div>
 
@@ -1638,8 +1827,8 @@ export const BlockEditor: React.FC = () => {
                 </span>
               </button>
 
-              {/* Share & Access Control Button */}
-              {activeNote && (
+              {/* Share & Access Control Button (Document mode) */}
+              {mainViewMode === 'document' && activeNote && (
                 <button
                   type="button"
                   onClick={() => setShowShareModal(true)}
@@ -1661,7 +1850,7 @@ export const BlockEditor: React.FC = () => {
               )}
 
               {/* Comments Toggle */}
-              {activeNote && (
+              {mainViewMode === 'document' && activeNote && (
                 <button
                   type="button"
                   onClick={() => setShowCommentsPanel((v) => !v)}
@@ -1681,7 +1870,30 @@ export const BlockEditor: React.FC = () => {
                 </button>
               )}
 
-              {activeNote && canEdit && (
+              {/* Active Note Kanban Status Selector */}
+              {mainViewMode === 'document' && activeNote && canEdit && (
+                <div className="hidden md:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-lg bg-subtle/70 border border-border-subtle">
+                  {renderKanbanStatusIcon(activeNote.kanbanStatus || 'todo', 'w-3 h-3')}
+                  <select
+                    value={activeNote.kanbanStatus || 'todo'}
+                    onChange={(e) =>
+                      void updateNote({
+                        kanbanStatus: e.target.value as NoteKanbanStatus
+                      })
+                    }
+                    aria-label="Status Kanban Catatan"
+                    className="bg-transparent text-[11px] font-medium text-text-primary focus:outline-none cursor-pointer pr-1"
+                  >
+                    {KANBAN_COLUMNS.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {mainViewMode === 'document' && activeNote && canEdit && (
                 <button
                   type="button"
                   onClick={() => void updateNote({ isFavorite: !activeNote.isFavorite })}
@@ -1696,7 +1908,7 @@ export const BlockEditor: React.FC = () => {
                 </button>
               )}
 
-              {canEdit && (
+              {mainViewMode === 'document' && canEdit && (
                 <button
                   type="button"
                   onClick={() => {
@@ -1722,23 +1934,27 @@ export const BlockEditor: React.FC = () => {
                 </button>
               )}
 
-              <button
-                type="button"
-                onClick={handleExportMarkdown}
-                className="p-1.5 rounded-lg text-text-secondary hover:bg-subtle hover:text-text-primary transition"
-                title="Ekspor Markdown (.md)"
-              >
-                <Download className="w-4 h-4" />
-              </button>
+              {mainViewMode === 'document' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleExportMarkdown}
+                    className="p-1.5 rounded-lg text-text-secondary hover:bg-subtle hover:text-text-primary transition"
+                    title="Ekspor Markdown (.md)"
+                  >
+                    <Download className="w-4 h-4" />
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => window.print()}
-                className="p-1.5 rounded-lg text-text-secondary hover:bg-subtle hover:text-text-primary transition"
-                title="Cetak PDF"
-              >
-                <Printer className="w-4 h-4" />
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="p-1.5 rounded-lg text-text-secondary hover:bg-subtle hover:text-text-primary transition"
+                    title="Cetak PDF"
+                  >
+                    <Printer className="w-4 h-4" />
+                  </button>
+                </>
+              )}
 
               <button
                 type="button"
@@ -1756,7 +1972,61 @@ export const BlockEditor: React.FC = () => {
             </div>
           </header>
 
-          {activeNote ? (
+          {mainViewMode === 'kanban' ? (
+            <KanbanBoardView
+              notes={
+                searchQuery.trim()
+                  ? visibleNotes
+                  : [...myNotes, ...sharedWithMeNotes]
+              }
+              allNotes={allNotes}
+              activeNoteId={activeNoteId}
+              canCreateRoot={Boolean(currentUser)}
+              canMoveNote={(n) => {
+                const perm = resolveNotePermission(n);
+                return perm === 'owner' || perm === 'edit';
+              }}
+              isOwnerNote={(n) =>
+                !n.ownerId || Boolean(currentUser && n.ownerId === currentUser.id)
+              }
+              onOpenNote={(id) => openDocumentNote(id)}
+              onCreateNoteInStatus={(status) => void handleCreateNote(null, true, status)}
+              onMoveNoteStatus={(id, status) =>
+                void handleMoveNoteKanbanStatus(id, status)
+              }
+              onDuplicateNote={(n, e) => void handleDuplicateNote(n, e)}
+              onDeleteNote={(n, e) => void handleDeleteNote(n, e)}
+              onToggleFavorite={(n, e) => {
+                e.stopPropagation();
+                const perm = resolveNotePermission(n);
+                if (perm !== 'owner' && perm !== 'edit') return;
+                const updatedAt = Date.now();
+                void db.notes.update(n.id, { isFavorite: !n.isFavorite, updatedAt });
+                scheduleNeonSave({ ...n, isFavorite: !n.isFavorite, updatedAt });
+              }}
+            />
+          ) : mainViewMode === 'calendar' ? (
+            <CalendarBoardView
+              notes={
+                searchQuery.trim()
+                  ? visibleNotes
+                  : [...myNotes, ...sharedWithMeNotes]
+              }
+              canCreateRoot={Boolean(currentUser)}
+              canEditNote={(n) => {
+                const perm = resolveNotePermission(n);
+                return perm === 'owner' || perm === 'edit';
+              }}
+              onOpenNote={(id) => openDocumentNote(id)}
+              onCreateNoteOnDate={(dueDate) =>
+                void handleCreateNote(null, true, 'todo', dueDate)
+              }
+              onToggleTodoDeadline={(noteId, blockId, nextChecked) =>
+                void handleToggleTodoDeadlineFromCalendar(noteId, blockId, nextChecked)
+              }
+              onSaveGoogleSyncId={(params) => handleSaveGoogleSyncIdFromCalendar(params)}
+            />
+          ) : activeNote ? (
             <div className="flex-1 flex flex-col">
               {/* Optional Cover Banner (supports Gradient or Cloudinary Image) */}
               {activeNote.cover && (
@@ -2172,6 +2442,10 @@ export const BlockEditor: React.FC = () => {
                                       pages: block.pdfPages || 1,
                                       url: block.content
                                     });
+                                  } else if (block.type === 'video') {
+                                    triggerInlineAIExplain(
+                                      `Video (${block.caption || 'Tautan Video'}): ${block.content}`
+                                    );
                                   } else {
                                     triggerInlineAIExplain(block.content);
                                   }
@@ -2463,7 +2737,7 @@ export const BlockEditor: React.FC = () => {
                                   }`}
                                 />
                               ) : (
-                                <div
+                                  <div
                                   onClick={() => {
                                     if (canEdit) setPendingFocusBlockId(block.id);
                                   }}
@@ -2478,6 +2752,106 @@ export const BlockEditor: React.FC = () => {
                                   {renderInlineMarkdown(block.content)}
                                 </div>
                               )}
+                            </div>
+                          )}
+
+                          {/* Slash Command Deadline Block (`/deadline` -> Auto-syncs to Calendar) */}
+                          {block.type === 'deadline' && (
+                            <div className="my-1 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                              <div className="flex items-start sm:items-center gap-2.5 flex-1 min-w-0">
+                                <button
+                                  type="button"
+                                  disabled={!canEdit}
+                                  onClick={() =>
+                                    void handleBlockChange(block.id, { checked: !block.checked })
+                                  }
+                                  className={`mt-0.5 sm:mt-0 w-4 h-4 rounded-[4px] border flex items-center justify-center shrink-0 transition ${
+                                    block.checked
+                                      ? 'bg-emerald-500 border-emerald-500 text-white'
+                                      : 'border-amber-600/60 dark:border-amber-300/60 bg-surface'
+                                  }`}
+                                >
+                                  {block.checked && <Check className="w-3 h-3 stroke-[3]" />}
+                                </button>
+
+                                {canEdit ? (
+                                  <input
+                                    ref={(el) => {
+                                      blockRefs.current[block.id] = el;
+                                    }}
+                                    type="text"
+                                    value={block.content}
+                                    onChange={(e) =>
+                                      void handleBlockChange(block.id, { content: e.target.value })
+                                    }
+                                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                                    placeholder="Ketik nama tugas / deadline..."
+                                    className={`flex-1 min-w-0 bg-transparent text-sm font-semibold focus:outline-none ${
+                                      block.checked
+                                        ? 'line-through text-text-secondary'
+                                        : 'text-text-primary'
+                                    }`}
+                                  />
+                                ) : (
+                                  <span
+                                    className={`flex-1 min-w-0 text-sm font-semibold ${
+                                      block.checked
+                                        ? 'line-through text-text-secondary'
+                                        : 'text-text-primary'
+                                    }`}
+                                  >
+                                    {block.content || 'Deadline tanpa judul'}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5 shrink-0 no-print">
+                                {canEdit ? (
+                                  <>
+                                    <div className="inline-flex items-center gap-1 rounded-lg bg-surface border border-border-subtle px-2 py-1">
+                                      <CalendarDays className="w-3.5 h-3.5 text-amber-500" />
+                                      <input
+                                        type="date"
+                                        value={block.dueDate || ''}
+                                        onChange={(e) =>
+                                          void handleBlockChange(block.id, {
+                                            dueDate: e.target.value
+                                          })
+                                        }
+                                        className="bg-transparent text-[11px] font-medium text-text-primary focus:outline-none"
+                                      />
+                                    </div>
+                                    <input
+                                      type="time"
+                                      value={block.dueTime || ''}
+                                      onChange={(e) =>
+                                        void handleBlockChange(block.id, {
+                                          dueTime: e.target.value
+                                        })
+                                      }
+                                      title="Jam deadline (opsional)"
+                                      className="rounded-lg bg-surface border border-border-subtle px-2 py-1 text-[11px] text-text-primary focus:outline-none"
+                                    />
+                                  </>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[11px] font-semibold text-text-primary">
+                                    <CalendarDays className="w-3.5 h-3.5 text-amber-500" />
+                                    <span>
+                                      {block.dueDate || 'Tanpa Tanggal'}
+                                      {block.dueTime ? ` · ${block.dueTime}` : ''}
+                                    </span>
+                                  </span>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => setMainViewMode('calendar')}
+                                  className="px-2 py-1 rounded-lg bg-surface hover:bg-subtle border border-border-subtle text-[10px] font-bold text-accent-strong transition"
+                                  title="Buka tampilan Kalender"
+                                >
+                                  Kalender →
+                                </button>
+                              </div>
                             </div>
                           )}
 
@@ -2822,6 +3196,183 @@ export const BlockEditor: React.FC = () => {
                               ) : null}
                             </div>
                           )}
+
+                          {/* Notion Embedded YouTube / Video URL Block */}
+                          {block.type === 'video' && (() => {
+                            const draftUrl = videoUrlDrafts[block.id] ?? block.content;
+                            const isEditingUrl =
+                              canEdit && (!block.content || editingVideoId === block.id);
+                            const parsedEmbed = parseVideoEmbedUrl(
+                              isEditingUrl ? draftUrl : block.content
+                            );
+
+                            return (
+                              <div className="my-1.5">
+                                {isEditingUrl ? (
+                                  <form
+                                    onSubmit={async (e) => {
+                                      e.preventDefault();
+                                      if (parsedEmbed.kind === 'invalid') return;
+                                      await handleBlockChange(block.id, {
+                                        content: parsedEmbed.originalUrl
+                                      });
+                                      setEditingVideoId(null);
+                                    }}
+                                    className="p-4 rounded-xl border border-dashed border-border-subtle bg-subtle/45 space-y-2.5"
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="inline-flex items-center gap-1.5 text-xs font-bold text-text-primary">
+                                        <Video className="w-4 h-4 text-rose-500" />
+                                        <span>Sematkan YouTube atau URL Video</span>
+                                      </span>
+                                      {draftUrl.trim() && (
+                                        <span
+                                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+                                            parsedEmbed.kind === 'invalid'
+                                              ? 'bg-rose-500/15 text-rose-500'
+                                              : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300'
+                                          }`}
+                                        >
+                                          {parsedEmbed.kind === 'invalid'
+                                            ? parsedEmbed.providerLabel
+                                            : `✓ ${parsedEmbed.providerLabel} terdeteksi`}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    <div className="flex flex-col sm:flex-row gap-2">
+                                      <input
+                                        type="text"
+                                        autoFocus={editingVideoId === block.id || !block.content}
+                                        value={draftUrl}
+                                        onChange={(e) =>
+                                          setVideoUrlDrafts((prev) => ({
+                                            ...prev,
+                                            [block.id]: e.target.value
+                                          }))
+                                        }
+                                        placeholder="Tempel link YouTube (youtube.com / youtu.be), Vimeo, Drive, atau .mp4..."
+                                        className="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
+                                      />
+                                      <div className="flex items-center gap-1.5 shrink-0">
+                                        <button
+                                          type="submit"
+                                          disabled={parsedEmbed.kind === 'invalid'}
+                                          className="px-3.5 py-1.5 rounded-lg bg-accent-strong text-white dark:text-slate-950 text-xs font-semibold hover:opacity-95 disabled:opacity-45 transition"
+                                        >
+                                          Sematkan
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setEditingVideoId(null);
+                                            if (!block.content) {
+                                              void handleBlockChange(block.id, {
+                                                type: 'text',
+                                                content: ''
+                                              });
+                                            } else {
+                                              setVideoUrlDrafts((prev) => ({
+                                                ...prev,
+                                                [block.id]: block.content
+                                              }));
+                                            }
+                                          }}
+                                          className="px-2.5 py-1.5 rounded-lg bg-surface border border-border-subtle text-xs text-text-secondary hover:text-text-primary transition"
+                                        >
+                                          Batal
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </form>
+                                ) : parsedEmbed.kind !== 'invalid' ? (
+                                  <figure className="bg-subtle/40 border border-border-subtle rounded-xl p-2.5 space-y-2 group/vid">
+                                    <div className="flex items-center justify-between gap-2 px-1">
+                                      <span className="inline-flex items-center gap-1.5 text-[10px] font-mono font-semibold text-text-secondary">
+                                        <Video className="w-3.5 h-3.5 text-rose-500" />
+                                        <span>{parsedEmbed.providerLabel}</span>
+                                      </span>
+
+                                      <div className="flex items-center gap-1.5">
+                                        <a
+                                          href={parsedEmbed.originalUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                                        >
+                                          <ExternalLink className="w-3 h-3" />
+                                          <span>Buka Link</span>
+                                        </a>
+                                        {canEdit && (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setVideoUrlDrafts((prev) => ({
+                                                ...prev,
+                                                [block.id]: block.content
+                                              }));
+                                              setEditingVideoId(block.id);
+                                            }}
+                                            className="px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                                          >
+                                            Ubah URL
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {parsedEmbed.kind === 'video' ? (
+                                      <video
+                                        src={parsedEmbed.embedUrl}
+                                        controls
+                                        playsInline
+                                        preload="metadata"
+                                        className="w-full max-h-[460px] rounded-lg bg-black"
+                                      />
+                                    ) : (
+                                      <div className="w-full aspect-video rounded-lg overflow-hidden bg-slate-950 border border-border-subtle">
+                                        <iframe
+                                          src={parsedEmbed.embedUrl}
+                                          title={block.caption || `${parsedEmbed.providerLabel} Video`}
+                                          className="w-full h-full border-0"
+                                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                          referrerPolicy="strict-origin-when-cross-origin"
+                                          allowFullScreen
+                                        />
+                                      </div>
+                                    )}
+
+                                    <input
+                                      readOnly={!canEdit}
+                                      value={block.caption || ''}
+                                      onChange={(e) =>
+                                        void handleBlockChange(block.id, { caption: e.target.value })
+                                      }
+                                      placeholder={
+                                        canEdit
+                                          ? 'Tambahkan keterangan atau catatan timestamp video...'
+                                          : ''
+                                      }
+                                      className="w-full text-center bg-transparent text-xs text-text-secondary focus:outline-none"
+                                    />
+                                  </figure>
+                                ) : (
+                                  <div className="p-3 rounded-xl border border-rose-400/30 bg-rose-500/10 text-xs text-rose-500 flex items-center justify-between gap-2">
+                                    <span>URL video tidak valid: {block.content}</span>
+                                    {canEdit && (
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingVideoId(block.id)}
+                                        className="px-2.5 py-1 rounded-md bg-surface text-text-primary font-semibold"
+                                      >
+                                        Perbaiki URL
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
 
                           {/* Notion PDF Document Block with Text Extraction & AI Reader */}
                           {block.type === 'pdf' && (() => {

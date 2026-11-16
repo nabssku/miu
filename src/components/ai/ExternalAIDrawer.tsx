@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   ArrowRightToLine,
+  AudioLines,
   BrainCircuit,
   Check,
   CheckCircle2,
@@ -18,7 +19,9 @@ import {
   ListTodo,
   Loader2,
   Maximize2,
+  MessageSquare,
   Minimize2,
+  RefreshCw,
   Send,
   Settings2,
   Sparkles,
@@ -27,17 +30,18 @@ import {
   X,
   Zap
 } from 'lucide-react';
+import { ConversationalVoicePanel } from './ConversationalVoicePanel';
 import { db } from '../../db/database';
 import { useMiu } from '../../context/MiuContext';
 import { syncCloudStatus, uploadImageToCloudinary } from '../../services/cloudServices';
 import {
+  buildLiveNoteContext,
   DEFAULT_BASE_URLS,
   DEFAULT_MODELS,
   loadAIConfig,
   loadDefaultGroqConfig,
   runExternalAIStream,
   saveAIConfig,
-  serializeBlocksForPrompt,
   type AIConfig
 } from '../../services/externalApis';
 import type { AIProviderId } from '../../types/miu';
@@ -81,6 +85,7 @@ export const ExternalAIDrawer: React.FC = () => {
   const activeNote = queriedNote || allNotes[0];
 
   const [aiTab, setAiTab] = useState<'groq' | 'custom'>('groq');
+  const [interactionMode, setInteractionMode] = useState<'text' | 'voice'>('text');
   const [defaultGroqConfig, setDefaultGroqConfig] = useState<AIConfig>(() => loadDefaultGroqConfig());
   const [customConfig, setCustomConfig] = useState<AIConfig>({
     provider: 'custom',
@@ -116,6 +121,14 @@ export const ExternalAIDrawer: React.FC = () => {
   const [todosAddedSuccess, setTodosAddedSuccess] = useState(false);
   const [flashcardFlipped, setFlashcardFlipped] = useState(false);
   const [showQuizCards, setShowQuizCards] = useState(false);
+  const [contextJustUpdated, setContextJustUpdated] = useState(false);
+
+  useEffect(() => {
+    if (!activeNote?.updatedAt) return;
+    setContextJustUpdated(true);
+    const t = window.setTimeout(() => setContextJustUpdated(false), 1400);
+    return () => window.clearTimeout(t);
+  }, [activeNote?.updatedAt, activeNote?.title, activeNote?.blocks]);
 
   // Per-note AI Conversation History + Multi-select to delete
   const [chatHistory, setChatHistory] = useState<
@@ -233,15 +246,14 @@ export const ExternalAIDrawer: React.FC = () => {
     setShowQuizCards(mode === 'quiz');
     setFlashcardFlipped(false);
 
-    const rawNoteContent = serializeBlocksForPrompt(
-      activeNote.title || 'Catatan',
-      activeNote.blocks
+    const liveContext = await buildLiveNoteContext(
+      activeNoteId || activeNote.id,
+      activeNote,
+      aiPdfAttachment,
+      24000
     );
-    const pdfContextStr = aiPdfAttachment
-      ? `\n\n=== ISI DOKUMEN PDF REFERENSI (${aiPdfAttachment.fileName}, ${aiPdfAttachment.pages} halaman) ===\n${aiPdfAttachment.text}`
-      : '';
-    const noteContent = `${rawNoteContent}${pdfContextStr}`;
-    const attachedImageUrl = aiImageAttachment?.url || noteImages[0]?.content;
+    const noteContent = liveContext.contextText;
+    const attachedImageUrl = aiImageAttachment?.url || liveContext.noteImages[0]?.content;
     let userPrompt = customPrompt.trim();
 
     if (mode === 'summarize') {
@@ -453,6 +465,68 @@ export const ExternalAIDrawer: React.FC = () => {
         </button>
       </div>
 
+      {/* Interaction Mode: Text Chat vs ElevenLabs Voice Conversational AI */}
+      <div className="flex items-center gap-1 bg-subtle/80 border border-border-subtle p-1 rounded-xl shrink-0">
+        <button
+          type="button"
+          onClick={() => setInteractionMode('text')}
+          className={`flex-1 py-1 rounded-lg text-[11px] font-semibold inline-flex items-center justify-center gap-1.5 transition ${
+            interactionMode === 'text'
+              ? 'bg-surface text-text-primary shadow-sm border border-border-subtle'
+              : 'text-text-secondary hover:text-text-primary'
+          }`}
+        >
+          <MessageSquare className="w-3 h-3" />
+          <span>Chat &amp; Ringkas</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setInteractionMode('voice')}
+          className={`flex-1 py-1 rounded-lg text-[11px] font-semibold inline-flex items-center justify-center gap-1.5 transition ${
+            interactionMode === 'voice'
+              ? 'bg-gradient-to-r from-indigo-500/20 to-sky-500/20 text-accent-strong border border-accent-strong/40 shadow-sm'
+              : 'text-text-secondary hover:text-text-primary'
+          }`}
+        >
+          <AudioLines className="w-3 h-3" />
+          <span>Conversational AI (ElevenLabs)</span>
+        </button>
+      </div>
+
+      {/* Live Note Context Sync Indicator */}
+      {activeNote && (
+        <div
+          className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl border text-[10px] transition shrink-0 ${
+            contextJustUpdated
+              ? 'bg-emerald-500/10 border-emerald-500/35 text-emerald-600 dark:text-emerald-300'
+              : 'bg-surface/70 border-border-subtle text-text-secondary'
+          }`}
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            <RefreshCw
+              className={`w-3 h-3 shrink-0 ${
+                contextJustUpdated ? 'animate-spin text-emerald-500' : 'text-emerald-500'
+              }`}
+            />
+            <span className="truncate font-medium">
+              Konteks Live:{' '}
+              <strong className="text-text-primary">
+                {activeNote.title || 'Tanpa Judul'}
+              </strong>{' '}
+              ({activeNote.blocks.length} blok)
+            </span>
+          </div>
+          <span className="font-mono opacity-80 shrink-0">
+            {contextJustUpdated
+              ? 'Tersinkron'
+              : new Date(activeNote.updatedAt).toLocaleTimeString('id-ID', {
+                  hour: '2-digit',
+                  minute: '2-digit'
+                })}
+          </span>
+        </div>
+      )}
+
       {/* Neat Collapsible Custom AI Provider Bar & Settings Card */}
       {aiTab === 'custom' && (
         <div className="bg-surface border border-border-subtle rounded-2xl overflow-hidden shrink-0 shadow-sm">
@@ -641,7 +715,8 @@ export const ExternalAIDrawer: React.FC = () => {
         </div>
       )}
 
-      {/* 4 Academic Quick Action Chips */}
+      {/* 4 Academic Quick Action Chips (Text mode only) */}
+      {interactionMode === 'text' && (
       <div className="grid grid-cols-2 gap-1.5 shrink-0">
         <button
           type="button"
@@ -681,6 +756,7 @@ export const ExternalAIDrawer: React.FC = () => {
               : 'Jelaskan Materi'}
         </button>
       </div>
+      )}
 
       {/* Quick Picker for PDFs from the Active Note */}
       {notePdfs.length > 0 && !aiPdfAttachment && (
@@ -798,6 +874,18 @@ export const ExternalAIDrawer: React.FC = () => {
         </div>
       )}
 
+      {interactionMode === 'voice' ? (
+        <ConversationalVoicePanel
+          activeNote={activeNote}
+          aiTab={aiTab}
+          activeConfig={activeConfig}
+          activeProviderLabel={activePresetMeta.label}
+          aiPdfAttachment={aiPdfAttachment}
+          aiImageAttachment={aiImageAttachment}
+          onInsertBlocks={insertBlocksIntoActiveNote}
+        />
+      ) : (
+        <>
       {/* Interactive Study Flashcard Preview when Note-to-Quiz is triggered */}
       {showQuizCards && (
         <button
@@ -1147,6 +1235,8 @@ export const ExternalAIDrawer: React.FC = () => {
             pilihanmu sendiri.
           </span>
         </div>
+      )}
+        </>
       )}
     </aside>
   );

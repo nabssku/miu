@@ -13,15 +13,20 @@
 - **Produktivitas Cepat**: Todo & Pomodoro terhubung, Quick Mirror, Board Shelf, pengingat minum/peregangan/jadwal sholat, **Lazytype** (dikte suara), dan **Lazyshot** (screenshot clipper + anotasi + OCR lokal lewat Tesseract.js).
 
 ### 2. Workspace Catatan Notion-Style (`/app`)
-- **Block Editor Lengkap**: Mendukung paragraf, Heading (`H1`, `H2`), bullet & numbered list, checklist To-do, Callout, Code block, rumus matematika **LaTeX / KaTeX**, pemisah, gambar, dokumen **PDF** (dengan pratinjau kanvas & ekstraksi teks), serta **Subhalaman bersarang**.
+- **Block Editor Lengkap**: Mendukung paragraf, Heading (`H1`, `H2`), bullet & numbered list, checklist To-do, Callout, Code block, rumus matematika **LaTeX / KaTeX**, pemisah, gambar, sematan **YouTube & URL Video** via `/`, dokumen **PDF** (dengan pratinjau kanvas & ekstraksi teks), serta **Subhalaman bersarang**.
+- **Menu Kanban di Sidebar → Board Halaman Utama**: Klik menu **Kanban** di sidebar untuk menampilkan halaman kanan sebagai papan Kanban 3 kolom penuh (*Rencana*, *Dikerjakan*, *Selesai*) lengkap dengan *drag & drop*, tambah kartu langsung ke kolom, dan klik kartu untuk membuka catatan.
+- **Menu Kalender & Integrasi Google Calendar**: Klik menu **Kalender** di sidebar untuk melihat kalender bulanan di halaman kanan — otomatis menghimpun **blok `/deadline`** yang dibuat lewat perintah `/` di catatan, lengkap dengan koneksi OAuth **Google Calendar** (memakai `NEXT_PUBLIC_GOOGLE_CLIENT_ID`) untuk melihat agenda & sinkronisasi deadline 1-klik.
 - **Drag & Drop Fleksibel**: Ubah urutan blok catatan maupun susun ulang hierarki halaman & subhalaman di sidebar dengan drag-and-drop.
 - **Isolasi User & Kolaborasi Berjenjang**:
   - Masuk dengan Google OAuth 2.0 untuk mengisolasi catatan pribadi per akun.
   - Bagikan catatan lewat tautan (`/app?share=<id>`) atau undang email kolaborator dengan hak akses **`view`** (hanya lihat), **`comment`** (beri komentar), atau **`edit`** (sunting & kolaborasi).
 
-### 3. Asisten AI Kontekstual
-- **Mode Default Server-Side**: Menggunakan proxy aman `/api/ai/chat` (streaming SSE) dengan dukungan analisis teks catatan, gambar (*vision fallback*), dan dokumen PDF.
+### 3. Asisten AI & Conversational Voice AI (ElevenLabs)
+- **Mode Default Server-Side (Groq AI)**: Menggunakan proxy aman `/api/ai/chat` (streaming SSE) dengan dukungan analisis teks catatan, gambar (*vision fallback*), dokumen PDF, dan memori percakapan multi-giliran (*multi-turn*).
 - **AI Provider Custom (BYOK)**: Dukungan Custom Endpoint (OpenAI-compatible), Google Gemini, Anthropic Claude, OpenRouter, OpenAI, dan Ollama lokal — lengkap dengan perenderan Markdown/tabel/LaTeX rapi, sisipkan langsung ke blok catatan, serta riwayat percakapan per catatan (termasuk hapus *multi-select*).
+- **Conversational Voice AI dengan ElevenLabs**:
+  - **Mode Suara Langsung**: Bicara dua arah (*hands-free* & *barge-in*) menggunakan pengenal suara Browser Speech atau **ElevenLabs Scribe STT** (`/api/elevenlabs/stt`), diproses oleh **Groq AI** atau **AI Provider Custom** pilihan Anda, lalu dibacakan oleh **ElevenLabs Neural TTS** (`eleven_flash_v2_5` / `eleven_multilingual_v2` via `/api/elevenlabs/tts`).
+  - **Mode ElevenLabs Agent Platform + Custom LLM**: Mendukung koneksi WebSocket *signed URL* (`/api/elevenlabs/agent-signed-url`) ke **ElevenLabs Agent ID**, serta menyediakan endpoint OpenAI-compatible SSE (`/api/elevenlabs/custom-llm/chat/completions`) agar Agent ElevenLabs Anda dapat memakai **Groq AI** maupun provider custom di Miu.
 
 ---
 
@@ -52,6 +57,7 @@ Seluruh kredensial **Cloud Catatan**, **Media Cloud**, dan **AI Key default** di
 │   │   │   ├── ai/chat/route.ts      # Proxy AI streaming SSE (server-side)
 │   │   │   ├── cloud/auth/route.ts   # Sinkronisasi profil Google user
 │   │   │   ├── cloud/status/route.ts # Status Cloud Catatan & inisialisasi skema
+│   │   │   ├── elevenlabs/           # TTS stream, Scribe STT, voices, Agent & Custom LLM bridge
 │   │   │   ├── notes/route.ts        # CRUD catatan terisolasi & validasi izin share
 │   │   │   └── upload/route.ts       # Upload media server-side
 │   │   ├── app/page.tsx              # Rute Workspace (/app)
@@ -102,6 +108,10 @@ Seluruh kredensial **Cloud Catatan**, **Media Cloud**, dan **AI Key default** di
    CLOUDINARY_UPLOAD_PRESET=
    GROQ_API_KEY=gsk_...
    GROQ_MODEL=qwen/qwen3.8-27b
+   ELEVENLABS_API_KEY=xi-...
+   ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb
+   ELEVENLABS_MODEL_ID=eleven_flash_v2_5
+   ELEVENLABS_CUSTOM_LLM_SECRET=
    ```
 
 3. **Jalankan server pengembangan**

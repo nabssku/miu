@@ -15,6 +15,9 @@ export interface CloudStatus {
   aiReady: boolean;
   aiModel: string;
   googleClientId: string;
+  elevenlabsReady: boolean;
+  elevenlabsVoiceId: string;
+  elevenlabsModelId: string;
   synced: boolean;
 }
 
@@ -32,6 +35,9 @@ let cachedStatus: CloudStatus = {
   aiReady: true,
   aiModel: 'qwen/qwen3.8-27b',
   googleClientId: (process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '').trim(),
+  elevenlabsReady: false,
+  elevenlabsVoiceId: 'JBFqnCBsd6RMkjVDRZzb',
+  elevenlabsModelId: 'eleven_flash_v2_5',
   synced: false
 };
 
@@ -54,6 +60,9 @@ export async function syncCloudStatus(force = false): Promise<CloudStatus> {
         googleClientId:
           (process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '').trim() ||
           String(data.googleClientId || '').trim(),
+        elevenlabsReady: Boolean(data.elevenlabsReady),
+        elevenlabsVoiceId: data.elevenlabsVoiceId || 'JBFqnCBsd6RMkjVDRZzb',
+        elevenlabsModelId: data.elevenlabsModelId || 'eleven_flash_v2_5',
         synced: true
       };
       return cachedStatus;
@@ -299,6 +308,12 @@ interface GoogleTokenClient {
   requestAccessToken: (overrideConfig?: { prompt?: string }) => void;
 }
 
+export interface GoogleTokenResponse {
+  access_token?: string;
+  expires_in?: number;
+  error?: string;
+}
+
 declare global {
   interface Window {
     google?: {
@@ -307,8 +322,9 @@ declare global {
           initTokenClient: (config: {
             client_id: string;
             scope: string;
-            callback: (response: { access_token?: string; error?: string }) => void;
+            callback: (response: GoogleTokenResponse) => void;
           }) => GoogleTokenClient;
+          revoke?: (token: string, done?: () => void) => void;
         };
       };
     };
@@ -317,7 +333,7 @@ declare global {
 
 let gsiScriptPromise: Promise<void> | null = null;
 
-function loadGoogleIdentityScript(): Promise<void> {
+export function loadGoogleIdentityScript(): Promise<void> {
   if (typeof window === 'undefined') return Promise.resolve();
   if (window.google?.accounts?.oauth2) return Promise.resolve();
   if (gsiScriptPromise) return gsiScriptPromise;

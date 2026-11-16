@@ -1,5 +1,12 @@
 import { db } from '../db/database';
-import type { AIProviderId, LyricLine, NoteBlock, PrayerTimings } from '../types/miu';
+import type {
+  AIChatMessage,
+  AIProviderId,
+  LyricLine,
+  NoteBlock,
+  NoteRecord,
+  PrayerTimings
+} from '../types/miu';
 
 // --- LRCLIB Live Synced Lyrics Parser & Fetcher ---
 export function parseLrc(lrcText: string): LyricLine[] {
@@ -262,24 +269,141 @@ export function saveAIConfig(config: AIConfig): void {
   );
 }
 
-export function serializeBlocksForPrompt(title: string, blocks: NoteBlock[]): string {
-  const lines = [`Judul Catatan: ${title}`, '---'];
+export function serializeBlocksForPrompt(
+  title: string,
+  blocks: NoteBlock[],
+  subpages: Array<Pick<NoteRecord, 'title' | 'blocks'>> = [],
+  kanbanStatus?: NoteRecord['kanbanStatus'],
+  dueDate?: string,
+  dueTime?: string
+): string {
+  const statusLabel =
+    kanbanStatus === 'in_progress'
+      ? 'Dikerjakan (In Progress)'
+      : kanbanStatus === 'done'
+        ? 'Selesai (Done)'
+        : 'Rencana (To Do)';
+  const lines = [`Judul Catatan: ${title}`, `Status Kanban: ${statusLabel}`];
+  if (dueDate?.trim()) {
+    lines.push(`Deadline Catatan: ${dueDate}${dueTime ? ` ${dueTime}` : ''}`);
+  }
+  lines.push('---');
+  let numberedIdx = 0;
+
   for (const b of blocks) {
+    if (b.type === 'numbered') {
+      numberedIdx += 1;
+    } else {
+      numberedIdx = 0;
+    }
+
     if (b.type === 'h1') lines.push(`# ${b.content}`);
     else if (b.type === 'h2') lines.push(`## ${b.content}`);
-    else if (b.type === 'todo') lines.push(`- [${b.checked ? 'x' : ' '}] ${b.content}`);
-    else if (b.type === 'math') lines.push(`Rumus LaTeX: $${b.content}$`);
-    else if (b.type === 'code') lines.push(`\`\`\`${b.language || ''}\n${b.content}\n\`\`\``);
-    else if (b.type === 'image') lines.push(`[Gambar terlampir${b.caption ? `: ${b.caption}` : ''}]`);
-    else if (b.type === 'pdf') {
+    else if (b.type === 'h3') lines.push(`### ${b.content}`);
+    else if (b.type === 'bullet') lines.push(`- ${b.content}`);
+    else if (b.type === 'numbered') lines.push(`${numberedIdx}. ${b.content}`);
+    else if (b.type === 'todo') {
+      const dueStr = b.dueDate ? ` [Deadline: ${b.dueDate}${b.dueTime ? ` ${b.dueTime}` : ''}]` : '';
+      lines.push(`- [${b.checked ? 'x' : ' '}] ${b.content}${dueStr}`);
+    } else if (b.type === 'deadline') {
+      lines.push(
+        `- [${b.checked ? 'x' : ' '}] [DEADLINE ${b.dueDate || 'Tanpa Tanggal'}${
+          b.dueTime ? ` ${b.dueTime}` : ''
+        }] ${b.content}`
+      );
+    } else if (b.type === 'toggle') {
+      lines.push(`▸ ${b.content}`);
+      if (b.toggleBody?.trim()) {
+        lines.push(`  ${b.toggleBody.trim()}`);
+      }
+    } else if (b.type === 'callout') {
+      lines.push(`[${b.calloutIcon || '💡'} Callout] ${b.content}`);
+    } else if (b.type === 'quote') {
+      lines.push(`> ${b.content}`);
+    } else if (b.type === 'divider') {
+      lines.push('---');
+    } else if (b.type === 'math') {
+      lines.push(`Rumus LaTeX: $${b.content}$`);
+    } else if (b.type === 'code') {
+      lines.push(`\`\`\`${b.language || ''}\n${b.content}\n\`\`\``);
+    } else if (b.type === 'image') {
+      lines.push(`[Gambar terlampir${b.caption ? `: ${b.caption}` : ''}]`);
+    } else if (b.type === 'video') {
+      lines.push(`[Video tersemat${b.caption ? `: ${b.caption}` : ''}: ${b.content}]`);
+    } else if (b.type === 'pdf') {
       lines.push(
         `[Dokumen PDF: ${b.fileName || b.caption || 'Lampiran.pdf'} (${b.pdfPages || 1} halaman)]\n${
           b.pdfText ? b.pdfText.slice(0, 12000) : ''
         }`
       );
-    } else lines.push(b.content);
+    } else if (b.type === 'subpage') {
+      lines.push(`[Subhalaman: ${b.content || 'Halaman Tanpa Judul'}]`);
+    } else if (b.content) {
+      lines.push(b.content);
+    }
   }
+
+  if (subpages.length > 0) {
+    lines.push('\n--- Subhalaman Terkait ---');
+    for (const sub of subpages.slice(0, 6)) {
+      const subSnippet = (sub.blocks || [])
+        .map((blk) => blk.content)
+        .filter(Boolean)
+        .join(' ')
+        .slice(0, 500);
+      lines.push(`• ${sub.title || 'Subhalaman Tanpa Judul'}${subSnippet ? `: ${subSnippet}` : ''}`);
+    }
+  }
+
   return lines.join('\n');
+}
+
+export interface LiveNoteContextResult {
+  note: NoteRecord | undefined;
+  contextText: string;
+  updatedAt: number;
+  noteImages: NoteBlock[];
+}
+
+export async function buildLiveNoteContext(
+  noteId: string,
+  fallbackNote?: NoteRecord,
+  pdfAttachment?: { fileName: string; text: string; pages: number; url?: string } | null,
+  maxChars = 24000
+): Promise<LiveNoteContextResult> {
+  const targetId = noteId || fallbackNote?.id || '';
+  const freshNote = targetId ? (await db.notes.get(targetId)) || fallbackNote : fallbackNote;
+
+  let subpages: NoteRecord[] = [];
+  if (freshNote?.id) {
+    try {
+      subpages = await db.notes.filter((n) => n.parentId === freshNote.id).toArray();
+    } catch {
+      subpages = [];
+    }
+  }
+
+  const rawNoteContent = freshNote
+    ? serializeBlocksForPrompt(
+        freshNote.title || 'Catatan',
+        freshNote.blocks || [],
+        subpages,
+        freshNote.kanbanStatus,
+        freshNote.dueDate,
+        freshNote.dueTime
+      )
+    : 'Tidak ada catatan aktif.';
+  const pdfContextStr = pdfAttachment
+    ? `\n\n=== ISI DOKUMEN PDF REFERENSI (${pdfAttachment.fileName}, ${pdfAttachment.pages} halaman) ===\n${pdfAttachment.text}`
+    : '';
+  const combined = `${rawNoteContent}${pdfContextStr}`.slice(0, maxChars);
+
+  return {
+    note: freshNote,
+    contextText: combined,
+    updatedAt: freshNote?.updatedAt || Date.now(),
+    noteImages: (freshNote?.blocks || []).filter((b) => b.type === 'image' && Boolean(b.content))
+  };
 }
 
 function cleanAIThinkingTags(txt: string): string {
@@ -332,8 +456,13 @@ export async function runExternalAIStream(
   systemPrompt: string,
   userPrompt: string,
   onChunk: (fullText: string) => void,
-  imageUrl?: string
+  imageUrl?: string,
+  history: AIChatMessage[] = []
 ): Promise<string> {
+  const cleanHistory = history
+    .filter((m) => m.content.trim().length > 0)
+    .slice(-16);
+
   if (config.provider === 'groq' && !config.apiKey.trim()) {
     const resp = await fetch('/api/ai/chat', {
       method: 'POST',
@@ -341,6 +470,7 @@ export async function runExternalAIStream(
       body: JSON.stringify({
         systemPrompt,
         userPrompt,
+        history: cleanHistory,
         imageUrl,
         model: config.model
       })
@@ -383,12 +513,20 @@ export async function runExternalAIStream(
       config.model || 'gemini-2.0-flash'
     )}:streamGenerateContent?alt=sse&key=${encodeURIComponent(config.apiKey.trim())}`;
 
+    const contents = [
+      ...cleanHistory.map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }]
+      })),
+      { role: 'user', parts: [{ text: userPrompt }] }
+    ];
+
     const resp = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: [{ role: 'user', parts: [{ text: userPrompt }] }]
+        contents
       })
     });
 
@@ -436,6 +574,7 @@ export async function runExternalAIStream(
         stream: true,
         messages: [
           { role: 'system', content: systemPrompt },
+          ...cleanHistory.map((m) => ({ role: m.role, content: m.content })),
           { role: 'user', content: userPrompt }
         ]
       })
@@ -483,7 +622,10 @@ export async function runExternalAIStream(
         model: config.model || DEFAULT_MODELS.claude,
         max_tokens: 2048,
         system: systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }]
+        messages: [
+          ...cleanHistory.map((m) => ({ role: m.role, content: m.content })),
+          { role: 'user', content: userPrompt }
+        ]
       })
     });
 
@@ -541,6 +683,7 @@ export async function runExternalAIStream(
         stream: true,
         messages: [
           { role: 'system', content: systemPrompt },
+          ...cleanHistory.map((m) => ({ role: m.role, content: m.content })),
           { role: 'user', content: userMessageContent }
         ]
       })

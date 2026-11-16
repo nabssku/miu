@@ -19,12 +19,20 @@ export async function POST(req: NextRequest) {
     const body = (await req.json()) as {
       systemPrompt?: string;
       userPrompt?: string;
+      history?: Array<{ role: 'user' | 'assistant'; content: string }>;
       imageUrl?: string;
       model?: string;
     };
 
-    const systemPrompt = String(body.systemPrompt || 'Kamu adalah Miu AI, asisten belajar yang cerdas dan terstruktur.');
+    const systemPrompt = String(
+      body.systemPrompt || 'Kamu adalah Miu AI, asisten belajar yang cerdas dan terstruktur.'
+    );
     const userPrompt = String(body.userPrompt || '');
+    const history = Array.isArray(body.history)
+      ? body.history
+          .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
+          .slice(-16)
+      : [];
     const imageUrl = body.imageUrl ? String(body.imageUrl) : undefined;
     const requestedModel = (body.model || '').trim();
     const primaryModel = requestedModel && requestedModel !== 'groq-default'
@@ -51,6 +59,7 @@ export async function POST(req: NextRequest) {
           stream: true,
           messages: [
             { role: 'system', content: systemPrompt },
+            ...history.map((h) => ({ role: h.role, content: h.content })),
             { role: 'user', content: userContent }
           ]
         }),
