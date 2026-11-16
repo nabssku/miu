@@ -1,8 +1,10 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Bug, Coffee, Heart, Send, X } from 'lucide-react';
+import { Bug, Coffee, ExternalLink, Heart, Send, X } from 'lucide-react';
 import { useMiu } from '../../context/MiuContext';
+
+const SAWERIA_URL = 'https://saweria.co/Nabssku';
 
 export const SupportModal: React.FC = () => {
   const { isSupportModalOpen, setIsSupportModalOpen } = useMiu();
@@ -50,23 +52,31 @@ export const SupportModal: React.FC = () => {
         {isCoffee ? (
           <div className="space-y-3 text-sm text-text-secondary leading-relaxed">
             <p>
-              <strong>Miu 100% gratis selamanya</strong>—tanpa iklan, tanpa paywall, dan tanpa wajib login. Jika Miu membantu produktivitas kuliah & skripsimu, kamu bisa mendukung pengembangan secara sukarela!
+              <strong>Miu 100% gratis selamanya</strong>—tanpa iklan, tanpa paywall, dan tanpa wajib login. Jika Miu membantu produktivitasmu, kamu bisa mendukung pengembangan secara sukarela lewat Saweria!
             </p>
-            <div className="bg-subtle border border-border-subtle rounded-2xl p-4 flex items-center justify-between">
+            <a
+              href={SAWERIA_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="bg-subtle hover:border-amber-500/60 border border-border-subtle rounded-2xl p-4 flex items-center justify-between transition"
+            >
               <div>
-                <p className="text-xs font-bold text-text-primary">1 Gelas Kopi Susu Mahasiswa</p>
-                <p className="text-[11px] text-text-secondary">Dukungan sukarela komunitas</p>
+                <p className="text-xs font-bold text-text-primary">1 Gelas Kopi Susu · Saweria</p>
+                <p className="text-[11px] font-mono text-text-secondary">saweria.co/Nabssku</p>
               </div>
               <span className="font-mono font-bold text-amber-500">Rp 15.000</span>
-            </div>
-            <button
-              type="button"
+            </a>
+            <a
+              href={SAWERIA_URL}
+              target="_blank"
+              rel="noopener noreferrer"
               onClick={() => setIsSupportModalOpen(null)}
               className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold inline-flex items-center justify-center gap-2 transition"
             >
               <Heart className="w-4 h-4" />
-              Terima Kasih Sudah Mendukung Miu!
-            </button>
+              <span>Traktir Kopi di Saweria</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
           </div>
         ) : submitted ? (
           <div className="py-6 text-center text-sm font-medium text-emerald-500">
