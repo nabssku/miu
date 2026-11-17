@@ -1,10 +1,14 @@
 import { createHash } from 'node:crypto';
 import type {
+  DatabaseRow,
+  NoteBlock,
   NoteComment,
   NoteRecord,
   NoteShareSettings,
   SharePermission
 } from '../types/miu';
+import { findBlockById, mapBlockDeep } from '../utils/blockTreeHelper';
+import { sanitizeFormSubmission } from '../utils/databaseHelper';
 
 export interface ServerGoogleUser {
   id: string;
@@ -190,6 +194,7 @@ export async function ensureServerNeonSchema(): Promise<boolean> {
         icon TEXT DEFAULT '📄',
         cover TEXT DEFAULT '',
         is_favorite BOOLEAN DEFAULT FALSE,
+        is_full_width BOOLEAN DEFAULT FALSE,
         kanban_status TEXT DEFAULT 'todo',
         due_date TEXT DEFAULT '',
         due_time TEXT DEFAULT '',
@@ -230,6 +235,9 @@ export async function ensureServerNeonSchema(): Promise<boolean> {
       ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS google_event_id TEXT DEFAULT '';
     `);
     await executeServerNeonQuery(`
+      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS is_full_width BOOLEAN DEFAULT FALSE;
+    `);
+    await executeServerNeonQuery(`
       CREATE INDEX IF NOT EXISTS idx_miu_notes_user_id ON miu_notes(user_id);
     `);
 
@@ -267,6 +275,7 @@ interface NeonNoteRow {
   icon: string | null;
   cover: string | null;
   is_favorite: boolean | null;
+  is_full_width?: boolean | null;
   kanban_status?: string | null;
   due_date?: string | null;
   due_time?: string | null;
@@ -298,6 +307,19 @@ function parseShareSettings(raw: unknown): NoteShareSettings {
   return defaultShare;
 }
 
+function parseBlocksField(raw: unknown): NoteBlock[] {
+  if (Array.isArray(raw)) return raw as NoteBlock[];
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed as NoteBlock[];
+    } catch {
+      // ignore
+    }
+  }
+  return [{ id: `blk-${Date.now()}`, type: 'text', content: '' }];
+}
+
 function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
   let parsedComments: NoteComment[] = [];
   if (r.comments) {
@@ -324,6 +346,7 @@ function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
     icon: r.icon || '📄',
     cover: r.cover || '',
     isFavorite: Boolean(r.is_favorite),
+    isFullWidth: Boolean(r.is_full_width),
     kanbanStatus:
       r.kanban_status === 'in_progress' || r.kanban_status === 'done'
         ? r.kanban_status
@@ -331,11 +354,7 @@ function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
     dueDate: r.due_date || '',
     dueTime: r.due_time || '',
     googleEventId: r.google_event_id || '',
-    blocks: Array.isArray(r.blocks)
-      ? (r.blocks as NoteRecord['blocks'])
-      : typeof r.blocks === 'string'
-        ? (JSON.parse(r.blocks) as NoteRecord['blocks'])
-        : [{ id: `blk-${Date.now()}`, type: 'text', content: '' }],
+    blocks: parseBlocksField(r.blocks),
     shareSettings: parseShareSettings(r.share_settings),
     comments: parsedComments,
     createdAt: Number(r.created_at) || Date.now(),
@@ -442,7 +461,7 @@ export async function fetchServerNotes(
   const { rows } = await executeServerNeonQuery<NeonNoteRow>(
     `WITH RECURSIVE accessible_notes AS (
        SELECT id, user_id, owner_email, owner_name, parent_id, semester_id, course_id,
-              title, icon, cover, is_favorite, kanban_status, due_date, due_time, google_event_id, blocks, share_settings, comments, created_at, updated_at
+              title, icon, cover, is_favorite, is_full_width, kanban_status, due_date, due_time, google_event_id, blocks, share_settings, comments, created_at, updated_at
        FROM miu_notes
        WHERE user_id = $1
           OR (
@@ -453,7 +472,7 @@ export async function fetchServerNotes(
           )
        UNION
        SELECT child.id, child.user_id, child.owner_email, child.owner_name, child.parent_id, child.semester_id, child.course_id,
-              child.title, child.icon, child.cover, child.is_favorite, child.kanban_status, child.due_date, child.due_time, child.google_event_id, child.blocks, child.share_settings, child.comments, child.created_at, child.updated_at
+              child.title, child.icon, child.cover, child.is_favorite, child.is_full_width, child.kanban_status, child.due_date, child.due_time, child.google_event_id, child.blocks, child.share_settings, child.comments, child.created_at, child.updated_at
        FROM miu_notes child
        INNER JOIN accessible_notes parent ON child.parent_id = parent.id
      )
@@ -481,12 +500,12 @@ export async function fetchServerSharedNote(
   const { rows } = await executeServerNeonQuery<NeonNoteRow>(
     `WITH RECURSIVE descendants AS (
        SELECT id, user_id, owner_email, owner_name, parent_id, semester_id, course_id,
-              title, icon, cover, is_favorite, kanban_status, due_date, due_time, google_event_id, blocks, share_settings, comments, created_at, updated_at
+              title, icon, cover, is_favorite, is_full_width, kanban_status, due_date, due_time, google_event_id, blocks, share_settings, comments, created_at, updated_at
        FROM miu_notes
        WHERE id = $1
        UNION
        SELECT child.id, child.user_id, child.owner_email, child.owner_name, child.parent_id, child.semester_id, child.course_id,
-              child.title, child.icon, child.cover, child.is_favorite, child.kanban_status, child.due_date, child.due_time, child.google_event_id, child.blocks, child.share_settings, child.comments, child.created_at, child.updated_at
+              child.title, child.icon, child.cover, child.is_favorite, child.is_full_width, child.kanban_status, child.due_date, child.due_time, child.google_event_id, child.blocks, child.share_settings, child.comments, child.created_at, child.updated_at
        FROM miu_notes child
        INNER JOIN descendants parent ON child.parent_id = parent.id
      )
@@ -539,15 +558,16 @@ export async function saveServerNote(
   await executeServerNeonQuery(
     `INSERT INTO miu_notes (
        id, user_id, owner_email, owner_name, parent_id, semester_id, course_id,
-       title, icon, cover, is_favorite, kanban_status, due_date, due_time, google_event_id, blocks, share_settings, comments, created_at, updated_at
+       title, icon, cover, is_favorite, is_full_width, kanban_status, due_date, due_time, google_event_id, blocks, share_settings, comments, created_at, updated_at
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17::jsonb, $18::jsonb, $19, $20)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb, $19::jsonb, $20, $21)
      ON CONFLICT (id) DO UPDATE SET
        parent_id = EXCLUDED.parent_id,
        title = EXCLUDED.title,
        icon = EXCLUDED.icon,
        cover = EXCLUDED.cover,
        is_favorite = EXCLUDED.is_favorite,
+       is_full_width = EXCLUDED.is_full_width,
        kanban_status = EXCLUDED.kanban_status,
        due_date = EXCLUDED.due_date,
        due_time = EXCLUDED.due_time,
@@ -568,6 +588,7 @@ export async function saveServerNote(
       note.icon || '📄',
       note.cover || '',
       Boolean(note.isFavorite),
+      Boolean(note.isFullWidth),
       note.kanbanStatus || 'todo',
       note.dueDate || '',
       note.dueTime || '',
@@ -581,6 +602,157 @@ export async function saveServerNote(
   );
 
   return { ok: true, status: 200 };
+}
+
+export async function submitServerFormResponse(params: {
+  sourceNoteId: string;
+  formBlockId: string;
+  targetNoteId: string;
+  targetBlockId: string;
+  values: Record<string, unknown>;
+  actorUserId?: string;
+  actorEmail?: string;
+}): Promise<{
+  ok: boolean;
+  status: number;
+  row?: DatabaseRow;
+  submissionCount?: number;
+  error?: string;
+}> {
+  if (!isServerNeonConfigured()) {
+    return { ok: false, status: 503, error: 'Cloud Catatan tidak aktif.' };
+  }
+  await ensureServerNeonSchema();
+
+  const sourceAccess = await getEffectiveNoteRole(
+    params.sourceNoteId,
+    params.actorUserId || '',
+    params.actorEmail || ''
+  );
+  if (!sourceAccess.exists || !sourceAccess.role) {
+    return { ok: false, status: 403, error: 'Tidak memiliki akses ke formulir ini.' };
+  }
+
+  const { rows: srcRows } = await executeServerNeonQuery<{ blocks: unknown }>(
+    `SELECT blocks FROM miu_notes WHERE id = $1 LIMIT 1`,
+    [params.sourceNoteId]
+  );
+  if (srcRows.length === 0) {
+    return { ok: false, status: 404, error: 'Catatan formulir tidak ditemukan.' };
+  }
+
+  const sourceBlocks = parseBlocksField(srcRows[0].blocks);
+  const formBlock = findBlockById(sourceBlocks, params.formBlockId);
+  if (!formBlock || formBlock.type !== 'form' || !formBlock.formData) {
+    return { ok: false, status: 404, error: 'Blok formulir tidak ditemukan.' };
+  }
+
+  const formConfig = formBlock.formData;
+  if (
+    formConfig.targetNoteId !== params.targetNoteId ||
+    formConfig.targetBlockId !== params.targetBlockId
+  ) {
+    return { ok: false, status: 400, error: 'Target database formulir tidak cocok.' };
+  }
+
+  if (formConfig.responseAccess === 'closed') {
+    return { ok: false, status: 403, error: 'Formulir ini sedang ditutup oleh pemiliknya.' };
+  }
+
+  if (formConfig.responseAccess === 'edit_only') {
+    const targetAccess = await getEffectiveNoteRole(
+      params.targetNoteId,
+      params.actorUserId || '',
+      params.actorEmail || ''
+    );
+    if (
+      !targetAccess.exists ||
+      (targetAccess.role !== 'owner' && targetAccess.role !== 'edit')
+    ) {
+      return {
+        ok: false,
+        status: 403,
+        error: 'Formulir ini hanya dapat diisi oleh pemilik atau kolaborator Edit.'
+      };
+    }
+  }
+
+  let targetBlocks: NoteBlock[];
+  if (params.targetNoteId === params.sourceNoteId) {
+    targetBlocks = sourceBlocks;
+  } else {
+    const { rows: tgtRows } = await executeServerNeonQuery<{ blocks: unknown }>(
+      `SELECT blocks FROM miu_notes WHERE id = $1 LIMIT 1`,
+      [params.targetNoteId]
+    );
+    if (tgtRows.length === 0) {
+      return { ok: false, status: 404, error: 'Catatan tabel database tujuan tidak ditemukan.' };
+    }
+    targetBlocks = parseBlocksField(tgtRows[0].blocks);
+  }
+
+  const dbBlock = findBlockById(targetBlocks, params.targetBlockId);
+  if (!dbBlock || dbBlock.type !== 'database' || !dbBlock.databaseData) {
+    return { ok: false, status: 404, error: 'Blok tabel database tujuan tidak ditemukan.' };
+  }
+
+  const sanitized = sanitizeFormSubmission(
+    formConfig,
+    dbBlock.databaseData.columns,
+    params.values || {}
+  );
+  if (!sanitized.ok || !sanitized.row) {
+    const firstErr = Object.values(sanitized.errors)[0] || 'Data formulir tidak valid.';
+    return { ok: false, status: 400, error: firstErr };
+  }
+
+  const now = Date.now();
+  const nextCount = (formConfig.submissionCount || 0) + 1;
+
+  let nextTargetBlocks = mapBlockDeep(targetBlocks, params.targetBlockId, (blk) => ({
+    ...blk,
+    databaseData: blk.databaseData
+      ? {
+          ...blk.databaseData,
+          rows: [...(blk.databaseData.rows || []), sanitized.row!]
+        }
+      : blk.databaseData
+  }));
+
+  if (params.targetNoteId === params.sourceNoteId) {
+    nextTargetBlocks = mapBlockDeep(nextTargetBlocks, params.formBlockId, (blk) => ({
+      ...blk,
+      formData: blk.formData
+        ? { ...blk.formData, submissionCount: nextCount }
+        : blk.formData
+    }));
+    await executeServerNeonQuery(
+      `UPDATE miu_notes SET blocks = $2::jsonb, updated_at = $3 WHERE id = $1`,
+      [params.targetNoteId, JSON.stringify(nextTargetBlocks), now]
+    );
+  } else {
+    await executeServerNeonQuery(
+      `UPDATE miu_notes SET blocks = $2::jsonb, updated_at = $3 WHERE id = $1`,
+      [params.targetNoteId, JSON.stringify(nextTargetBlocks), now]
+    );
+    const nextSourceBlocks = mapBlockDeep(sourceBlocks, params.formBlockId, (blk) => ({
+      ...blk,
+      formData: blk.formData
+        ? { ...blk.formData, submissionCount: nextCount }
+        : blk.formData
+    }));
+    await executeServerNeonQuery(
+      `UPDATE miu_notes SET blocks = $2::jsonb, updated_at = $3 WHERE id = $1`,
+      [params.sourceNoteId, JSON.stringify(nextSourceBlocks), now]
+    );
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    row: sanitized.row,
+    submissionCount: nextCount
+  };
 }
 
 export async function saveServerNoteComments(

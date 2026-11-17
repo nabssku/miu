@@ -1,4 +1,4 @@
-import type { NoteComment, NoteRecord } from '../types/miu';
+import type { DatabaseRow, NoteComment, NoteRecord } from '../types/miu';
 
 export interface GoogleUser {
   id: string;
@@ -233,6 +233,58 @@ export async function saveNoteToNeon(userId: string, note: NoteRecord): Promise<
   } catch (err) {
     console.warn('[Cloud Catatan] Gagal menyimpan catatan:', err);
     return false;
+  }
+}
+
+export async function submitFormResponseToNeon(params: {
+  sourceNoteId: string;
+  formBlockId: string;
+  targetNoteId: string;
+  targetBlockId: string;
+  values: Record<string, unknown>;
+}): Promise<{
+  ok: boolean;
+  cloudDisabled?: boolean;
+  row?: DatabaseRow;
+  submissionCount?: number;
+  error?: string;
+}> {
+  try {
+    const viewer = getStoredGoogleUser();
+    const res = await fetch('/api/notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'submit-form',
+        userId: viewer?.id || '',
+        userEmail: viewer?.email || '',
+        ...params
+      })
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      cloudDisabled?: boolean;
+      row?: DatabaseRow;
+      submissionCount?: number;
+      error?: string;
+    };
+    if (data.cloudDisabled) {
+      return { ok: false, cloudDisabled: true };
+    }
+    if (!res.ok || !data.ok) {
+      return {
+        ok: false,
+        error: data.error || 'Gagal mengirim formulir ke server.'
+      };
+    }
+    return {
+      ok: true,
+      row: data.row,
+      submissionCount: data.submissionCount
+    };
+  } catch (err) {
+    console.warn('[Cloud Catatan] Gagal mengirim formulir:', err);
+    return { ok: false, error: 'Gagal menghubungi server formulir.' };
   }
 }
 

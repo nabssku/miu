@@ -4,9 +4,16 @@ import type {
   AIProviderId,
   LyricLine,
   NoteBlock,
+  NoteBlockBase,
   NoteRecord,
   PrayerTimings
 } from '../types/miu';
+import { findBlockById, flattenBlocks } from '../utils/blockTreeHelper';
+import {
+  aggregateDatabaseForChart,
+  computeMetricValue,
+  databaseToMarkdownTable
+} from '../utils/databaseHelper';
 
 // --- LRCLIB Live Synced Lyrics Parser & Fetcher ---
 export function parseLrc(lrcText: string): LyricLine[] {
@@ -269,25 +276,12 @@ export function saveAIConfig(config: AIConfig): void {
   );
 }
 
-export function serializeBlocksForPrompt(
-  title: string,
-  blocks: NoteBlock[],
-  subpages: Array<Pick<NoteRecord, 'title' | 'blocks'>> = [],
-  kanbanStatus?: NoteRecord['kanbanStatus'],
-  dueDate?: string,
-  dueTime?: string
-): string {
-  const statusLabel =
-    kanbanStatus === 'in_progress'
-      ? 'Dikerjakan (In Progress)'
-      : kanbanStatus === 'done'
-        ? 'Selesai (Done)'
-        : 'Rencana (To Do)';
-  const lines = [`Judul Catatan: ${title}`, `Status Kanban: ${statusLabel}`];
-  if (dueDate?.trim()) {
-    lines.push(`Deadline Catatan: ${dueDate}${dueTime ? ` ${dueTime}` : ''}`);
-  }
-  lines.push('---');
+function serializeBlockListForPrompt(
+  blocks: Array<NoteBlock | NoteBlockBase>,
+  allNotes: NoteRecord[],
+  activeBlocks: NoteBlock[]
+): string[] {
+  const lines: string[] = [];
   let numberedIdx = 0;
 
   for (const b of blocks) {
@@ -340,15 +334,75 @@ export function serializeBlocksForPrompt(
       );
     } else if (b.type === 'subpage') {
       lines.push(`[Subhalaman: ${b.content || 'Halaman Tanpa Judul'}]`);
+    } else if (b.type === 'database' && b.databaseData) {
+      lines.push(
+        `[Tabel Database: ${b.databaseData.title || 'Tabel'} (${b.databaseData.rows.length} baris)]\n${databaseToMarkdownTable(b.databaseData, 50)}`
+      );
+    } else if (b.type === 'chart' && b.chartData) {
+      const srcNote = allNotes.find((n) => n.id === b.chartData?.sourceNoteId);
+      const srcBlock = findBlockById(srcNote?.blocks || activeBlocks, b.chartData.sourceBlockId);
+      const agg = aggregateDatabaseForChart(srcBlock?.databaseData, b.chartData);
+      const summary = agg.items.map((i) => `${i.label}: ${i.value} (${i.percent}%)`).join(', ');
+      lines.push(
+        `[Diagram ${b.chartData.kind === 'donut' ? 'Donat' : b.chartData.kind === 'line' ? 'Garis' : 'Batang'}: ${b.chartData.title}${summary ? ` -> ${summary}` : ''}]`
+      );
+    } else if (b.type === 'form' && b.formData) {
+      const fieldsList = b.formData.fields
+        .filter((f) => !f.hidden)
+        .map((f) => f.label)
+        .join(', ');
+      lines.push(
+        `[Formulir: ${b.formData.title} (${b.formData.submissionCount || 0} respon) | Pertanyaan: ${fieldsList}]`
+      );
+    } else if (b.type === 'metric' && b.metricData) {
+      const srcNote = b.metricData.sourceNoteId
+        ? allNotes.find((n) => n.id === b.metricData?.sourceNoteId)
+        : undefined;
+      const srcBlock =
+        b.metricData.sourceBlockId
+          ? findBlockById(srcNote?.blocks || activeBlocks, b.metricData.sourceBlockId)
+          : undefined;
+      const computed = computeMetricValue(srcBlock?.databaseData, activeBlocks, b.metricData);
+      lines.push(`[Metrik ${b.metricData.title}: ${computed.displayValue} (${computed.subtitle})]`);
+    } else if ('columns' in b && b.type === 'columns' && Array.isArray(b.columns)) {
+      b.columns.forEach((col, colIdx) => {
+        lines.push(`[Kolom ${colIdx + 1}/${b.columns?.length || 0}]`);
+        lines.push(...serializeBlockListForPrompt(col.blocks || [], allNotes, activeBlocks));
+      });
     } else if (b.content) {
       lines.push(b.content);
     }
   }
 
+  return lines;
+}
+
+export function serializeBlocksForPrompt(
+  title: string,
+  blocks: NoteBlock[],
+  subpages: Array<Pick<NoteRecord, 'title' | 'blocks'>> = [],
+  kanbanStatus?: NoteRecord['kanbanStatus'],
+  dueDate?: string,
+  dueTime?: string,
+  allNotes: NoteRecord[] = []
+): string {
+  const statusLabel =
+    kanbanStatus === 'in_progress'
+      ? 'Dikerjakan (In Progress)'
+      : kanbanStatus === 'done'
+        ? 'Selesai (Done)'
+        : 'Rencana (To Do)';
+  const lines = [`Judul Catatan: ${title}`, `Status Kanban: ${statusLabel}`];
+  if (dueDate?.trim()) {
+    lines.push(`Deadline Catatan: ${dueDate}${dueTime ? ` ${dueTime}` : ''}`);
+  }
+  lines.push('---');
+  lines.push(...serializeBlockListForPrompt(blocks, allNotes, blocks));
+
   if (subpages.length > 0) {
     lines.push('\n--- Subhalaman Terkait ---');
     for (const sub of subpages.slice(0, 6)) {
-      const subSnippet = (sub.blocks || [])
+      const subSnippet = flattenBlocks(sub.blocks || [])
         .map((blk) => blk.content)
         .filter(Boolean)
         .join(' ')
@@ -376,14 +430,13 @@ export async function buildLiveNoteContext(
   const targetId = noteId || fallbackNote?.id || '';
   const freshNote = targetId ? (await db.notes.get(targetId)) || fallbackNote : fallbackNote;
 
-  let subpages: NoteRecord[] = [];
-  if (freshNote?.id) {
-    try {
-      subpages = await db.notes.filter((n) => n.parentId === freshNote.id).toArray();
-    } catch {
-      subpages = [];
-    }
+  let allNotes: NoteRecord[] = [];
+  try {
+    allNotes = await db.notes.toArray();
+  } catch {
+    allNotes = [];
   }
+  const subpages = freshNote?.id ? allNotes.filter((n) => n.parentId === freshNote.id) : [];
 
   const rawNoteContent = freshNote
     ? serializeBlocksForPrompt(
@@ -392,7 +445,8 @@ export async function buildLiveNoteContext(
         subpages,
         freshNote.kanbanStatus,
         freshNote.dueDate,
-        freshNote.dueTime
+        freshNote.dueTime,
+        allNotes
       )
     : 'Tidak ada catatan aktif.';
   const pdfContextStr = pdfAttachment
@@ -404,7 +458,9 @@ export async function buildLiveNoteContext(
     note: freshNote,
     contextText: combined,
     updatedAt: freshNote?.updatedAt || Date.now(),
-    noteImages: (freshNote?.blocks || []).filter((b) => b.type === 'image' && Boolean(b.content))
+    noteImages: flattenBlocks(freshNote?.blocks || []).filter(
+      (b) => b.type === 'image' && Boolean(b.content)
+    )
   };
 }
 

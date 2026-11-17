@@ -13,7 +13,6 @@ import {
   ChevronDown,
   ChevronRight,
   Cloud,
-  Code2,
   Columns3,
   Copy,
   Database,
@@ -24,33 +23,25 @@ import {
   FileText,
   Globe,
   GripVertical,
-  Heading1,
-  Heading2,
-  Heading3,
-  Image as ImageIcon,
-  Lightbulb,
   Link2,
-  List,
-  ListOrdered,
   Loader2,
   Lock,
   LogOut,
+  Maximize2,
   MessageSquare,
-  Minus,
+  Minimize2,
   PanelLeft,
   Pencil,
   Plus,
   Printer,
-  Quote,
   Search,
   Send,
   Settings,
   Share2,
-  Sigma,
   Sparkles,
   Star,
   Trash2,
-  Type,
+  Ungroup,
   UploadCloud,
   Video
 } from 'lucide-react';
@@ -62,26 +53,69 @@ import {
   isNeonConfigured,
   saveNoteCommentsToNeon,
   saveNoteToNeon,
+  submitFormResponseToNeon,
   syncCloudStatus,
   uploadImageToCloudinary
 } from '../../services/cloudServices';
 import type {
   BlockType,
+  DatabaseBlockData,
+  DatabaseColumn,
+  FormBlockData,
+  FormResponseAccess,
+  MetricBlockData,
   NoteBlock,
+  NoteBlockBase,
   NoteComment,
   NoteKanbanStatus,
   NoteRecord,
   NoteShareSettings,
-  SharePermission
+  SharePermission,
+  ChartBlockData
 } from '../../types/miu';
+import {
+  appendBlockToColumn,
+  cloneBlockDeep,
+  createBlockId,
+  createColumnsBlockData,
+  findBlockById,
+  findBlockLocation,
+  flattenBlocks,
+  insertBlocksRelativeDeep,
+  mapBlockDeep,
+  moveBlockStepDeep,
+  moveBlocksToTarget,
+  removeBlockDeep,
+  resizeColumnsBlock,
+  ungroupColumnsBlock
+} from '../../utils/blockTreeHelper';
+import {
+  aggregateDatabaseForChart,
+  createDefaultChartData,
+  createDefaultDatabaseData,
+  createDefaultFormData,
+  createDefaultMetricData,
+  databaseToMarkdownTable,
+  findAllDatabaseSources,
+  sanitizeFormSubmission
+} from '../../utils/databaseHelper';
 import { parseMarkdownToNotionBlocks, renderInlineMarkdown } from '../../utils/markdown';
 import { PdfDocumentPreview, processAndUploadPdf } from '../../utils/pdfHelper';
 import { parseLinkUrl } from '../../utils/linkHelper';
+import {
+  filterSlashOptions,
+  SLASH_OPTIONS,
+  type SlashPreset
+} from '../../utils/slashOptions';
 import { parseVideoEmbedUrl } from '../../utils/videoHelper';
 import { formatLocalYYYYMMDD } from '../../services/googleCalendarService';
 import { CalendarBoardView } from './CalendarBoardView';
 import { NotesAuthModal } from './NotesAuthModal';
 import { ShareNoteModal } from './ShareNoteModal';
+import { ChartBlockView } from './blocks/ChartBlockView';
+import { DatabaseBlockView } from './blocks/DatabaseBlockView';
+import { FormBlockView } from './blocks/FormBlockView';
+import { MetricBlockView } from './blocks/MetricBlockView';
 import {
   KANBAN_COLUMNS,
   KanbanBoardView,
@@ -100,40 +134,6 @@ const COVER_PRESETS = [
   { id: 'violet', label: 'Deep Violet', css: 'linear-gradient(120deg, #8b5cf6 0%, #ec4899 100%)' },
   { id: 'espresso', label: 'Warm Espresso', css: 'linear-gradient(120deg, #44403c 0%, #78716c 100%)' },
   { id: 'ocean', label: 'Nordic Ocean', css: 'linear-gradient(120deg, #1e293b 0%, #0284c7 100%)' }
-];
-
-const SLASH_OPTIONS: Array<{
-  type: BlockType;
-  label: string;
-  shortcut: string;
-  desc: string;
-  Icon: React.FC<{ className?: string }>;
-}> = [
-  { type: 'text', label: 'Teks', shortcut: 'p', desc: 'Paragraf teks biasa', Icon: Type },
-  { type: 'h1', label: 'Heading 1', shortcut: '#', desc: 'Judul bagian besar', Icon: Heading1 },
-  { type: 'h2', label: 'Heading 2', shortcut: '##', desc: 'Judul bagian sedang', Icon: Heading2 },
-  { type: 'h3', label: 'Heading 3', shortcut: '###', desc: 'Judul bagian kecil', Icon: Heading3 },
-  { type: 'todo', label: 'To-do List', shortcut: '[]', desc: 'Checklist tugas', Icon: CheckSquare },
-  {
-    type: 'deadline',
-    label: 'Deadline Tugas',
-    shortcut: 'deadline',
-    desc: 'Blok deadline tugas yang otomatis masuk ke Kalender',
-    Icon: CalendarDays
-  },
-  { type: 'bullet', label: 'Bulleted List', shortcut: '-', desc: 'Daftar poin bullet', Icon: List },
-  { type: 'numbered', label: 'Numbered List', shortcut: '1.', desc: 'Daftar poin bernomor', Icon: ListOrdered },
-  { type: 'toggle', label: 'Toggle List', shortcut: '>', desc: 'Lipatan materi buka-tutup', Icon: ChevronRight },
-  { type: 'image', label: 'Gambar', shortcut: 'img', desc: 'Unggah gambar ke Cloud Catatan', Icon: ImageIcon },
-  { type: 'video', label: 'Video / YouTube', shortcut: 'yt', desc: 'Sematkan YouTube atau URL video (.mp4)', Icon: Video },
-  { type: 'link', label: 'URL Link', shortcut: 'link', desc: 'Tambahkan tautan URL web atau bookmark', Icon: Link2 },
-  { type: 'pdf', label: 'Dokumen PDF', shortcut: 'pdf', desc: 'Unggah file PDF & ekstrak teks untuk AI', Icon: FileText },
-  { type: 'subpage', label: 'Subhalaman Baru', shortcut: 'sub', desc: 'Buat subhalaman di dalam halaman ini', Icon: FilePlus2 },
-  { type: 'callout', label: 'Callout', shortcut: '!', desc: 'Kotak sorotan penting', Icon: Lightbulb },
-  { type: 'quote', label: 'Quote', shortcut: '"', desc: 'Kutipan teks', Icon: Quote },
-  { type: 'divider', label: 'Divider', shortcut: '---', desc: 'Garis pemisah', Icon: Minus },
-  { type: 'code', label: 'Code Block', shortcut: '```', desc: 'Blok kode program', Icon: Code2 },
-  { type: 'math', label: 'Rumus LaTeX', shortcut: '$$', desc: 'Persamaan matematika KaTeX', Icon: Sigma }
 ];
 
 const MathPreview: React.FC<{ tex: string }> = ({ tex }) => {
@@ -216,12 +216,16 @@ export const BlockEditor: React.FC = () => {
     blockId: string;
     position: 'before' | 'after';
   } | null>(null);
+  const [dropTargetColumn, setDropTargetColumn] = useState<{
+    columnsBlockId: string;
+    columnId: string;
+  } | null>(null);
   const [draggedNoteId, setDraggedNoteId] = useState<string | null>(null);
   const [dropTargetNoteId, setDropTargetNoteId] = useState<string | null>(null);
   const [isFileDragOverEditor, setIsFileDragOverEditor] = useState(false);
 
   const blockRefs = useRef<Record<string, HTMLInputElement | HTMLTextAreaElement | null>>({});
-  const neonDebounceRef = useRef<number | null>(null);
+  const neonDebounceMapRef = useRef<Record<string, number>>({});
 
   const openDocumentNote = (noteId: string) => {
     setActiveNoteId(noteId);
@@ -285,7 +289,7 @@ export const BlockEditor: React.FC = () => {
     return allNotes.filter(
       (n) =>
         n.title.toLowerCase().includes(q) ||
-        n.blocks.some((b) => b.content.toLowerCase().includes(q))
+        flattenBlocks(n.blocks).some((b) => b.content.toLowerCase().includes(q))
     );
   }, [myNotes, allNotes, searchQuery]);
 
@@ -344,40 +348,26 @@ export const BlockEditor: React.FC = () => {
     return chain;
   }, [activeNote, allNotes]);
 
+  const isSlashInsideColumn = useMemo(() => {
+    if (!slashState || !activeNote) return false;
+    return findBlockLocation(activeNote.blocks, slashState.blockId)?.container === 'column';
+  }, [slashState, activeNote]);
+
   const filteredSlashOptions = useMemo(() => {
     if (!slashState) return SLASH_OPTIONS;
-    const q = slashState.query.trim().toLowerCase();
-    if (!q) return SLASH_OPTIONS;
+    return filterSlashOptions(slashState.query, isSlashInsideColumn);
+  }, [slashState, isSlashInsideColumn]);
 
-    const getMatchRank = (opt: (typeof SLASH_OPTIONS)[number]): number => {
-      const label = opt.label.toLowerCase();
-      const type = opt.type.toLowerCase();
-      const shortcut = opt.shortcut.toLowerCase();
-      const desc = opt.desc.toLowerCase();
-
-      if (type === q || shortcut === q || label === q) return 0;
-      if (type.startsWith(q) || shortcut.startsWith(q) || label.startsWith(q)) return 1;
-      if (type.includes(q) || shortcut.includes(q) || label.includes(q)) return 2;
-      if (desc.includes(q)) return 3;
-      return -1;
-    };
-
-    return SLASH_OPTIONS
-      .map((opt, idx) => ({ opt, idx, rank: getMatchRank(opt) }))
-      .filter((item) => item.rank !== -1)
-      .sort((a, b) => a.rank - b.rank || a.idx - b.idx)
-      .map((item) => item.opt);
-  }, [slashState]);
-
-  // Debounced Neon Postgres Sync helper
+  // Debounced Neon Postgres Sync helper (keyed per noteId so cross-note updates never cancel each other)
   const scheduleNeonSave = (noteToSave: NoteRecord) => {
     const targetOwner = noteToSave.ownerId || currentUser?.id;
     if (!targetOwner || !isNeonConfigured()) return;
     setSyncStatus('syncing');
-    if (neonDebounceRef.current) {
-      window.clearTimeout(neonDebounceRef.current);
+    const prevTimer = neonDebounceMapRef.current[noteToSave.id];
+    if (prevTimer) {
+      window.clearTimeout(prevTimer);
     }
-    neonDebounceRef.current = window.setTimeout(async () => {
+    neonDebounceMapRef.current[noteToSave.id] = window.setTimeout(async () => {
       const ok = await saveNoteToNeon(targetOwner, noteToSave);
       setSyncStatus(ok ? 'synced' : 'idle');
     }, 450);
@@ -385,9 +375,10 @@ export const BlockEditor: React.FC = () => {
 
   const updateNote = async (patch: Partial<NoteRecord>) => {
     if (!activeNote || !canEdit) return;
+    const fresh = (await db.notes.get(activeNote.id)) || activeNote;
     const updatedAt = Date.now();
     const nextNote: NoteRecord = {
-      ...activeNote,
+      ...fresh,
       ...patch,
       updatedAt
     };
@@ -628,9 +619,282 @@ export const BlockEditor: React.FC = () => {
     const freshNote = await db.notes.get(noteId);
     if (!freshNote) return;
     const updatedAt = Date.now();
-    const nextBlocks = freshNote.blocks.map((b) => (b.id === blockId ? { ...b, ...patch } : b));
+    const nextBlocks = mapBlockDeep(freshNote.blocks, blockId, (b) => ({ ...b, ...patch }));
     await db.notes.update(noteId, { blocks: nextBlocks, updatedAt });
     scheduleNeonSave({ ...freshNote, blocks: nextBlocks, updatedAt });
+  };
+
+  const patchBlockInAnyNote = async (
+    targetNoteId: string,
+    targetBlockId: string,
+    updater: (blk: NoteBlock) => NoteBlock
+  ) => {
+    const freshNote = await db.notes.get(targetNoteId);
+    if (!freshNote) return;
+    const perm = resolveNotePermission(freshNote);
+    if (perm !== 'owner' && perm !== 'edit') return;
+    const updatedAt = Date.now();
+    const nextBlocks = mapBlockDeep(freshNote.blocks, targetBlockId, updater);
+    await db.notes.update(targetNoteId, { blocks: nextBlocks, updatedAt });
+    scheduleNeonSave({ ...freshNote, blocks: nextBlocks, updatedAt });
+  };
+
+  const handleSyncColumnInDatabase = async (
+    targetNoteId: string,
+    targetBlockId: string,
+    column: DatabaseColumn
+  ) => {
+    await patchBlockInAnyNote(targetNoteId, targetBlockId, (blk) => {
+      if (blk.type !== 'database' || !blk.databaseData) return blk;
+      const cols = blk.databaseData.columns || [];
+      const exists = cols.some((c) => c.id === column.id);
+      const nextCols = exists
+        ? cols.map((c) => (c.id === column.id ? { ...c, ...column } : c))
+        : [...cols, column];
+      return {
+        ...blk,
+        databaseData: { ...blk.databaseData, columns: nextCols }
+      };
+    });
+  };
+
+  const handleCreateStarterDatabaseForBlock = async (
+    afterBlockId: string
+  ): Promise<{ noteId: string; blockId: string } | null> => {
+    if (!activeNote || !canEdit) return null;
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const dbData = createDefaultDatabaseData('blank');
+    const newDbId = createBlockId('blk-db');
+    const newDbBlock: NoteBlock = {
+      id: newDbId,
+      type: 'database',
+      content: dbData.title,
+      databaseData: dbData
+    };
+    const nextBlocks = insertBlocksRelativeDeep(
+      freshNote.blocks,
+      afterBlockId,
+      'after',
+      [newDbBlock]
+    );
+    await updateNoteBlocks(nextBlocks);
+    return { noteId: freshNote.id, blockId: newDbId };
+  };
+
+  const handleCreateConnectedBlockFromDatabase = async (
+    dbBlockId: string,
+    kind: 'bar_chart' | 'donut_chart' | 'form' | 'metric'
+  ) => {
+    if (!activeNote || !canEdit) return;
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const sources = findAllDatabaseSources([freshNote]);
+    const preferred = { noteId: freshNote.id, blockId: dbBlockId };
+    let newBlock: NoteBlock;
+
+    if (kind === 'bar_chart' || kind === 'donut_chart') {
+      const chartData = createDefaultChartData(
+        sources,
+        kind === 'donut_chart' ? 'donut' : 'bar',
+        preferred
+      );
+      newBlock = {
+        id: createBlockId('blk-chart'),
+        type: 'chart',
+        content: chartData.title,
+        chartData
+      };
+    } else if (kind === 'form') {
+      const formData = createDefaultFormData(sources, preferred);
+      newBlock = {
+        id: createBlockId('blk-form'),
+        type: 'form',
+        content: formData.title,
+        formData
+      };
+    } else {
+      const metricData = createDefaultMetricData(sources, preferred);
+      newBlock = {
+        id: createBlockId('blk-metric'),
+        type: 'metric',
+        content: metricData.title,
+        metricData
+      };
+    }
+
+    const nextBlocks = insertBlocksRelativeDeep(
+      freshNote.blocks,
+      dbBlockId,
+      'after',
+      [newBlock]
+    );
+    await updateNoteBlocks(nextBlocks);
+  };
+
+  const handleSubmitForm = async (payload: {
+    formBlockId: string;
+    targetNoteId: string;
+    targetBlockId: string;
+    values: Record<string, unknown>;
+    responseAccess: FormResponseAccess;
+  }): Promise<{ ok: boolean; error?: string }> => {
+    if (!activeNote) return { ok: false, error: 'Catatan tidak ditemukan.' };
+
+    if (isNeonConfigured()) {
+      const serverRes = await submitFormResponseToNeon({
+        sourceNoteId: activeNote.id,
+        formBlockId: payload.formBlockId,
+        targetNoteId: payload.targetNoteId,
+        targetBlockId: payload.targetBlockId,
+        values: payload.values
+      });
+
+      if (!serverRes.cloudDisabled) {
+        if (!serverRes.ok || !serverRes.row) {
+          return { ok: false, error: serverRes.error || 'Gagal mengirim formulir.' };
+        }
+
+        const targetNote = await db.notes.get(payload.targetNoteId);
+        if (targetNote) {
+          let nextTargetBlocks = mapBlockDeep(
+            targetNote.blocks,
+            payload.targetBlockId,
+            (blk) => ({
+              ...blk,
+              databaseData: blk.databaseData
+                ? {
+                    ...blk.databaseData,
+                    rows: [...(blk.databaseData.rows || []), serverRes.row!]
+                  }
+                : blk.databaseData
+            })
+          );
+          if (payload.targetNoteId === activeNote.id) {
+            nextTargetBlocks = mapBlockDeep(nextTargetBlocks, payload.formBlockId, (blk) => ({
+              ...blk,
+              formData: blk.formData
+                ? {
+                    ...blk.formData,
+                    submissionCount:
+                      serverRes.submissionCount ?? (blk.formData.submissionCount || 0) + 1
+                  }
+                : blk.formData
+            }));
+          }
+          await db.notes.update(payload.targetNoteId, {
+            blocks: nextTargetBlocks,
+            updatedAt: Date.now()
+          });
+        }
+
+        if (payload.targetNoteId !== activeNote.id) {
+          const freshSource = await db.notes.get(activeNote.id);
+          if (freshSource) {
+            const nextSourceBlocks = mapBlockDeep(
+              freshSource.blocks,
+              payload.formBlockId,
+              (blk) => ({
+                ...blk,
+                formData: blk.formData
+                  ? {
+                      ...blk.formData,
+                      submissionCount:
+                        serverRes.submissionCount ?? (blk.formData.submissionCount || 0) + 1
+                    }
+                  : blk.formData
+              })
+            );
+            await db.notes.update(activeNote.id, {
+              blocks: nextSourceBlocks,
+              updatedAt: Date.now()
+            });
+          }
+        }
+
+        return { ok: true };
+      }
+    }
+
+    if (payload.responseAccess === 'closed') {
+      return { ok: false, error: 'Formulir ini sedang ditutup oleh pemiliknya.' };
+    }
+    const targetNote = await db.notes.get(payload.targetNoteId);
+    if (!targetNote) {
+      return { ok: false, error: 'Catatan tabel database tujuan tidak ditemukan.' };
+    }
+    const targetPerm = resolveNotePermission(targetNote);
+    if (
+      payload.responseAccess === 'edit_only' &&
+      targetPerm !== 'owner' &&
+      targetPerm !== 'edit'
+    ) {
+      return {
+        ok: false,
+        error: 'Hanya pemilik atau kolaborator Edit yang bisa mengisi formulir ini.'
+      };
+    }
+
+    const formBlock = findBlockById(activeNote.blocks, payload.formBlockId);
+    const dbBlock = findBlockById(targetNote.blocks, payload.targetBlockId);
+    if (!formBlock?.formData || !dbBlock?.databaseData) {
+      return { ok: false, error: 'Formulir atau Tabel Database tidak ditemukan.' };
+    }
+
+    const sanitized = sanitizeFormSubmission(
+      formBlock.formData,
+      dbBlock.databaseData.columns,
+      payload.values
+    );
+    if (!sanitized.ok || !sanitized.row) {
+      return {
+        ok: false,
+        error: Object.values(sanitized.errors)[0] || 'Data formulir tidak valid.'
+      };
+    }
+
+    const now = Date.now();
+    const nextCount = (formBlock.formData.submissionCount || 0) + 1;
+    let nextTargetBlocks = mapBlockDeep(targetNote.blocks, payload.targetBlockId, (blk) => ({
+      ...blk,
+      databaseData: blk.databaseData
+        ? {
+            ...blk.databaseData,
+            rows: [...(blk.databaseData.rows || []), sanitized.row!]
+          }
+        : blk.databaseData
+    }));
+
+    if (payload.targetNoteId === activeNote.id) {
+      nextTargetBlocks = mapBlockDeep(nextTargetBlocks, payload.formBlockId, (blk) => ({
+        ...blk,
+        formData: blk.formData
+          ? { ...blk.formData, submissionCount: nextCount }
+          : blk.formData
+      }));
+      await db.notes.update(payload.targetNoteId, {
+        blocks: nextTargetBlocks,
+        updatedAt: now
+      });
+    } else {
+      await db.notes.update(payload.targetNoteId, {
+        blocks: nextTargetBlocks,
+        updatedAt: now
+      });
+      const freshSource = await db.notes.get(activeNote.id);
+      if (freshSource) {
+        const nextSourceBlocks = mapBlockDeep(freshSource.blocks, payload.formBlockId, (blk) => ({
+          ...blk,
+          formData: blk.formData
+            ? { ...blk.formData, submissionCount: nextCount }
+            : blk.formData
+        }));
+        await db.notes.update(activeNote.id, {
+          blocks: nextSourceBlocks,
+          updatedAt: now
+        });
+      }
+    }
+
+    return { ok: true };
   };
 
   // Upload image file to Cloudinary for a specific block
@@ -692,6 +956,7 @@ export const BlockEditor: React.FC = () => {
 
   const handleBlockChange = async (id: string, patch: Partial<NoteBlock>) => {
     if (!activeNote || !canEdit) return;
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
 
     if (typeof patch.content === 'string') {
       const val = patch.content;
@@ -713,9 +978,12 @@ export const BlockEditor: React.FC = () => {
       for (const trig of mdTriggers) {
         if (val.startsWith(trig.prefix)) {
           const stripped = val.slice(trig.prefix.length);
-          const next = activeNote.blocks.map((b) =>
-            b.id === id ? { ...b, type: trig.type, content: stripped, ...(trig.extra || {}) } : b
-          );
+          const next = mapBlockDeep(freshNote.blocks, id, (b) => ({
+            ...b,
+            type: trig.type,
+            content: stripped,
+            ...(trig.extra || {})
+          }));
           setSlashState(null);
           await updateNoteBlocks(next);
           setPendingFocusBlockId(id);
@@ -724,13 +992,17 @@ export const BlockEditor: React.FC = () => {
       }
 
       if (val === '---') {
-        const newTextId = `blk-${Date.now()}`;
-        const idx = activeNote.blocks.findIndex((b) => b.id === id);
-        const copy = [...activeNote.blocks];
-        copy[idx] = { ...copy[idx], type: 'divider', content: '' };
-        copy.splice(idx + 1, 0, { id: newTextId, type: 'text', content: '' });
+        const newTextId = createBlockId();
+        let next = mapBlockDeep(freshNote.blocks, id, (b) => ({
+          ...b,
+          type: 'divider',
+          content: ''
+        }));
+        next = insertBlocksRelativeDeep(next, id, 'after', [
+          { id: newTextId, type: 'text', content: '' }
+        ]);
         setSlashState(null);
-        await updateNoteBlocks(copy);
+        await updateNoteBlocks(next);
         setPendingFocusBlockId(newTextId);
         return;
       }
@@ -746,28 +1018,34 @@ export const BlockEditor: React.FC = () => {
       }
     }
 
-    const next = activeNote.blocks.map((b) => (b.id === id ? { ...b, ...patch } : b));
+    const next = mapBlockDeep(freshNote.blocks, id, (b) => ({ ...b, ...patch }));
     await updateNoteBlocks(next);
   };
 
-  const applySlashCommand = async (blockId: string, type: BlockType) => {
+  const applySlashCommand = async (
+    blockId: string,
+    type: BlockType,
+    preset?: SlashPreset
+  ) => {
     if (!activeNote || !canEdit) return;
     setSlashState(null);
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const loc = findBlockLocation(freshNote.blocks, blockId);
+
+    if (type === 'columns' && loc?.container === 'column') {
+      return;
+    }
 
     if (type === 'subpage') {
-      const newSubId = await handleCreateNote(activeNote.id, false);
+      const newSubId = await handleCreateNote(freshNote.id, false);
       if (newSubId) {
-        const next = activeNote.blocks.map((b) =>
-          b.id === blockId
-            ? {
-                ...b,
-                type: 'subpage' as BlockType,
-                subpageId: newSubId,
-                subpageIcon: '📑',
-                content: ''
-              }
-            : b
-        );
+        const next = mapBlockDeep(freshNote.blocks, blockId, (b) => ({
+          ...b,
+          type: 'subpage' as BlockType,
+          subpageId: newSubId,
+          subpageIcon: '📑',
+          content: ''
+        }));
         await updateNoteBlocks(next);
         setActiveNoteId(newSubId);
       }
@@ -775,19 +1053,82 @@ export const BlockEditor: React.FC = () => {
     }
 
     if (type === 'divider') {
-      const nextTextId = `blk-${Date.now()}`;
-      const idx = activeNote.blocks.findIndex((b) => b.id === blockId);
-      const copy = [...activeNote.blocks];
-      copy[idx] = { id: blockId, type: 'divider', content: '' };
-      copy.splice(idx + 1, 0, { id: nextTextId, type: 'text', content: '' });
-      await updateNoteBlocks(copy);
+      const nextTextId = createBlockId();
+      let next = mapBlockDeep(freshNote.blocks, blockId, (b) => ({
+        ...b,
+        type: 'divider',
+        content: ''
+      }));
+      next = insertBlocksRelativeDeep(next, blockId, 'after', [
+        { id: nextTextId, type: 'text', content: '' }
+      ]);
+      await updateNoteBlocks(next);
       setPendingFocusBlockId(nextTextId);
       return;
     }
 
-    const next = activeNote.blocks.map((b) => {
-      if (b.id !== blockId) return b;
+    const prioritizedNotes = [
+      freshNote,
+      ...allNotes.filter((n) => n.id !== freshNote.id)
+    ];
+    const dbSources = findAllDatabaseSources(prioritizedNotes);
+
+    let firstColFocusId: string | null = null;
+    const next = mapBlockDeep(freshNote.blocks, blockId, (b) => {
       const cleanContent = b.content.startsWith('/') ? '' : b.content;
+
+      if (type === 'columns') {
+        const count = preset?.columnCount || 2;
+        const cols = createColumnsBlockData(count);
+        firstColFocusId = cols[0]?.blocks[0]?.id || null;
+        return {
+          ...b,
+          type: 'columns',
+          content: `${count} Kolom`,
+          columns: cols
+        };
+      }
+
+      if (type === 'database') {
+        const dbData = b.databaseData || createDefaultDatabaseData('blank');
+        return {
+          ...b,
+          type: 'database',
+          content: dbData.title,
+          databaseData: dbData
+        };
+      }
+
+      if (type === 'chart') {
+        const chartData =
+          b.chartData || createDefaultChartData(dbSources, preset?.chartKind || 'bar');
+        return {
+          ...b,
+          type: 'chart',
+          content: chartData.title,
+          chartData
+        };
+      }
+
+      if (type === 'form') {
+        const formData = b.formData || createDefaultFormData(dbSources);
+        return {
+          ...b,
+          type: 'form',
+          content: formData.title,
+          formData
+        };
+      }
+
+      if (type === 'metric') {
+        const metricData = b.metricData || createDefaultMetricData(dbSources);
+        return {
+          ...b,
+          type: 'metric',
+          content: metricData.title,
+          metricData
+        };
+      }
 
       if (type === 'link') {
         const parsedExisting = cleanContent ? parseLinkUrl(cleanContent) : null;
@@ -834,21 +1175,31 @@ export const BlockEditor: React.FC = () => {
     });
 
     await updateNoteBlocks(next);
-    if (type === 'video') {
+    if (type === 'columns' && firstColFocusId) {
+      setPendingFocusBlockId(firstColFocusId);
+    } else if (type === 'video') {
       setEditingVideoId(blockId);
     } else if (type === 'link') {
-      const updatedBlock = next.find((b) => b.id === blockId);
+      const updatedBlock = findBlockById(next, blockId);
       if (!updatedBlock?.content) {
         setEditingLinkId(blockId);
       }
-    } else if (type !== 'image' && type !== 'pdf') {
+    } else if (
+      type !== 'image' &&
+      type !== 'pdf' &&
+      type !== 'database' &&
+      type !== 'chart' &&
+      type !== 'form' &&
+      type !== 'metric'
+    ) {
       setPendingFocusBlockId(blockId);
     }
   };
 
   const handleAddBlockAfter = async (afterId?: string, type: BlockType = 'text') => {
     if (!activeNote || !canEdit) return;
-    const newId = `blk-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const newId = createBlockId();
     const newBlock: NoteBlock = {
       id: newId,
       type,
@@ -861,14 +1212,10 @@ export const BlockEditor: React.FC = () => {
       ...(type === 'code' ? { language: 'javascript' } : {}),
       ...(type === 'toggle' ? { toggleOpen: true, toggleBody: '' } : {})
     };
-    const blocks = [...activeNote.blocks];
-    if (!afterId) {
-      blocks.push(newBlock);
-    } else {
-      const idx = blocks.findIndex((b) => b.id === afterId);
-      blocks.splice(idx + 1, 0, newBlock);
-    }
-    await updateNoteBlocks(blocks);
+    const nextBlocks = afterId
+      ? insertBlocksRelativeDeep(freshNote.blocks, afterId, 'after', [newBlock])
+      : [...freshNote.blocks, newBlock];
+    await updateNoteBlocks(nextBlocks);
     if (type === 'link') {
       setEditingLinkId(newId);
     } else if (type === 'video') {
@@ -878,28 +1225,58 @@ export const BlockEditor: React.FC = () => {
     }
   };
 
+  const handleAddBlockToColumn = async (columnsBlockId: string, columnId: string) => {
+    if (!activeNote || !canEdit) return;
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const newId = createBlockId();
+    const nextBlocks = appendBlockToColumn(freshNote.blocks, columnsBlockId, columnId, {
+      id: newId,
+      type: 'text',
+      content: ''
+    });
+    await updateNoteBlocks(nextBlocks);
+    setPendingFocusBlockId(newId);
+  };
+
+  const handleResizeColumns = async (columnsBlockId: string, count: 2 | 3 | 4 | 5) => {
+    if (!activeNote || !canEdit) return;
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const nextBlocks = mapBlockDeep(freshNote.blocks, columnsBlockId, (blk) => ({
+      ...resizeColumnsBlock(blk, count),
+      content: `${count} Kolom`
+    }));
+    await updateNoteBlocks(nextBlocks);
+  };
+
+  const handleUngroupColumns = async (columnsBlockId: string) => {
+    if (!activeNote || !canEdit) return;
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const nextBlocks = ungroupColumnsBlock(freshNote.blocks, columnsBlockId);
+    await updateNoteBlocks(nextBlocks);
+  };
+
   const handleDuplicateBlock = async (block: NoteBlock) => {
     if (!activeNote || !canEdit) return;
-    const newId = `blk-${Date.now()}`;
-    const idx = activeNote.blocks.findIndex((b) => b.id === block.id);
-    const copy = [...activeNote.blocks];
-    copy.splice(idx + 1, 0, { ...block, id: newId });
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const cloned = cloneBlockDeep(block);
+    const nextBlocks = insertBlocksRelativeDeep(
+      freshNote.blocks,
+      block.id,
+      'after',
+      [cloned]
+    );
     setMenuBlockId(null);
-    await updateNoteBlocks(copy);
-    setPendingFocusBlockId(newId);
+    await updateNoteBlocks(nextBlocks);
+    setPendingFocusBlockId(cloned.id);
   };
 
   const handleDeleteBlock = async (id: string) => {
     if (!activeNote || !canEdit) return;
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
     setMenuBlockId(null);
-    if (activeNote.blocks.length <= 1) {
-      await updateNoteBlocks([{ id: activeNote.blocks[0].id, type: 'text', content: '' }]);
-      return;
-    }
-    const idx = activeNote.blocks.findIndex((b) => b.id === id);
-    const prevBlock = activeNote.blocks[Math.max(0, idx - 1)];
-    await updateNoteBlocks(activeNote.blocks.filter((b) => b.id !== id));
-    if (prevBlock) setPendingFocusBlockId(prevBlock.id);
+    const { blocks: nextBlocks, prevFocusId } = removeBlockDeep(freshNote.blocks, id);
+    await updateNoteBlocks(nextBlocks);
+    if (prevFocusId) setPendingFocusBlockId(prevFocusId);
   };
 
   const toggleSelectBlock = (blockId: string, shiftKey = false) => {
@@ -949,7 +1326,7 @@ export const BlockEditor: React.FC = () => {
     const nextBlocks: NoteBlock[] =
       remaining.length > 0
         ? remaining
-        : [{ id: `blk-${Date.now()}`, type: 'text', content: '' }];
+        : [{ id: createBlockId(), type: 'text', content: '' }];
     await updateNoteBlocks(nextBlocks);
     setSelectedBlockIds([]);
     setLastSelectedBlockId(null);
@@ -958,14 +1335,9 @@ export const BlockEditor: React.FC = () => {
 
   const handleMoveBlock = async (id: string, dir: -1 | 1) => {
     if (!activeNote || !canEdit) return;
-    const currentIdx = activeNote.blocks.findIndex((b) => b.id === id);
-    const target = currentIdx + dir;
-    if (currentIdx < 0 || target < 0 || target >= activeNote.blocks.length) return;
-    const copy = [...activeNote.blocks];
-    const [removed] = copy.splice(currentIdx, 1);
-    copy.splice(target, 0, removed);
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
     setMenuBlockId(null);
-    await updateNoteBlocks(copy);
+    await updateNoteBlocks(moveBlockStepDeep(freshNote.blocks, id, dir));
   };
 
   const handleBlockKeyDown = (
@@ -999,7 +1371,7 @@ export const BlockEditor: React.FC = () => {
       if (e.key === 'Enter') {
         e.preventDefault();
         const chosen = filteredSlashOptions[slashState.selectedIndex] || filteredSlashOptions[0];
-        if (chosen) void applySlashCommand(block.id, chosen.type);
+        if (chosen) void applySlashCommand(block.id, chosen.type, chosen.preset);
         return;
       }
       if (e.key === 'Escape') {
@@ -1038,30 +1410,54 @@ export const BlockEditor: React.FC = () => {
   const handleExportMarkdown = () => {
     if (!activeNote) return;
     const mdLines = [`# ${activeNote.title || 'Tanpa Judul'}\n`];
-    for (const b of activeNote.blocks) {
-      if (b.type === 'h1') mdLines.push(`# ${b.content}\n`);
-      else if (b.type === 'h2') mdLines.push(`## ${b.content}\n`);
-      else if (b.type === 'h3') mdLines.push(`### ${b.content}\n`);
-      else if (b.type === 'bullet') mdLines.push(`- ${b.content}`);
-      else if (b.type === 'numbered') mdLines.push(`1. ${b.content}`);
-      else if (b.type === 'todo') {
-        mdLines.push(`- [${b.checked ? 'x' : ' '}] ${b.content}`);
-      } else if (b.type === 'deadline') {
-        const dStr = b.dueDate ? ` (Deadline: ${b.dueDate}${b.dueTime ? ` ${b.dueTime}` : ''})` : '';
-        mdLines.push(`- [${b.checked ? 'x' : ' '}] ${b.content}${dStr}`);
-      } else if (b.type === 'toggle')
-        mdLines.push(`<details><summary>${b.content}</summary>\n\n${b.toggleBody || ''}\n</details>\n`);
-      else if (b.type === 'callout') mdLines.push(`> ${b.calloutIcon || '💡'} ${b.content}\n`);
-      else if (b.type === 'quote') mdLines.push(`> ${b.content}\n`);
-      else if (b.type === 'divider') mdLines.push(`---\n`);
-      else if (b.type === 'code') mdLines.push(`\`\`\`${b.language || ''}\n${b.content}\n\`\`\`\n`);
-      else if (b.type === 'math') mdLines.push(`$$\n${b.content}\n$$\n`);
-      else if (b.type === 'image') mdLines.push(`![${b.caption || 'Image'}](${b.content})\n`);
-      else if (b.type === 'video') mdLines.push(`[${b.caption || 'Video'}](${b.content})\n`);
-      else if (b.type === 'link') {
-        if (b.content) mdLines.push(`[${b.caption || b.content}](${b.content})\n`);
-      } else mdLines.push(`${b.content}\n`);
-    }
+
+    const appendBlocksMd = (blocks: Array<NoteBlock | NoteBlockBase>) => {
+      for (const b of blocks) {
+        if (b.type === 'h1') mdLines.push(`# ${b.content}\n`);
+        else if (b.type === 'h2') mdLines.push(`## ${b.content}\n`);
+        else if (b.type === 'h3') mdLines.push(`### ${b.content}\n`);
+        else if (b.type === 'bullet') mdLines.push(`- ${b.content}`);
+        else if (b.type === 'numbered') mdLines.push(`1. ${b.content}`);
+        else if (b.type === 'todo') {
+          mdLines.push(`- [${b.checked ? 'x' : ' '}] ${b.content}`);
+        } else if (b.type === 'deadline') {
+          const dStr = b.dueDate ? ` (Deadline: ${b.dueDate}${b.dueTime ? ` ${b.dueTime}` : ''})` : '';
+          mdLines.push(`- [${b.checked ? 'x' : ' '}] ${b.content}${dStr}`);
+        } else if (b.type === 'toggle')
+          mdLines.push(`<details><summary>${b.content}</summary>\n\n${b.toggleBody || ''}\n</details>\n`);
+        else if (b.type === 'callout') mdLines.push(`> ${b.calloutIcon || '💡'} ${b.content}\n`);
+        else if (b.type === 'quote') mdLines.push(`> ${b.content}\n`);
+        else if (b.type === 'divider') mdLines.push(`---\n`);
+        else if (b.type === 'code') mdLines.push(`\`\`\`${b.language || ''}\n${b.content}\n\`\`\`\n`);
+        else if (b.type === 'math') mdLines.push(`$$\n${b.content}\n$$\n`);
+        else if (b.type === 'image') mdLines.push(`![${b.caption || 'Image'}](${b.content})\n`);
+        else if (b.type === 'video') mdLines.push(`[${b.caption || 'Video'}](${b.content})\n`);
+        else if (b.type === 'link') {
+          if (b.content) mdLines.push(`[${b.caption || b.content}](${b.content})\n`);
+        } else if (b.type === 'database' && b.databaseData) {
+          mdLines.push(
+            `### ${b.databaseData.title}\n\n${databaseToMarkdownTable(b.databaseData, 200)}\n`
+          );
+        } else if (b.type === 'chart' && b.chartData) {
+          mdLines.push(`**Diagram (${b.chartData.kind})**: ${b.chartData.title}\n`);
+        } else if (b.type === 'form' && b.formData) {
+          const fList = b.formData.fields
+            .filter((f) => !f.hidden)
+            .map((f) => `- ${f.label}`)
+            .join('\n');
+          mdLines.push(`### Formulir: ${b.formData.title}\n${fList}\n`);
+        } else if (b.type === 'metric' && b.metricData) {
+          mdLines.push(`**Metrik**: ${b.metricData.title}\n`);
+        } else if ('columns' in b && b.type === 'columns' && Array.isArray(b.columns)) {
+          b.columns.forEach((col, colIdx) => {
+            mdLines.push(`<!-- Kolom ${colIdx + 1} -->`);
+            appendBlocksMd(col.blocks || []);
+          });
+        } else mdLines.push(`${b.content}\n`);
+      }
+    };
+
+    appendBlocksMd(activeNote.blocks);
     const blob = new Blob([mdLines.join('\n')], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1071,28 +1467,50 @@ export const BlockEditor: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  // Reorder single block or selected group via Drag & Drop
+  // Reorder single block or selected group via Drag & Drop (supports root & inside columns)
   const handleReorderBlocks = async (
     sourceId: string,
     targetId: string,
     position: 'before' | 'after'
   ) => {
     if (!activeNote || !canEdit || sourceId === targetId) return;
-
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
     const movingIds = selectedBlockIds.includes(sourceId)
       ? selectedBlockIds
       : [sourceId];
-    const movingSet = new Set(movingIds);
-    if (movingSet.has(targetId)) return;
+    const nextBlocks = moveBlocksToTarget(freshNote.blocks, movingIds, {
+      kind: 'block',
+      blockId: targetId,
+      position
+    });
+    await updateNoteBlocks(nextBlocks);
+  };
 
-    const movingBlocks = activeNote.blocks.filter((b) => movingSet.has(b.id));
-    const remainingBlocks = activeNote.blocks.filter((b) => !movingSet.has(b.id));
-    const targetIdx = remainingBlocks.findIndex((b) => b.id === targetId);
-    if (targetIdx === -1) return;
+  const handleDropIntoColumn = async (
+    e: React.DragEvent<HTMLDivElement>,
+    columnsBlockId: string,
+    columnId: string
+  ) => {
+    setDropTargetColumn(null);
+    setDropTargetBlock(null);
+    setDraggedBlockId(null);
+    if (!activeNote || !canEdit) return;
+    const internalBlockId =
+      e.dataTransfer.getData('application/miu-block-id') || draggedBlockId;
+    if (!internalBlockId || internalBlockId === columnsBlockId) return;
+    e.preventDefault();
+    e.stopPropagation();
 
-    const insertIdx = position === 'before' ? targetIdx : targetIdx + 1;
-    remainingBlocks.splice(insertIdx, 0, ...movingBlocks);
-    await updateNoteBlocks(remainingBlocks);
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const movingIds = selectedBlockIds.includes(internalBlockId)
+      ? selectedBlockIds
+      : [internalBlockId];
+    const nextBlocks = moveBlocksToTarget(freshNote.blocks, movingIds, {
+      kind: 'column',
+      columnsBlockId,
+      columnId
+    });
+    await updateNoteBlocks(nextBlocks);
   };
 
   // Move a page in the sidebar to become a subpage (or back to root if targetParentId is null)
@@ -1148,9 +1566,10 @@ export const BlockEditor: React.FC = () => {
     if (perm !== 'owner' && perm !== 'edit') return;
 
     const updatedAt = Date.now();
-    const nextBlocks = targetNote.blocks.map((b) =>
-      b.id === blockId ? { ...b, checked: nextChecked } : b
-    );
+    const nextBlocks = mapBlockDeep(targetNote.blocks, blockId, (b) => ({
+      ...b,
+      checked: nextChecked
+    }));
     await db.notes.update(noteId, { blocks: nextBlocks, updatedAt });
     scheduleNeonSave({ ...targetNote, blocks: nextBlocks, updatedAt });
   };
@@ -1169,9 +1588,10 @@ export const BlockEditor: React.FC = () => {
     const updatedAt = Date.now();
 
     if (blockId) {
-      const nextBlocks = targetNote.blocks.map((b) =>
-        b.id === blockId ? { ...b, googleEventId } : b
-      );
+      const nextBlocks = mapBlockDeep(targetNote.blocks, blockId, (b) => ({
+        ...b,
+        googleEventId
+      }));
       await db.notes.update(noteId, { blocks: nextBlocks, updatedAt });
       scheduleNeonSave({ ...targetNote, blocks: nextBlocks, updatedAt });
     } else {
@@ -1184,7 +1604,7 @@ export const BlockEditor: React.FC = () => {
     let count = 0;
     for (const n of [...myNotes, ...sharedWithMeNotes]) {
       if (n.dueDate) count += 1;
-      for (const b of n.blocks || []) {
+      for (const b of flattenBlocks(n.blocks)) {
         if (b.dueDate) count += 1;
       }
     }
@@ -1199,15 +1619,17 @@ export const BlockEditor: React.FC = () => {
   ) => {
     if (!activeNote || newBlocks.length === 0) return;
     const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
-    const copy = [...freshNote.blocks];
     if (targetBlockId) {
-      const idx = copy.findIndex((b) => b.id === targetBlockId);
-      if (idx !== -1) {
-        copy.splice(position === 'before' ? idx : idx + 1, 0, ...newBlocks);
-        await updateNoteBlocks(copy);
-        return;
-      }
+      const nextBlocks = insertBlocksRelativeDeep(
+        freshNote.blocks,
+        targetBlockId,
+        position,
+        newBlocks
+      );
+      await updateNoteBlocks(nextBlocks);
+      return;
     }
+    const copy = [...freshNote.blocks];
     const base =
       copy.length === 1 && copy[0].type === 'text' && !copy[0].content.trim() ? [] : copy;
     await updateNoteBlocks([...base, ...newBlocks]);
@@ -1222,6 +1644,7 @@ export const BlockEditor: React.FC = () => {
     setIsFileDragOverEditor(false);
     setDraggedBlockId(null);
     setDropTargetBlock(null);
+    setDropTargetColumn(null);
 
     if (!activeNote || !canEdit) return;
 
@@ -1375,7 +1798,6 @@ export const BlockEditor: React.FC = () => {
   const isLockedByAuth = !currentUser && !isPublicShareAccess;
   const neonActive = cloudStatus.dbReady;
   const cloudinaryActive = cloudStatus.mediaReady;
-  let numberedCounter = 0;
 
   const renderSidebarPageTree = (
     pool: NoteRecord[],
@@ -1509,6 +1931,1812 @@ export const BlockEditor: React.FC = () => {
         </div>
       );
     });
+  };
+
+  const renderBlockRow = (
+    block: NoteBlock,
+    currentNumber: number,
+    columnCtx?: { columnsBlockId: string; columnId: string }
+  ): React.ReactNode => {
+    const isInsideColumn = Boolean(columnCtx);
+    const isSlashOpen = slashState?.blockId === block.id;
+    const isBlockMenuOpen = menuBlockId === block.id;
+    const isBlockSelected = !isInsideColumn && selectedBlockIds.includes(block.id);
+    const isBeingDragged = draggedBlockId === block.id;
+    const isDropBefore =
+      dropTargetBlock?.blockId === block.id && dropTargetBlock.position === 'before';
+    const isDropAfter =
+      dropTargetBlock?.blockId === block.id && dropTargetBlock.position === 'after';
+
+    return (
+      <div
+        key={block.id}
+        onDragOver={(e) => {
+          if (!canEdit || draggedNoteId || draggedBlockId === block.id) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const rect = e.currentTarget.getBoundingClientRect();
+          const position: 'before' | 'after' =
+            e.clientY - rect.top < rect.height / 2 ? 'before' : 'after';
+          setIsFileDragOverEditor(false);
+          setDropTargetColumn(null);
+          setDropTargetBlock((prev) =>
+            prev?.blockId === block.id && prev.position === position
+              ? prev
+              : { blockId: block.id, position }
+          );
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+            setDropTargetBlock((prev) => (prev?.blockId === block.id ? null : prev));
+          }
+        }}
+        onDrop={(e) => {
+          if (!canEdit || draggedNoteId) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const position: 'before' | 'after' =
+            e.clientY - rect.top < rect.height / 2 ? 'before' : 'after';
+          void handleDropOnEditor(e, block.id, position);
+        }}
+        onClick={(e) => {
+          if (isSelectMode && !isInsideColumn) {
+            e.stopPropagation();
+            toggleSelectBlock(block.id, e.shiftKey);
+          }
+        }}
+        className={`${
+          isInsideColumn
+            ? 'group/colblk relative flex items-start gap-1 py-0.5 rounded-lg transition'
+            : 'group relative flex items-start gap-1.5 -ml-2 sm:-ml-16 pl-2 sm:pl-16 py-0.5 rounded-lg transition'
+        } ${
+          isBlockSelected
+            ? 'bg-rose-500/10 ring-1 ring-rose-400/40'
+            : isSelectMode && !isInsideColumn
+              ? 'hover:bg-subtle/60 cursor-pointer'
+              : ''
+        } ${isBeingDragged ? 'opacity-40' : ''} ${
+          isDropBefore ? 'border-t-2 border-accent-strong' : ''
+        } ${isDropAfter ? 'border-b-2 border-accent-strong' : ''}`}
+      >
+        {/* Block Controls: Left Gutter on Root vs Compact Floating Pill inside Columns */}
+        {canEdit &&
+          (isInsideColumn ? (
+            <div
+              className={`absolute right-1 top-0.5 z-20 flex items-center gap-0.5 rounded-md bg-surface/95 backdrop-blur-sm border border-border-subtle shadow-sm px-0.5 py-0.5 transition no-print ${
+                isBlockMenuOpen
+                  ? 'opacity-100'
+                  : 'opacity-0 group-hover/colblk:opacity-100'
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => void handleAddBlockAfter(block.id, 'text')}
+                className="p-0.5 rounded hover:bg-subtle text-text-secondary hover:text-text-primary"
+                title="Tambah blok di bawah"
+              >
+                <Plus className="w-3 h-3" />
+              </button>
+              <button
+                type="button"
+                draggable={canEdit}
+                onDragStart={(e) => {
+                  e.stopPropagation();
+                  e.dataTransfer.setData('application/miu-block-id', block.id);
+                  e.dataTransfer.effectAllowed = 'move';
+                  setDraggedBlockId(block.id);
+                  setMenuBlockId(null);
+                }}
+                onDragEnd={() => {
+                  setDraggedBlockId(null);
+                  setDropTargetBlock(null);
+                  setDropTargetColumn(null);
+                }}
+                onClick={() => setMenuBlockId(isBlockMenuOpen ? null : block.id)}
+                className="p-0.5 rounded hover:bg-subtle text-text-secondary hover:text-text-primary cursor-grab active:cursor-grabbing"
+                title="Tarik untuk pindahkan blok, atau klik untuk Menu blok"
+              >
+                <GripVertical className="w-3 h-3" />
+              </button>
+            </div>
+          ) : (
+            <div
+              className={`sm:absolute sm:left-1 top-1 flex items-center gap-0.5 transition no-print shrink-0 ${
+                isBlockMenuOpen || isSelectMode || isBlockSelected
+                  ? 'opacity-100'
+                  : 'opacity-0 group-hover:opacity-100'
+              }`}
+            >
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleSelectBlock(block.id, e.shiftKey);
+                }}
+                className={`w-4 h-4 mr-0.5 rounded-[4px] border flex items-center justify-center transition ${
+                  isBlockSelected
+                    ? 'bg-rose-500 border-rose-500 text-white'
+                    : 'border-text-secondary/40 hover:border-rose-400 bg-surface'
+                }`}
+                title="Pilih blok ini (Shift+Klik untuk pilih rentang)"
+              >
+                {isBlockSelected && <Check className="w-3 h-3 stroke-[3]" />}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleAddBlockAfter(block.id, 'text')}
+                className="p-1 rounded hover:bg-subtle text-text-secondary/70 hover:text-text-primary"
+                title="Tambah blok"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                draggable={canEdit}
+                onDragStart={(e) => {
+                  e.stopPropagation();
+                  e.dataTransfer.setData('application/miu-block-id', block.id);
+                  e.dataTransfer.effectAllowed = 'move';
+                  setDraggedBlockId(block.id);
+                  setMenuBlockId(null);
+                }}
+                onDragEnd={() => {
+                  setDraggedBlockId(null);
+                  setDropTargetBlock(null);
+                  setDropTargetColumn(null);
+                }}
+                onClick={() => setMenuBlockId(isBlockMenuOpen ? null : block.id)}
+                className="p-1 rounded hover:bg-subtle text-text-secondary/70 hover:text-text-primary cursor-grab active:cursor-grabbing"
+                title="Tarik untuk geser posisi blok, atau klik untuk Menu blok"
+              >
+                <GripVertical className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+
+        {/* Block Context Menu */}
+        {isBlockMenuOpen && (
+          <div
+            className={`absolute ${
+              isInsideColumn ? 'right-0 top-7' : 'left-0 top-8'
+            } z-30 w-52 miu-card shadow-xl p-1.5 space-y-1 text-xs no-print`}
+          >
+            <div className="grid grid-cols-2 gap-0.5">
+              {SLASH_OPTIONS.slice(0, 10).map(({ id: optId, type, label, Icon, preset }) => (
+                <button
+                  key={optId}
+                  type="button"
+                  onClick={() => {
+                    setMenuBlockId(null);
+                    void applySlashCommand(block.id, type, preset);
+                  }}
+                  className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-left text-[11px] transition ${
+                    block.type === type
+                      ? 'bg-accent-strong/15 text-accent-strong font-semibold'
+                      : 'hover:bg-subtle text-text-primary'
+                  }`}
+                >
+                  <Icon className="w-3 h-3 shrink-0" />
+                  <span className="truncate">{label.split(' ')[0]}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="border-t border-border-subtle pt-1 space-y-0.5">
+              <button
+                type="button"
+                onClick={() => void handleMoveBlock(block.id, -1)}
+                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-subtle text-text-primary"
+              >
+                <ArrowUp className="w-3.5 h-3.5 text-text-secondary" />
+                <span>Geser ke atas</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleMoveBlock(block.id, 1)}
+                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-subtle text-text-primary"
+              >
+                <ArrowDown className="w-3.5 h-3.5 text-text-secondary" />
+                <span>Geser ke bawah</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDuplicateBlock(block)}
+                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-subtle text-text-primary"
+              >
+                <Copy className="w-3.5 h-3.5 text-text-secondary" />
+                <span>Duplikat</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuBlockId(null);
+                  if (block.type === 'image') {
+                    triggerInlineAIExplain('', {
+                      url: block.content,
+                      caption: block.caption || 'Gambar Catatan'
+                    });
+                  } else if (block.type === 'pdf') {
+                    triggerInlineAIExplain('', undefined, {
+                      fileName: block.fileName || block.caption || 'Dokumen.pdf',
+                      text: block.pdfText || '',
+                      pages: block.pdfPages || 1,
+                      url: block.content
+                    });
+                  } else if (block.type === 'video') {
+                    triggerInlineAIExplain(
+                      `Video (${block.caption || 'Tautan Video'}): ${block.content}`
+                    );
+                  } else if (block.type === 'link') {
+                    triggerInlineAIExplain(
+                      `Tautan URL (${block.caption || 'Link'}): ${block.content}`
+                    );
+                  } else if (block.type === 'database' && block.databaseData) {
+                    triggerInlineAIExplain(
+                      `Analisis Tabel Database "${block.databaseData.title}":\n${databaseToMarkdownTable(block.databaseData, 50)}`
+                    );
+                  } else if (block.type === 'chart' && block.chartData && activeNote) {
+                    const srcNote = allNotes.find(
+                      (n) => n.id === block.chartData?.sourceNoteId
+                    );
+                    const srcBlock = findBlockById(
+                      srcNote?.blocks || activeNote.blocks,
+                      block.chartData.sourceBlockId
+                    );
+                    const agg = aggregateDatabaseForChart(
+                      srcBlock?.databaseData,
+                      block.chartData
+                    );
+                    const summary = agg.items
+                      .map((i) => `${i.label}: ${i.value} (${i.percent}%)`)
+                      .join(', ');
+                    triggerInlineAIExplain(
+                      `Analisis Diagram "${block.chartData.title}" (${block.chartData.kind}): ${summary}`
+                    );
+                  } else if (block.type === 'columns' && block.columns) {
+                    const combined = block.columns
+                      .flatMap((c) => c.blocks || [])
+                      .map((b) => b.content)
+                      .filter(Boolean)
+                      .join('\n');
+                    triggerInlineAIExplain(combined);
+                  } else {
+                    triggerInlineAIExplain(block.content);
+                  }
+                  setIsAIDrawerOpen(true);
+                }}
+                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-subtle text-indigo-500"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Tanya AI</span>
+              </button>
+              {!isInsideColumn && (
+                <button
+                  type="button"
+                  onClick={() => selectBlocksFromHereToEnd(block.id)}
+                  className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-subtle text-text-primary"
+                >
+                  <CheckSquare className="w-3.5 h-3.5 text-rose-500" />
+                  <span>Pilih sampai bawah</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void handleDeleteBlock(block.id)}
+                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-rose-500/10 text-rose-500"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Hapus</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Block Renderer */}
+        <div className="flex-1 min-w-0 relative">
+          {block.type === 'h1' &&
+            (canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
+              <input
+                ref={(el) => {
+                  blockRefs.current[block.id] = el;
+                }}
+                value={block.content}
+                onFocus={() => setEditingBlockId(block.id)}
+                onBlur={() =>
+                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
+                }
+                onChange={(e) =>
+                  void handleBlockChange(block.id, { content: e.target.value })
+                }
+                onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                placeholder="Heading 1"
+                className="w-full bg-transparent text-2xl font-bold text-text-primary focus:outline-none pt-3 pb-1"
+              />
+            ) : (
+              <div
+                onClick={() => {
+                  if (canEdit) setPendingFocusBlockId(block.id);
+                }}
+                className={`w-full text-2xl font-bold text-text-primary pt-3 pb-1 break-words ${
+                  canEdit ? 'cursor-text' : 'cursor-default'
+                }`}
+              >
+                {renderInlineMarkdown(block.content)}
+              </div>
+            ))}
+
+          {block.type === 'h2' &&
+            (canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
+              <input
+                ref={(el) => {
+                  blockRefs.current[block.id] = el;
+                }}
+                value={block.content}
+                onFocus={() => setEditingBlockId(block.id)}
+                onBlur={() =>
+                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
+                }
+                onChange={(e) =>
+                  void handleBlockChange(block.id, { content: e.target.value })
+                }
+                onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                placeholder="Heading 2"
+                className="w-full bg-transparent text-xl font-bold text-text-primary focus:outline-none pt-2 pb-0.5"
+              />
+            ) : (
+              <div
+                onClick={() => {
+                  if (canEdit) setPendingFocusBlockId(block.id);
+                }}
+                className={`w-full text-xl font-bold text-text-primary pt-2 pb-0.5 break-words ${
+                  canEdit ? 'cursor-text' : 'cursor-default'
+                }`}
+              >
+                {renderInlineMarkdown(block.content)}
+              </div>
+            ))}
+
+          {block.type === 'h3' &&
+            (canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
+              <input
+                ref={(el) => {
+                  blockRefs.current[block.id] = el;
+                }}
+                value={block.content}
+                onFocus={() => setEditingBlockId(block.id)}
+                onBlur={() =>
+                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
+                }
+                onChange={(e) =>
+                  void handleBlockChange(block.id, { content: e.target.value })
+                }
+                onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                placeholder="Heading 3"
+                className="w-full bg-transparent text-base font-bold text-text-primary focus:outline-none pt-1.5 pb-0.5"
+              />
+            ) : (
+              <div
+                onClick={() => {
+                  if (canEdit) setPendingFocusBlockId(block.id);
+                }}
+                className={`w-full text-base font-bold text-text-primary pt-1.5 pb-0.5 break-words ${
+                  canEdit ? 'cursor-text' : 'cursor-default'
+                }`}
+              >
+                {renderInlineMarkdown(block.content)}
+              </div>
+            ))}
+
+          {block.type === 'text' &&
+            (canEdit &&
+            (editingBlockId === block.id ||
+              !block.content.trim() ||
+              block.content.startsWith('/')) ? (
+              <textarea
+                ref={(el) => {
+                  blockRefs.current[block.id] = el;
+                }}
+                rows={Math.max(
+                  1,
+                  Math.max(
+                    block.content.split('\n').length,
+                    Math.ceil(block.content.length / (isInsideColumn ? 28 : 72))
+                  )
+                )}
+                value={block.content}
+                onFocus={() => setEditingBlockId(block.id)}
+                onBlur={() =>
+                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
+                }
+                onChange={(e) =>
+                  void handleBlockChange(block.id, { content: e.target.value })
+                }
+                onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                placeholder="Ketik '/' untuk perintah, atau mulai menulis..."
+                className="w-full bg-transparent text-[15px] sm:text-base leading-[1.68] text-text-primary placeholder:text-text-secondary/35 focus:outline-none resize-none py-0.5"
+              />
+            ) : (
+              <div
+                onClick={() => {
+                  if (canEdit) setPendingFocusBlockId(block.id);
+                }}
+                className={`w-full text-[15px] sm:text-base leading-[1.68] text-text-primary py-0.5 whitespace-pre-wrap break-words ${
+                  canEdit ? 'cursor-text' : 'cursor-default'
+                }`}
+              >
+                {renderInlineMarkdown(block.content)}
+              </div>
+            ))}
+
+          {block.type === 'bullet' && (
+            <div className="flex items-start gap-2.5 py-0.5">
+              <span className="text-text-primary font-bold select-none pt-0.5">•</span>
+              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
+                <textarea
+                  ref={(el) => {
+                    blockRefs.current[block.id] = el;
+                  }}
+                  rows={Math.max(
+                    1,
+                    Math.max(
+                      block.content.split('\n').length,
+                      Math.ceil(block.content.length / (isInsideColumn ? 26 : 68))
+                    )
+                  )}
+                  value={block.content}
+                  onFocus={() => setEditingBlockId(block.id)}
+                  onBlur={() =>
+                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
+                  }
+                  onChange={(e) =>
+                    void handleBlockChange(block.id, { content: e.target.value })
+                  }
+                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                  placeholder="List"
+                  className="flex-1 bg-transparent text-[15px] sm:text-base leading-[1.6] text-text-primary focus:outline-none resize-none"
+                />
+              ) : (
+                <div
+                  onClick={() => {
+                    if (canEdit) setPendingFocusBlockId(block.id);
+                  }}
+                  className={`flex-1 text-[15px] sm:text-base leading-[1.6] text-text-primary break-words ${
+                    canEdit ? 'cursor-text' : 'cursor-default'
+                  }`}
+                >
+                  {renderInlineMarkdown(block.content)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {block.type === 'numbered' && (
+            <div className="flex items-start gap-2 py-0.5">
+              <span className="font-mono text-sm text-text-secondary select-none pt-0.5 min-w-[20px]">
+                {currentNumber}.
+              </span>
+              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
+                <textarea
+                  ref={(el) => {
+                    blockRefs.current[block.id] = el;
+                  }}
+                  rows={Math.max(
+                    1,
+                    Math.max(
+                      block.content.split('\n').length,
+                      Math.ceil(block.content.length / (isInsideColumn ? 26 : 68))
+                    )
+                  )}
+                  value={block.content}
+                  onFocus={() => setEditingBlockId(block.id)}
+                  onBlur={() =>
+                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
+                  }
+                  onChange={(e) =>
+                    void handleBlockChange(block.id, { content: e.target.value })
+                  }
+                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                  placeholder="List"
+                  className="flex-1 bg-transparent text-[15px] sm:text-base leading-[1.6] text-text-primary focus:outline-none resize-none"
+                />
+              ) : (
+                <div
+                  onClick={() => {
+                    if (canEdit) setPendingFocusBlockId(block.id);
+                  }}
+                  className={`flex-1 text-[15px] sm:text-base leading-[1.6] text-text-primary break-words ${
+                    canEdit ? 'cursor-text' : 'cursor-default'
+                  }`}
+                >
+                  {renderInlineMarkdown(block.content)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {block.type === 'todo' && (
+            <div className="flex items-start gap-2.5 py-0.5">
+              <button
+                type="button"
+                disabled={!canEdit}
+                onClick={() =>
+                  void handleBlockChange(block.id, { checked: !block.checked })
+                }
+                className={`mt-1 w-4 h-4 rounded-[4px] border flex items-center justify-center shrink-0 transition ${
+                  block.checked
+                    ? 'bg-accent-strong border-accent-strong text-white dark:text-slate-950'
+                    : 'border-text-secondary/50 hover:border-accent-strong'
+                }`}
+              >
+                {block.checked && <Check className="w-3 h-3 stroke-[3]" />}
+              </button>
+              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
+                <textarea
+                  ref={(el) => {
+                    blockRefs.current[block.id] = el;
+                  }}
+                  rows={Math.max(1, Math.ceil(block.content.length / (isInsideColumn ? 26 : 68)))}
+                  value={block.content}
+                  onFocus={() => setEditingBlockId(block.id)}
+                  onBlur={() =>
+                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
+                  }
+                  onChange={(e) =>
+                    void handleBlockChange(block.id, { content: e.target.value })
+                  }
+                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                  placeholder="To-do"
+                  className={`flex-1 bg-transparent text-[15px] sm:text-base leading-[1.6] focus:outline-none resize-none ${
+                    block.checked
+                      ? 'line-through text-text-secondary'
+                      : 'text-text-primary'
+                  }`}
+                />
+              ) : (
+                <div
+                  onClick={() => {
+                    if (canEdit) setPendingFocusBlockId(block.id);
+                  }}
+                  className={`flex-1 text-[15px] sm:text-base leading-[1.6] break-words ${
+                    canEdit ? 'cursor-text' : 'cursor-default'
+                  } ${
+                    block.checked
+                      ? 'line-through text-text-secondary'
+                      : 'text-text-primary'
+                  }`}
+                >
+                  {renderInlineMarkdown(block.content)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Slash Command Deadline Block (`/deadline` -> Auto-syncs to Calendar) */}
+          {block.type === 'deadline' && (
+            <div className="my-1 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="flex items-start sm:items-center gap-2.5 flex-1 min-w-0">
+                <button
+                  type="button"
+                  disabled={!canEdit}
+                  onClick={() =>
+                    void handleBlockChange(block.id, { checked: !block.checked })
+                  }
+                  className={`mt-0.5 sm:mt-0 w-4 h-4 rounded-[4px] border flex items-center justify-center shrink-0 transition ${
+                    block.checked
+                      ? 'bg-emerald-500 border-emerald-500 text-white'
+                      : 'border-amber-600/60 dark:border-amber-300/60 bg-surface'
+                  }`}
+                >
+                  {block.checked && <Check className="w-3 h-3 stroke-[3]" />}
+                </button>
+
+                {canEdit ? (
+                  <input
+                    ref={(el) => {
+                      blockRefs.current[block.id] = el;
+                    }}
+                    type="text"
+                    value={block.content}
+                    onChange={(e) =>
+                      void handleBlockChange(block.id, { content: e.target.value })
+                    }
+                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                    placeholder="Ketik nama tugas / deadline..."
+                    className={`flex-1 min-w-0 bg-transparent text-sm font-semibold focus:outline-none ${
+                      block.checked
+                        ? 'line-through text-text-secondary'
+                        : 'text-text-primary'
+                    }`}
+                  />
+                ) : (
+                  <span
+                    className={`flex-1 min-w-0 text-sm font-semibold ${
+                      block.checked
+                        ? 'line-through text-text-secondary'
+                        : 'text-text-primary'
+                    }`}
+                  >
+                    {block.content || 'Deadline tanpa judul'}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 shrink-0 no-print">
+                {canEdit ? (
+                  <>
+                    <div className="inline-flex items-center gap-1 rounded-lg bg-surface border border-border-subtle px-2 py-1">
+                      <CalendarDays className="w-3.5 h-3.5 text-amber-500" />
+                      <input
+                        type="date"
+                        value={block.dueDate || ''}
+                        onChange={(e) =>
+                          void handleBlockChange(block.id, {
+                            dueDate: e.target.value
+                          })
+                        }
+                        className="bg-transparent text-[11px] font-medium text-text-primary focus:outline-none"
+                      />
+                    </div>
+                    <input
+                      type="time"
+                      value={block.dueTime || ''}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, {
+                          dueTime: e.target.value
+                        })
+                      }
+                      title="Jam deadline (opsional)"
+                      className="rounded-lg bg-surface border border-border-subtle px-2 py-1 text-[11px] text-text-primary focus:outline-none"
+                    />
+                  </>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[11px] font-semibold text-text-primary">
+                    <CalendarDays className="w-3.5 h-3.5 text-amber-500" />
+                    <span>
+                      {block.dueDate || 'Tanpa Tanggal'}
+                      {block.dueTime ? ` · ${block.dueTime}` : ''}
+                    </span>
+                  </span>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setMainViewMode('calendar')}
+                  className="px-2 py-1 rounded-lg bg-surface hover:bg-subtle border border-border-subtle text-[10px] font-bold text-accent-strong transition"
+                  title="Buka tampilan Kalender"
+                >
+                  Kalender →
+                </button>
+              </div>
+            </div>
+          )}
+
+          {block.type === 'toggle' && (() => {
+            const isOpen = canEdit
+              ? block.toggleOpen
+              : (localToggleOverrides[block.id] ?? block.toggleOpen);
+            return (
+              <div className="py-0.5 space-y-1.5">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (canEdit) {
+                        void handleBlockChange(block.id, {
+                          toggleOpen: !block.toggleOpen
+                        });
+                      } else {
+                        setLocalToggleOverrides((prev) => ({
+                          ...prev,
+                          [block.id]: !isOpen
+                        }));
+                      }
+                    }}
+                    className="p-0.5 rounded hover:bg-subtle text-text-secondary"
+                  >
+                    <ChevronRight
+                      className={`w-4 h-4 transition-transform ${
+                        isOpen ? 'rotate-90' : ''
+                      }`}
+                    />
+                  </button>
+                  <input
+                    ref={(el) => {
+                      blockRefs.current[block.id] = el;
+                    }}
+                    readOnly={!canEdit}
+                    value={block.content}
+                    onChange={(e) =>
+                      void handleBlockChange(block.id, { content: e.target.value })
+                    }
+                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                    placeholder="Toggle"
+                    className="flex-1 bg-transparent text-[15px] sm:text-base font-medium text-text-primary focus:outline-none"
+                  />
+                </div>
+                {isOpen && (
+                  <div className="pl-6 border-l border-border-subtle ml-2">
+                    <textarea
+                      readOnly={!canEdit}
+                      rows={Math.max(2, (block.toggleBody || '').split('\n').length)}
+                      value={block.toggleBody || ''}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, {
+                          toggleBody: e.target.value
+                        })
+                      }
+                      placeholder={canEdit ? 'Ketik isi di dalam toggle...' : ''}
+                      className="w-full bg-transparent text-sm text-text-primary focus:outline-none resize-none"
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {block.type === 'callout' && (
+            <div className="flex items-start gap-3 bg-subtle/80 border border-border-subtle rounded-xl p-3.5 my-1">
+              <button
+                type="button"
+                disabled={!canEdit}
+                onClick={() => {
+                  const icons = ['💡', '⚡', '📌', '🔥', '🎓', '⚠️', '✅'];
+                  const nextIcon =
+                    icons[
+                      (icons.indexOf(block.calloutIcon || '💡') + 1) % icons.length
+                    ];
+                  void handleBlockChange(block.id, { calloutIcon: nextIcon });
+                }}
+                className="text-lg leading-none pt-0.5"
+              >
+                {block.calloutIcon || '💡'}
+              </button>
+              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
+                <textarea
+                  ref={(el) => {
+                    blockRefs.current[block.id] = el;
+                  }}
+                  rows={Math.max(2, Math.ceil(block.content.length / 72))}
+                  value={block.content}
+                  onFocus={() => setEditingBlockId(block.id)}
+                  onBlur={() =>
+                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
+                  }
+                  onChange={(e) =>
+                    void handleBlockChange(block.id, { content: e.target.value })
+                  }
+                  placeholder="Ketik isi callout..."
+                  className="flex-1 bg-transparent text-sm leading-relaxed text-text-primary focus:outline-none resize-none"
+                />
+              ) : (
+                <div
+                  onClick={() => {
+                    if (canEdit) setPendingFocusBlockId(block.id);
+                  }}
+                  className={`flex-1 text-sm leading-relaxed text-text-primary whitespace-pre-wrap break-words ${
+                    canEdit ? 'cursor-text' : 'cursor-default'
+                  }`}
+                >
+                  {renderInlineMarkdown(block.content)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {block.type === 'quote' && (
+            <blockquote className="border-l-[3px] border-text-primary/70 pl-4 py-1 my-1 italic text-text-primary/90">
+              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
+                <textarea
+                  ref={(el) => {
+                    blockRefs.current[block.id] = el;
+                  }}
+                  rows={Math.max(1, Math.ceil(block.content.length / 75))}
+                  value={block.content}
+                  onFocus={() => setEditingBlockId(block.id)}
+                  onBlur={() =>
+                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
+                  }
+                  onChange={(e) =>
+                    void handleBlockChange(block.id, { content: e.target.value })
+                  }
+                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                  placeholder="Kutipan..."
+                  className="w-full bg-transparent text-[15px] leading-relaxed focus:outline-none resize-none"
+                />
+              ) : (
+                <div
+                  onClick={() => {
+                    if (canEdit) setPendingFocusBlockId(block.id);
+                  }}
+                  className={`w-full text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
+                    canEdit ? 'cursor-text' : 'cursor-default'
+                  }`}
+                >
+                  {renderInlineMarkdown(block.content)}
+                </div>
+              )}
+            </blockquote>
+          )}
+
+          {block.type === 'divider' && (
+            <div className="py-3">
+              <hr className="border-border-subtle" />
+            </div>
+          )}
+
+          {/* Notion Embedded Subpage Card */}
+          {block.type === 'subpage' && (() => {
+            const linkedPage = allNotes.find((n) => n.id === block.subpageId);
+            return (
+              <button
+                type="button"
+                onClick={() => {
+                  if (linkedPage) setActiveNoteId(linkedPage.id);
+                }}
+                className="w-full my-1 px-3.5 py-2.5 rounded-xl bg-subtle/60 hover:bg-subtle border border-border-subtle hover:border-accent-strong/60 flex items-center justify-between gap-2 text-left transition group/sub"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="text-lg leading-none shrink-0">
+                    {linkedPage?.icon || block.subpageIcon || '📑'}
+                  </span>
+                  <span className="text-sm font-semibold text-text-primary underline decoration-border-subtle underline-offset-4 group-hover/sub:decoration-accent-strong truncate">
+                    {linkedPage?.title || block.content || 'Subhalaman Baru'}
+                  </span>
+                </div>
+                <span className="text-[11px] font-mono text-text-secondary shrink-0">
+                  Buka Subhalaman →
+                </span>
+              </button>
+            );
+          })()}
+
+          {block.type === 'code' && (
+            <div className="rounded-xl overflow-hidden border border-border-subtle bg-slate-950 text-slate-100 my-1.5">
+              <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900 border-b border-white/10 text-[11px] font-mono">
+                <select
+                  disabled={!canEdit}
+                  value={block.language || 'javascript'}
+                  onChange={(e) =>
+                    void handleBlockChange(block.id, { language: e.target.value })
+                  }
+                  className="bg-transparent text-sky-300 focus:outline-none cursor-pointer"
+                >
+                  {[
+                    'javascript',
+                    'typescript',
+                    'python',
+                    'sql',
+                    'bash',
+                    'cpp',
+                    'html'
+                  ].map((lang) => (
+                    <option key={lang} value={lang} className="bg-slate-900">
+                      {lang}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(block.content);
+                    setCopiedId(block.id);
+                    window.setTimeout(() => setCopiedId(null), 1500);
+                  }}
+                  className="inline-flex items-center gap-1 text-slate-300 hover:text-white"
+                >
+                  <Copy className="w-3 h-3" />
+                  {copiedId === block.id ? 'Tersalin' : 'Salin'}
+                </button>
+              </div>
+              <textarea
+                ref={(el) => {
+                  blockRefs.current[block.id] = el;
+                }}
+                readOnly={!canEdit}
+                rows={Math.max(3, block.content.split('\n').length)}
+                value={block.content}
+                onChange={(e) =>
+                  void handleBlockChange(block.id, { content: e.target.value })
+                }
+                placeholder="Ketik kode..."
+                className="w-full p-3 bg-transparent font-mono text-xs leading-relaxed text-slate-100 focus:outline-none resize-y"
+              />
+            </div>
+          )}
+
+          {block.type === 'math' && (
+            <div className="bg-subtle/60 border border-border-subtle rounded-xl p-3 my-1 space-y-2">
+              <div
+                onClick={() => {
+                  if (canEdit) {
+                    setEditingMathId(editingMathId === block.id ? null : block.id);
+                  }
+                }}
+                className={`${canEdit ? 'cursor-pointer' : ''} text-text-primary`}
+              >
+                <MathPreview tex={block.content} />
+              </div>
+              {canEdit && (editingMathId === block.id || !block.content) && (
+                <input
+                  ref={(el) => {
+                    blockRefs.current[block.id] = el;
+                  }}
+                  value={block.content}
+                  onChange={(e) =>
+                    void handleBlockChange(block.id, { content: e.target.value })
+                  }
+                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                  placeholder="Rumus LaTeX (mis. E = mc^2)"
+                  className="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 font-mono text-xs text-text-primary focus:outline-none"
+                />
+              )}
+            </div>
+          )}
+
+          {/* Notion Image Block with Cloudinary Upload & Direct Ask AI */}
+          {block.type === 'image' && (
+            <div className="my-1.5">
+              {block.content ? (
+                <figure className="bg-subtle/40 border border-border-subtle rounded-xl p-2 space-y-1.5 relative group/img">
+                  <img
+                    src={block.content}
+                    alt={block.caption || 'Gambar'}
+                    className="max-h-96 w-auto mx-auto rounded-lg object-contain"
+                  />
+                  <div className="absolute top-3 right-3 flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        triggerInlineAIExplain('', {
+                          url: block.content,
+                          caption: block.caption || 'Gambar Catatan'
+                        });
+                      }}
+                      className="px-2.5 py-1 rounded-full bg-indigo-600/90 hover:bg-indigo-500 text-white text-[10px] font-semibold inline-flex items-center gap-1 shadow-md transition"
+                      title="Jadikan gambar ini referensi untuk ditanyakan ke AI"
+                    >
+                      <Sparkles className="w-3 h-3" />
+                      Tanya AI
+                    </button>
+                    {block.content.includes('cloudinary.com') && (
+                      <span className="px-2 py-1 rounded-full bg-black/60 text-sky-300 font-mono text-[9px] inline-flex items-center gap-1">
+                        <Cloud className="w-2.5 h-2.5" />
+                        Cloud
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    readOnly={!canEdit}
+                    value={block.caption || ''}
+                    onChange={(e) =>
+                      void handleBlockChange(block.id, { caption: e.target.value })
+                    }
+                    placeholder={canEdit ? 'Tambahkan keterangan gambar...' : ''}
+                    className="w-full text-center bg-transparent text-xs text-text-secondary focus:outline-none"
+                  />
+                </figure>
+              ) : canEdit ? (
+                <label className="flex flex-col items-center justify-center gap-2 py-6 px-4 rounded-xl border border-dashed border-border-subtle bg-subtle/40 hover:bg-subtle/75 cursor-pointer transition text-center">
+                  {uploadingBlockId === block.id ? (
+                    <>
+                      <Loader2 className="w-5 h-5 text-accent-strong animate-spin" />
+                      <span className="text-xs font-medium text-text-primary">
+                        Mengunggah gambar ke Cloud Catatan...
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <UploadCloud className="w-5 h-5 text-accent-strong" />
+                      <div className="space-y-0.5">
+                        <p className="text-xs font-semibold text-text-primary">
+                          Klik untuk unggah gambar
+                        </p>
+                        <p className="text-[11px] text-text-secondary">
+                          {cloudinaryActive
+                            ? 'Tersimpan otomatis di Cloud Catatan'
+                            : 'Atau tarik file gambar langsung ke halaman ini'}
+                        </p>
+                      </div>
+                    </>
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void handleUploadImageForBlock(block.id, f);
+                    }}
+                  />
+                </label>
+              ) : null}
+            </div>
+          )}
+
+          {/* Notion Embedded YouTube / Video URL Block */}
+          {block.type === 'video' && (() => {
+            const draftUrl = videoUrlDrafts[block.id] ?? block.content;
+            const isEditingUrl =
+              canEdit && (!block.content || editingVideoId === block.id);
+            const parsedEmbed = parseVideoEmbedUrl(
+              isEditingUrl ? draftUrl : block.content
+            );
+
+            return (
+              <div className="my-1.5">
+                {isEditingUrl ? (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      if (parsedEmbed.kind === 'invalid') return;
+                      await handleBlockChange(block.id, {
+                        content: parsedEmbed.originalUrl
+                      });
+                      setEditingVideoId(null);
+                    }}
+                    className="p-4 rounded-xl border border-dashed border-border-subtle bg-subtle/45 space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1.5 text-xs font-bold text-text-primary">
+                        <Video className="w-4 h-4 text-rose-500" />
+                        <span>Sematkan YouTube atau URL Video</span>
+                      </span>
+                      {draftUrl.trim() && (
+                        <span
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+                            parsedEmbed.kind === 'invalid'
+                              ? 'bg-rose-500/15 text-rose-500'
+                              : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300'
+                          }`}
+                        >
+                          {parsedEmbed.kind === 'invalid'
+                            ? parsedEmbed.providerLabel
+                            : `✓ ${parsedEmbed.providerLabel} terdeteksi`}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        autoFocus={editingVideoId === block.id || !block.content}
+                        value={draftUrl}
+                        onChange={(e) =>
+                          setVideoUrlDrafts((prev) => ({
+                            ...prev,
+                            [block.id]: e.target.value
+                          }))
+                        }
+                        placeholder="Tempel link YouTube (youtube.com / youtu.be), Vimeo, Drive, atau .mp4..."
+                        className="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
+                      />
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="submit"
+                          disabled={parsedEmbed.kind === 'invalid'}
+                          className="px-3.5 py-1.5 rounded-lg bg-accent-strong text-white dark:text-slate-950 text-xs font-semibold hover:opacity-95 disabled:opacity-45 transition"
+                        >
+                          Sematkan
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingVideoId(null);
+                            if (!block.content) {
+                              void handleBlockChange(block.id, {
+                                type: 'text',
+                                content: ''
+                              });
+                            } else {
+                              setVideoUrlDrafts((prev) => ({
+                                ...prev,
+                                [block.id]: block.content
+                              }));
+                            }
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-surface border border-border-subtle text-xs text-text-secondary hover:text-text-primary transition"
+                        >
+                          Batal
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                ) : parsedEmbed.kind !== 'invalid' ? (
+                  <figure className="bg-subtle/40 border border-border-subtle rounded-xl p-2.5 space-y-2 group/vid">
+                    <div className="flex items-center justify-between gap-2 px-1">
+                      <span className="inline-flex items-center gap-1.5 text-[10px] font-mono font-semibold text-text-secondary">
+                        <Video className="w-3.5 h-3.5 text-rose-500" />
+                        <span>{parsedEmbed.providerLabel}</span>
+                      </span>
+
+                      <div className="flex items-center gap-1.5">
+                        <a
+                          href={parsedEmbed.originalUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          <span>Buka Link</span>
+                        </a>
+                        {canEdit && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setVideoUrlDrafts((prev) => ({
+                                ...prev,
+                                [block.id]: block.content
+                              }));
+                              setEditingVideoId(block.id);
+                            }}
+                            className="px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                          >
+                            Ubah URL
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {parsedEmbed.kind === 'video' ? (
+                      <video
+                        src={parsedEmbed.embedUrl}
+                        controls
+                        playsInline
+                        preload="metadata"
+                        className="w-full max-h-[460px] rounded-lg bg-black"
+                      />
+                    ) : (
+                      <div className="w-full aspect-video rounded-lg overflow-hidden bg-slate-950 border border-border-subtle">
+                        <iframe
+                          src={parsedEmbed.embedUrl}
+                          title={block.caption || `${parsedEmbed.providerLabel} Video`}
+                          className="w-full h-full border-0"
+                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                          referrerPolicy="strict-origin-when-cross-origin"
+                          allowFullScreen
+                        />
+                      </div>
+                    )}
+
+                    <input
+                      readOnly={!canEdit}
+                      value={block.caption || ''}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, { caption: e.target.value })
+                      }
+                      placeholder={
+                        canEdit
+                          ? 'Tambahkan keterangan atau catatan timestamp video...'
+                          : ''
+                      }
+                      className="w-full text-center bg-transparent text-xs text-text-secondary focus:outline-none"
+                    />
+                  </figure>
+                ) : (
+                  <div className="p-3 rounded-xl border border-rose-400/30 bg-rose-500/10 text-xs text-rose-500 flex items-center justify-between gap-2">
+                    <span>URL video tidak valid: {block.content}</span>
+                    {canEdit && (
+                      <button
+                        type="button"
+                        onClick={() => setEditingVideoId(block.id)}
+                        className="px-2.5 py-1 rounded-md bg-surface text-text-primary font-semibold"
+                      >
+                        Perbaiki URL
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Notion URL Link / Bookmark Block (`/link` or `/url`) */}
+          {block.type === 'link' && (() => {
+            const draft = linkDrafts[block.id] ?? {
+              url: block.content,
+              caption: block.caption || ''
+            };
+            const parsedDraft = parseLinkUrl(draft.url);
+            const parsedSaved = parseLinkUrl(block.content);
+            const isEditingLink =
+              canEdit && (!block.content || editingLinkId === block.id);
+
+            const cancelLinkEdit = () => {
+              setEditingLinkId(null);
+              if (!block.content) {
+                void handleBlockChange(block.id, {
+                  type: 'text',
+                  content: ''
+                });
+                setPendingFocusBlockId(block.id);
+              } else {
+                setLinkDrafts((prev) => ({
+                  ...prev,
+                  [block.id]: {
+                    url: block.content,
+                    caption: block.caption || ''
+                  }
+                }));
+              }
+            };
+
+            return (
+              <div className="my-1.5">
+                {isEditingLink ? (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      if (!parsedDraft.isValid) return;
+                      await handleBlockChange(block.id, {
+                        content: parsedDraft.url,
+                        caption: draft.caption.trim()
+                      });
+                      setEditingLinkId(null);
+                    }}
+                    className="p-4 rounded-xl border border-dashed border-border-subtle bg-subtle/45 space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1.5 text-xs font-bold text-text-primary">
+                        <Link2 className="w-4 h-4 text-accent-strong" />
+                        <span>
+                          {block.content ? 'Ubah URL Link' : 'Tambahkan URL Link'}
+                        </span>
+                      </span>
+                      {draft.url.trim() && (
+                        <span
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+                            parsedDraft.isValid
+                              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300'
+                              : 'bg-rose-500/15 text-rose-500'
+                          }`}
+                        >
+                          {parsedDraft.isValid
+                            ? `✓ ${parsedDraft.hostname}`
+                            : parsedDraft.errorLabel}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <input
+                        type="text"
+                        autoFocus={editingLinkId === block.id || !block.content}
+                        value={draft.url}
+                        onChange={(e) =>
+                          setLinkDrafts((prev) => ({
+                            ...prev,
+                            [block.id]: {
+                              url: e.target.value,
+                              caption: draft.caption
+                            }
+                          }))
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') {
+                            e.preventDefault();
+                            cancelLinkEdit();
+                          }
+                        }}
+                        placeholder="Tempel atau ketik URL (mis. https://example.com)..."
+                        className="w-full bg-surface border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
+                      />
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="text"
+                          value={draft.caption}
+                          onChange={(e) =>
+                            setLinkDrafts((prev) => ({
+                              ...prev,
+                              [block.id]: {
+                                url: draft.url,
+                                caption: e.target.value
+                              }
+                            }))
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') {
+                              e.preventDefault();
+                              cancelLinkEdit();
+                            }
+                          }}
+                          placeholder="Judul / label link (opsional, mis. Referensi Kuliah)..."
+                          className="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
+                        />
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="submit"
+                            disabled={!parsedDraft.isValid}
+                            className="px-3.5 py-1.5 rounded-lg bg-accent-strong text-white dark:text-slate-950 text-xs font-semibold hover:opacity-95 disabled:opacity-45 transition"
+                          >
+                            Simpan Link
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelLinkEdit}
+                            className="px-2.5 py-1.5 rounded-lg bg-surface border border-border-subtle text-xs text-text-secondary hover:text-text-primary transition"
+                          >
+                            Batal
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </form>
+                ) : parsedSaved.isValid ? (
+                  <div className="rounded-xl border border-border-subtle bg-subtle/50 hover:bg-subtle/80 hover:border-accent-strong/60 transition p-3 flex items-center justify-between gap-3 group/link">
+                    <a
+                      href={parsedSaved.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => {
+                        if (isSelectMode) e.preventDefault();
+                      }}
+                      className="flex items-center gap-3 min-w-0 flex-1"
+                    >
+                      <div className="w-9 h-9 rounded-lg bg-accent-strong/10 border border-accent-strong/25 text-accent-strong flex items-center justify-center shrink-0">
+                        <Globe className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0 flex-1 space-y-0.5">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <p className="text-sm font-semibold text-text-primary group-hover/link:text-accent-strong truncate transition">
+                            {block.caption?.trim() || parsedSaved.hostname}
+                          </p>
+                          {block.caption?.trim() && (
+                            <span className="hidden sm:inline-block px-1.5 py-0.5 rounded-md bg-surface border border-border-subtle text-[10px] font-mono text-text-secondary shrink-0">
+                              {parsedSaved.hostname}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] font-mono text-text-secondary truncate">
+                          {parsedSaved.url}
+                        </p>
+                      </div>
+                    </a>
+
+                    <div className="flex items-center gap-1 shrink-0 no-print">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(parsedSaved.url);
+                          setCopiedId(block.id);
+                          window.setTimeout(() => setCopiedId(null), 1500);
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                        title="Salin URL"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span className="hidden sm:inline">
+                          {copiedId === block.id ? 'Tersalin' : 'Salin'}
+                        </span>
+                      </button>
+
+                      <a
+                        href={parsedSaved.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => {
+                          if (isSelectMode) e.preventDefault();
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                        title="Buka URL di tab baru"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        <span className="hidden sm:inline">Buka</span>
+                      </a>
+
+                      {canEdit && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLinkDrafts((prev) => ({
+                              ...prev,
+                              [block.id]: {
+                                url: block.content,
+                                caption: block.caption || ''
+                              }
+                            }));
+                            setEditingLinkId(block.id);
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                          title="Ubah URL atau label"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          <span className="hidden sm:inline">Ubah</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-xl border border-rose-400/30 bg-rose-500/10 text-xs text-rose-500 flex items-center justify-between gap-2">
+                    <span className="truncate">URL link tidak valid: {block.content}</span>
+                    {canEdit && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLinkDrafts((prev) => ({
+                            ...prev,
+                            [block.id]: {
+                              url: block.content,
+                              caption: block.caption || ''
+                            }
+                          }));
+                          setEditingLinkId(block.id);
+                        }}
+                        className="px-2.5 py-1 rounded-md bg-surface text-text-primary font-semibold shrink-0"
+                      >
+                        Perbaiki URL
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Notion PDF Document Block with Text Extraction & AI Reader */}
+          {block.type === 'pdf' && (() => {
+            const isPdfPreviewOpen = canEdit
+              ? block.toggleOpen
+              : (localToggleOverrides[block.id] ?? block.toggleOpen);
+            return (
+              <div className="my-1.5">
+                {block.content ? (
+                  <div className="bg-subtle/60 border border-border-subtle rounded-xl p-3 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-9 h-9 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-500 flex items-center justify-center shrink-0">
+                          <FileText className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-text-primary truncate">
+                            {block.fileName || block.caption || 'Dokumen.pdf'}
+                          </p>
+                          <p className="text-[10px] text-text-secondary">
+                            {block.pdfPages || 1} halaman • Teks siap dibaca AI
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (canEdit) {
+                              void handleBlockChange(block.id, {
+                                toggleOpen: !block.toggleOpen
+                              });
+                            } else {
+                              setLocalToggleOverrides((prev) => ({
+                                ...prev,
+                                [block.id]: !isPdfPreviewOpen
+                              }));
+                            }
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-surface border border-border-subtle text-[11px] font-medium text-text-primary hover:border-accent-strong transition"
+                        >
+                          {isPdfPreviewOpen ? 'Tutup Pratinjau' : 'Pratinjau PDF'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            triggerInlineAIExplain('', undefined, {
+                              fileName:
+                                block.fileName || block.caption || 'Dokumen.pdf',
+                              text: block.pdfText || '',
+                              pages: block.pdfPages || 1,
+                              url: block.content
+                            });
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold inline-flex items-center gap-1 shadow-sm transition"
+                        >
+                          <Sparkles className="w-3 h-3" />
+                          Tanya AI
+                        </button>
+                      </div>
+                    </div>
+
+                    {isPdfPreviewOpen && (
+                      <div className="pt-1">
+                        <PdfDocumentPreview
+                          src={block.content}
+                          pdfText={block.pdfText}
+                          totalPages={block.pdfPages || 1}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ) : canEdit ? (
+                  <label className="flex flex-col items-center justify-center gap-2 py-6 px-4 rounded-xl border border-dashed border-border-subtle bg-subtle/40 hover:bg-subtle/75 cursor-pointer transition text-center">
+                    {uploadingBlockId === block.id ? (
+                      <>
+                        <Loader2 className="w-5 h-5 text-accent-strong animate-spin" />
+                        <span className="text-xs font-medium text-text-primary">
+                          Mengekstrak teks PDF &amp; mengunggah ke Cloud Catatan...
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <FileText className="w-5 h-5 text-rose-500" />
+                        <div className="space-y-0.5">
+                          <p className="text-xs font-semibold text-text-primary">
+                            Klik untuk unggah dokumen PDF
+                          </p>
+                          <p className="text-[11px] text-text-secondary">
+                            Isi halaman PDF otomatis diekstrak agar bisa dirangkum &amp; ditanyakan ke AI
+                          </p>
+                        </div>
+                      </>
+                    )}
+                    <input
+                      type="file"
+                      accept=".pdf,application/pdf"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) void handleUploadPdfForBlock(block.id, f);
+                      }}
+                    />
+                  </label>
+                ) : null}
+              </div>
+            );
+          })()}
+
+          {/* Integrated Database Table Block (`/database` / `/tabel`) */}
+          {block.type === 'database' && (
+            <DatabaseBlockView
+              block={block}
+              canEdit={canEdit}
+              onUpdateDatabase={(nextData: DatabaseBlockData, titleContent: string) =>
+                void handleBlockChange(block.id, {
+                  databaseData: nextData,
+                  content: titleContent
+                })
+              }
+              onCreateConnectedBlock={(kind) =>
+                void handleCreateConnectedBlockFromDatabase(block.id, kind)
+              }
+              onAskAI={() => {
+                const dbData = block.databaseData || createDefaultDatabaseData('blank');
+                triggerInlineAIExplain(
+                  `Analisis Tabel Database "${dbData.title}":\n${databaseToMarkdownTable(dbData, 50)}`
+                );
+                setIsAIDrawerOpen(true);
+              }}
+            />
+          )}
+
+          {/* Connected Bar / Donut / Line Chart Block (`/batang` / `/donat` / `/chart`) */}
+          {block.type === 'chart' && activeNote && (
+            <ChartBlockView
+              block={block}
+              activeNoteId={activeNote.id}
+              allNotes={allNotes}
+              canEdit={canEdit}
+              onUpdateChart={(nextData: ChartBlockData, titleContent: string) =>
+                void handleBlockChange(block.id, {
+                  chartData: nextData,
+                  content: titleContent
+                })
+              }
+              onCreateStarterDatabase={() => handleCreateStarterDatabaseForBlock(block.id)}
+              onAskAI={() => {
+                const cData = block.chartData;
+                if (!cData) return;
+                const srcNote = allNotes.find((n) => n.id === cData.sourceNoteId);
+                const srcBlock = findBlockById(
+                  srcNote?.blocks || activeNote.blocks,
+                  cData.sourceBlockId
+                );
+                const agg = aggregateDatabaseForChart(srcBlock?.databaseData, cData);
+                const summary = agg.items
+                  .map((i) => `${i.label}: ${i.value} (${i.percent}%)`)
+                  .join(', ');
+                triggerInlineAIExplain(
+                  `Analisis Diagram "${cData.title}" (${cData.kind}): ${summary}`
+                );
+                setIsAIDrawerOpen(true);
+              }}
+            />
+          )}
+
+          {/* Editable Connected Form Block (`/form` / `/formulir`) */}
+          {block.type === 'form' && activeNote && (
+            <FormBlockView
+              block={block}
+              activeNoteId={activeNote.id}
+              allNotes={allNotes}
+              canEdit={canEdit}
+              onUpdateForm={(nextData: FormBlockData, titleContent: string) =>
+                handleBlockChange(block.id, {
+                  formData: nextData,
+                  content: titleContent
+                })
+              }
+              onSyncColumnInDatabase={(targetNoteId, targetBlockId, col) =>
+                handleSyncColumnInDatabase(targetNoteId, targetBlockId, col)
+              }
+              onCreateStarterDatabase={() => handleCreateStarterDatabaseForBlock(block.id)}
+              onSubmitForm={(payload) => handleSubmitForm(payload)}
+            />
+          )}
+
+          {/* Live Metric / KPI Block (`/metric` / `/kpi`) */}
+          {block.type === 'metric' && activeNote && (
+            <MetricBlockView
+              block={block}
+              activeNoteId={activeNote.id}
+              activeNoteBlocks={activeNote.blocks}
+              allNotes={allNotes}
+              canEdit={canEdit}
+              onUpdateMetric={(nextData: MetricBlockData, titleContent: string) =>
+                void handleBlockChange(block.id, {
+                  metricData: nextData,
+                  content: titleContent
+                })
+              }
+            />
+          )}
+
+          {/* Notion-Style Multi-Column Layout Container (2, 3, 4, or 5 Columns) */}
+          {block.type === 'columns' && !isInsideColumn && (() => {
+            const cols = block.columns || [];
+            const colCount = cols.length || 2;
+            const gridColsClass =
+              colCount === 5
+                ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-5'
+                : colCount === 4
+                  ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4'
+                  : colCount === 3
+                    ? 'grid-cols-1 md:grid-cols-3'
+                    : 'grid-cols-1 md:grid-cols-2';
+
+            return (
+              <div className="my-2 space-y-1.5 group/colwrap">
+                {canEdit && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1 rounded-xl bg-subtle/60 border border-border-subtle/70 text-[11px] opacity-80 group-hover/colwrap:opacity-100 transition no-print">
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-text-secondary mr-1">
+                        Kolom:
+                      </span>
+                      {([2, 3, 4, 5] as const).map((n) => (
+                        <button
+                          key={n}
+                          type="button"
+                          onClick={() => void handleResizeColumns(block.id, n)}
+                          className={`px-2 py-0.5 rounded-md font-mono font-semibold transition ${
+                            colCount === n
+                              ? 'bg-accent-strong text-white dark:text-slate-950'
+                              : 'bg-surface hover:bg-subtle text-text-secondary hover:text-text-primary border border-border-subtle'
+                          }`}
+                        >
+                          {n}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleUngroupColumns(block.id)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface hover:bg-subtle border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                      title="Bongkar kolom menjadi blok biasa berurutan"
+                    >
+                      <Ungroup className="w-3 h-3" />
+                      <span>Bongkar Kolom</span>
+                    </button>
+                  </div>
+                )}
+
+                <div className={`grid ${gridColsClass} gap-3 items-start`}>
+                  {cols.map((col, colIdx) => {
+                    const isColDropTarget =
+                      dropTargetColumn?.columnsBlockId === block.id &&
+                      dropTargetColumn.columnId === col.id;
+                    let colNumber = 0;
+
+                    return (
+                      <div
+                        key={col.id}
+                        onDragOver={(e) => {
+                          if (!canEdit || draggedNoteId || draggedBlockId === block.id) return;
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setIsFileDragOverEditor(false);
+                          setDropTargetBlock(null);
+                          setDropTargetColumn((prev) =>
+                            prev?.columnsBlockId === block.id && prev.columnId === col.id
+                              ? prev
+                              : { columnsBlockId: block.id, columnId: col.id }
+                          );
+                        }}
+                        onDragLeave={(e) => {
+                          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                            setDropTargetColumn((prev) =>
+                              prev?.columnsBlockId === block.id && prev.columnId === col.id
+                                ? null
+                                : prev
+                            );
+                          }
+                        }}
+                        onDrop={(e) => {
+                          if (!canEdit || draggedNoteId) return;
+                          void handleDropIntoColumn(e, block.id, col.id);
+                        }}
+                        className={`min-w-0 rounded-xl border p-2.5 space-y-1 transition ${
+                          isColDropTarget
+                            ? 'border-accent-strong bg-accent-strong/5 ring-2 ring-accent-strong/30'
+                            : 'border-border-subtle/60 bg-subtle/20 hover:border-border-subtle'
+                        }`}
+                      >
+                        {(col.blocks || []).map((innerBlk) => {
+                          if (innerBlk.type === 'numbered') colNumber += 1;
+                          else colNumber = 0;
+                          return renderBlockRow(innerBlk, colNumber, {
+                            columnsBlockId: block.id,
+                            columnId: col.id
+                          });
+                        })}
+
+                        {canEdit && (
+                          <button
+                            type="button"
+                            onClick={() => void handleAddBlockToColumn(block.id, col.id)}
+                            className="w-full py-1 px-2 rounded-lg text-[11px] text-text-secondary/60 hover:text-text-primary hover:bg-subtle/70 flex items-center gap-1 transition no-print"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>Kolom {colIdx + 1}</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Notion Slash Command Menu (`/`) */}
+          {isSlashOpen && (
+            <div className="absolute left-0 top-full mt-1 z-30 w-64 sm:w-72 max-w-[calc(100vw-2rem)] max-h-72 overflow-y-auto miu-card shadow-xl p-1.5 space-y-0.5 no-print">
+              {filteredSlashOptions.length === 0 ? (
+                <div className="px-3 py-3 text-xs text-text-secondary text-center">
+                  Tidak ada hasil
+                </div>
+              ) : (
+                filteredSlashOptions.map((opt, i) => {
+                  const isActive = i === slashState.selectedIndex;
+                  const Icon = opt.Icon;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => void applySlashCommand(block.id, opt.type, opt.preset)}
+                      className={`w-full flex items-center justify-between gap-2.5 px-2.5 py-1.5 rounded-xl text-left transition ${
+                        isActive ? 'bg-subtle' : 'hover:bg-subtle/60'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-7 h-7 rounded-lg bg-surface border border-border-subtle flex items-center justify-center text-text-primary shrink-0">
+                          <Icon className="w-3.5 h-3.5" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold text-text-primary truncate">
+                            {opt.label}
+                          </p>
+                          <p className="text-[10px] text-text-secondary truncate">
+                            {opt.desc}
+                          </p>
+                        </div>
+                      </div>
+                      <span className="font-mono text-[10px] text-text-secondary shrink-0">
+                        {opt.shortcut}
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -2020,8 +4248,40 @@ export const BlockEditor: React.FC = () => {
                 </button>
               )}
 
-              {mainViewMode === 'document' && (
+              {mainViewMode === 'document' && activeNote && (
                 <>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const autoWide = activeNote.blocks.some(
+                          (b) => b.type === 'columns' && (b.columns?.length || 0) >= 4
+                        );
+                        const currentlyWide =
+                          activeNote.isFullWidth !== undefined
+                            ? activeNote.isFullWidth
+                            : autoWide;
+                        void updateNote({ isFullWidth: !currentlyWide });
+                      }}
+                      className={`p-1.5 rounded-lg transition ${
+                        activeNote.isFullWidth
+                          ? 'bg-accent-strong/15 text-accent-strong'
+                          : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
+                      }`}
+                      title={
+                        activeNote.isFullWidth
+                          ? 'Gunakan Lebar Halaman Standar'
+                          : 'Perlebar Halaman (Full Width untuk Tabel & 4-5 Kolom)'
+                      }
+                    >
+                      {activeNote.isFullWidth ? (
+                        <Minimize2 className="w-4 h-4" />
+                      ) : (
+                        <Maximize2 className="w-4 h-4" />
+                      )}
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={handleExportMarkdown}
@@ -2183,7 +4443,18 @@ export const BlockEditor: React.FC = () => {
               )}
 
               {/* Clean Blank Notion Page Container */}
-              <div className="max-w-3xl w-full mx-auto px-6 sm:px-16 pt-12 pb-28 flex-1 flex flex-col">
+              <div
+                className={`w-full mx-auto pt-12 pb-28 flex-1 flex flex-col transition-all ${
+                  activeNote.isFullWidth
+                    ? 'max-w-6xl px-4 sm:px-10'
+                    : activeNote.isFullWidth === undefined &&
+                        activeNote.blocks.some(
+                          (b) => b.type === 'columns' && (b.columns?.length || 0) >= 4
+                        )
+                      ? 'max-w-5xl px-4 sm:px-12'
+                      : 'max-w-3xl px-6 sm:px-16'
+                }`}
+              >
                 {/* Shared Note Permission Banner */}
                 {!isOwner && (
                   <div className="mb-4 px-3.5 py-2 rounded-xl bg-subtle/80 border border-border-subtle flex items-center justify-between gap-2 text-xs text-text-secondary no-print">
@@ -2345,1522 +4616,14 @@ export const BlockEditor: React.FC = () => {
 
                 {/* Notion Blocks */}
                 <div className="space-y-1 mt-4 flex-1">
-                  {activeNote.blocks.map((block) => {
-                    if (block.type === 'numbered') {
-                      numberedCounter += 1;
-                    } else {
-                      numberedCounter = 0;
-                    }
-                    const currentNumber = numberedCounter;
-                    const isSlashOpen = slashState?.blockId === block.id;
-                    const isBlockMenuOpen = menuBlockId === block.id;
-                    const isBlockSelected = selectedBlockIds.includes(block.id);
-                    const isBeingDragged = draggedBlockId === block.id;
-                    const isDropBefore =
-                      dropTargetBlock?.blockId === block.id && dropTargetBlock.position === 'before';
-                    const isDropAfter =
-                      dropTargetBlock?.blockId === block.id && dropTargetBlock.position === 'after';
-
-                    return (
-                      <div
-                        key={block.id}
-                        onDragOver={(e) => {
-                          if (!canEdit || draggedNoteId) return;
-                          e.preventDefault();
-                          e.stopPropagation();
-                          const rect = e.currentTarget.getBoundingClientRect();
-                          const position: 'before' | 'after' =
-                            e.clientY - rect.top < rect.height / 2 ? 'before' : 'after';
-                          setIsFileDragOverEditor(false);
-                          setDropTargetBlock((prev) =>
-                            prev?.blockId === block.id && prev.position === position
-                              ? prev
-                              : { blockId: block.id, position }
-                          );
-                        }}
-                        onDragLeave={(e) => {
-                          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                            setDropTargetBlock((prev) =>
-                              prev?.blockId === block.id ? null : prev
-                            );
-                          }
-                        }}
-                        onDrop={(e) => {
-                          if (!canEdit || draggedNoteId) return;
-                          const rect = e.currentTarget.getBoundingClientRect();
-                          const position: 'before' | 'after' =
-                            e.clientY - rect.top < rect.height / 2 ? 'before' : 'after';
-                          void handleDropOnEditor(e, block.id, position);
-                        }}
-                        onClick={(e) => {
-                          if (isSelectMode) {
-                            e.stopPropagation();
-                            toggleSelectBlock(block.id, e.shiftKey);
-                          }
-                        }}
-                        className={`group relative flex items-start gap-1.5 -ml-2 sm:-ml-16 pl-2 sm:pl-16 py-0.5 rounded-lg transition ${
-                          isBlockSelected
-                            ? 'bg-rose-500/10 ring-1 ring-rose-400/40'
-                            : isSelectMode
-                              ? 'hover:bg-subtle/60 cursor-pointer'
-                              : ''
-                        } ${isBeingDragged ? 'opacity-40' : ''} ${
-                          isDropBefore ? 'border-t-2 border-accent-strong' : ''
-                        } ${isDropAfter ? 'border-b-2 border-accent-strong' : ''}`}
-                      >
-                        {/* Notion Left Gutter (Checkbox + `+` and Draggable `⋮⋮`) */}
-                        {canEdit && (
-                          <div
-                            className={`sm:absolute sm:left-1 top-1 flex items-center gap-0.5 transition no-print shrink-0 ${
-                              isBlockMenuOpen || isSelectMode || isBlockSelected
-                                ? 'opacity-100'
-                                : 'opacity-0 group-hover:opacity-100'
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleSelectBlock(block.id, e.shiftKey);
-                              }}
-                              className={`w-4 h-4 mr-0.5 rounded-[4px] border flex items-center justify-center transition ${
-                                isBlockSelected
-                                  ? 'bg-rose-500 border-rose-500 text-white'
-                                  : 'border-text-secondary/40 hover:border-rose-400 bg-surface'
-                              }`}
-                              title="Pilih blok ini (Shift+Klik untuk pilih rentang)"
-                            >
-                              {isBlockSelected && <Check className="w-3 h-3 stroke-[3]" />}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void handleAddBlockAfter(block.id, 'text')}
-                              className="p-1 rounded hover:bg-subtle text-text-secondary/70 hover:text-text-primary"
-                              title="Tambah blok"
-                            >
-                              <Plus className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              draggable={canEdit}
-                              onDragStart={(e) => {
-                                e.stopPropagation();
-                                e.dataTransfer.setData('application/miu-block-id', block.id);
-                                e.dataTransfer.effectAllowed = 'move';
-                                setDraggedBlockId(block.id);
-                                setMenuBlockId(null);
-                              }}
-                              onDragEnd={() => {
-                                setDraggedBlockId(null);
-                                setDropTargetBlock(null);
-                              }}
-                              onClick={() => setMenuBlockId(isBlockMenuOpen ? null : block.id)}
-                              className="p-1 rounded hover:bg-subtle text-text-secondary/70 hover:text-text-primary cursor-grab active:cursor-grabbing"
-                              title="Tarik untuk geser posisi blok, atau klik untuk Menu blok"
-                            >
-                              <GripVertical className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        )}
-
-                        {/* Block Context Menu */}
-                        {isBlockMenuOpen && (
-                          <div className="absolute left-0 top-8 z-30 w-52 miu-card shadow-xl p-1.5 space-y-1 text-xs no-print">
-                            <div className="grid grid-cols-2 gap-0.5">
-                              {SLASH_OPTIONS.slice(0, 10).map(({ type, label, Icon }) => (
-                                <button
-                                  key={type}
-                                  type="button"
-                                  onClick={() => {
-                                    setMenuBlockId(null);
-                                    void applySlashCommand(block.id, type);
-                                  }}
-                                  className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-left text-[11px] transition ${
-                                    block.type === type
-                                      ? 'bg-accent-strong/15 text-accent-strong font-semibold'
-                                      : 'hover:bg-subtle text-text-primary'
-                                  }`}
-                                >
-                                  <Icon className="w-3 h-3 shrink-0" />
-                                  <span className="truncate">{label.split(' ')[0]}</span>
-                                </button>
-                              ))}
-                            </div>
-
-                            <div className="border-t border-border-subtle pt-1 space-y-0.5">
-                              <button
-                                type="button"
-                                onClick={() => void handleMoveBlock(block.id, -1)}
-                                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-subtle text-text-primary"
-                              >
-                                <ArrowUp className="w-3.5 h-3.5 text-text-secondary" />
-                                <span>Geser ke atas</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void handleMoveBlock(block.id, 1)}
-                                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-subtle text-text-primary"
-                              >
-                                <ArrowDown className="w-3.5 h-3.5 text-text-secondary" />
-                                <span>Geser ke bawah</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void handleDuplicateBlock(block)}
-                                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-subtle text-text-primary"
-                              >
-                                <Copy className="w-3.5 h-3.5 text-text-secondary" />
-                                <span>Duplikat</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setMenuBlockId(null);
-                                  if (block.type === 'image') {
-                                    triggerInlineAIExplain('', {
-                                      url: block.content,
-                                      caption: block.caption || 'Gambar Catatan'
-                                    });
-                                  } else if (block.type === 'pdf') {
-                                    triggerInlineAIExplain('', undefined, {
-                                      fileName: block.fileName || block.caption || 'Dokumen.pdf',
-                                      text: block.pdfText || '',
-                                      pages: block.pdfPages || 1,
-                                      url: block.content
-                                    });
-                                  } else if (block.type === 'video') {
-                                    triggerInlineAIExplain(
-                                      `Video (${block.caption || 'Tautan Video'}): ${block.content}`
-                                    );
-                                  } else if (block.type === 'link') {
-                                    triggerInlineAIExplain(
-                                      `Tautan URL (${block.caption || 'Link'}): ${block.content}`
-                                    );
-                                  } else {
-                                    triggerInlineAIExplain(block.content);
-                                  }
-                                  setIsAIDrawerOpen(true);
-                                }}
-                                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-subtle text-indigo-500"
-                              >
-                                <Sparkles className="w-3.5 h-3.5" />
-                                <span>Tanya AI</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => selectBlocksFromHereToEnd(block.id)}
-                                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-subtle text-text-primary"
-                              >
-                                <CheckSquare className="w-3.5 h-3.5 text-rose-500" />
-                                <span>Pilih sampai bawah</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void handleDeleteBlock(block.id)}
-                                className="w-full flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-rose-500/10 text-rose-500"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                <span>Hapus</span>
-                              </button>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Block Renderer */}
-                        <div className="flex-1 min-w-0 relative">
-                          {block.type === 'h1' &&
-                            (canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                              <input
-                                ref={(el) => {
-                                  blockRefs.current[block.id] = el;
-                                }}
-                                value={block.content}
-                                onFocus={() => setEditingBlockId(block.id)}
-                                onBlur={() =>
-                                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                                }
-                                onChange={(e) =>
-                                  void handleBlockChange(block.id, { content: e.target.value })
-                                }
-                                onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                placeholder="Heading 1"
-                                className="w-full bg-transparent text-2xl font-bold text-text-primary focus:outline-none pt-3 pb-1"
-                              />
-                            ) : (
-                              <div
-                                onClick={() => {
-                                  if (canEdit) setPendingFocusBlockId(block.id);
-                                }}
-                                className={`w-full text-2xl font-bold text-text-primary pt-3 pb-1 break-words ${
-                                  canEdit ? 'cursor-text' : 'cursor-default'
-                                }`}
-                              >
-                                {renderInlineMarkdown(block.content)}
-                              </div>
-                            ))}
-
-                          {block.type === 'h2' &&
-                            (canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                              <input
-                                ref={(el) => {
-                                  blockRefs.current[block.id] = el;
-                                }}
-                                value={block.content}
-                                onFocus={() => setEditingBlockId(block.id)}
-                                onBlur={() =>
-                                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                                }
-                                onChange={(e) =>
-                                  void handleBlockChange(block.id, { content: e.target.value })
-                                }
-                                onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                placeholder="Heading 2"
-                                className="w-full bg-transparent text-xl font-bold text-text-primary focus:outline-none pt-2 pb-0.5"
-                              />
-                            ) : (
-                              <div
-                                onClick={() => {
-                                  if (canEdit) setPendingFocusBlockId(block.id);
-                                }}
-                                className={`w-full text-xl font-bold text-text-primary pt-2 pb-0.5 break-words ${
-                                  canEdit ? 'cursor-text' : 'cursor-default'
-                                }`}
-                              >
-                                {renderInlineMarkdown(block.content)}
-                              </div>
-                            ))}
-
-                          {block.type === 'h3' &&
-                            (canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                              <input
-                                ref={(el) => {
-                                  blockRefs.current[block.id] = el;
-                                }}
-                                value={block.content}
-                                onFocus={() => setEditingBlockId(block.id)}
-                                onBlur={() =>
-                                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                                }
-                                onChange={(e) =>
-                                  void handleBlockChange(block.id, { content: e.target.value })
-                                }
-                                onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                placeholder="Heading 3"
-                                className="w-full bg-transparent text-base font-bold text-text-primary focus:outline-none pt-1.5 pb-0.5"
-                              />
-                            ) : (
-                              <div
-                                onClick={() => {
-                                  if (canEdit) setPendingFocusBlockId(block.id);
-                                }}
-                                className={`w-full text-base font-bold text-text-primary pt-1.5 pb-0.5 break-words ${
-                                  canEdit ? 'cursor-text' : 'cursor-default'
-                                }`}
-                              >
-                                {renderInlineMarkdown(block.content)}
-                              </div>
-                            ))}
-
-                          {block.type === 'text' &&
-                            (canEdit &&
-                            (editingBlockId === block.id ||
-                              !block.content.trim() ||
-                              block.content.startsWith('/')) ? (
-                              <textarea
-                                ref={(el) => {
-                                  blockRefs.current[block.id] = el;
-                                }}
-                                rows={Math.max(
-                                  1,
-                                  Math.max(
-                                    block.content.split('\n').length,
-                                    Math.ceil(block.content.length / 72)
-                                  )
-                                )}
-                                value={block.content}
-                                onFocus={() => setEditingBlockId(block.id)}
-                                onBlur={() =>
-                                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                                }
-                                onChange={(e) =>
-                                  void handleBlockChange(block.id, { content: e.target.value })
-                                }
-                                onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                placeholder="Ketik '/' untuk perintah, atau mulai menulis..."
-                                className="w-full bg-transparent text-[15px] sm:text-base leading-[1.68] text-text-primary placeholder:text-text-secondary/35 focus:outline-none resize-none py-0.5"
-                              />
-                            ) : (
-                              <div
-                                onClick={() => {
-                                  if (canEdit) setPendingFocusBlockId(block.id);
-                                }}
-                                className={`w-full text-[15px] sm:text-base leading-[1.68] text-text-primary py-0.5 whitespace-pre-wrap break-words ${
-                                  canEdit ? 'cursor-text' : 'cursor-default'
-                                }`}
-                              >
-                                {renderInlineMarkdown(block.content)}
-                              </div>
-                            ))}
-
-                          {block.type === 'bullet' && (
-                            <div className="flex items-start gap-2.5 py-0.5">
-                              <span className="text-text-primary font-bold select-none pt-0.5">•</span>
-                              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                                <textarea
-                                  ref={(el) => {
-                                    blockRefs.current[block.id] = el;
-                                  }}
-                                  rows={Math.max(
-                                    1,
-                                    Math.max(
-                                      block.content.split('\n').length,
-                                      Math.ceil(block.content.length / 68)
-                                    )
-                                  )}
-                                  value={block.content}
-                                  onFocus={() => setEditingBlockId(block.id)}
-                                  onBlur={() =>
-                                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                                  }
-                                  onChange={(e) =>
-                                    void handleBlockChange(block.id, { content: e.target.value })
-                                  }
-                                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                  placeholder="List"
-                                  className="flex-1 bg-transparent text-[15px] sm:text-base leading-[1.6] text-text-primary focus:outline-none resize-none"
-                                />
-                              ) : (
-                                <div
-                                  onClick={() => {
-                                    if (canEdit) setPendingFocusBlockId(block.id);
-                                  }}
-                                  className={`flex-1 text-[15px] sm:text-base leading-[1.6] text-text-primary break-words ${
-                                    canEdit ? 'cursor-text' : 'cursor-default'
-                                  }`}
-                                >
-                                  {renderInlineMarkdown(block.content)}
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {block.type === 'numbered' && (
-                            <div className="flex items-start gap-2 py-0.5">
-                              <span className="font-mono text-sm text-text-secondary select-none pt-0.5 min-w-[20px]">
-                                {currentNumber}.
-                              </span>
-                              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                                <textarea
-                                  ref={(el) => {
-                                    blockRefs.current[block.id] = el;
-                                  }}
-                                  rows={Math.max(
-                                    1,
-                                    Math.max(
-                                      block.content.split('\n').length,
-                                      Math.ceil(block.content.length / 68)
-                                    )
-                                  )}
-                                  value={block.content}
-                                  onFocus={() => setEditingBlockId(block.id)}
-                                  onBlur={() =>
-                                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                                  }
-                                  onChange={(e) =>
-                                    void handleBlockChange(block.id, { content: e.target.value })
-                                  }
-                                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                  placeholder="List"
-                                  className="flex-1 bg-transparent text-[15px] sm:text-base leading-[1.6] text-text-primary focus:outline-none resize-none"
-                                />
-                              ) : (
-                                <div
-                                  onClick={() => {
-                                    if (canEdit) setPendingFocusBlockId(block.id);
-                                  }}
-                                  className={`flex-1 text-[15px] sm:text-base leading-[1.6] text-text-primary break-words ${
-                                    canEdit ? 'cursor-text' : 'cursor-default'
-                                  }`}
-                                >
-                                  {renderInlineMarkdown(block.content)}
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {block.type === 'todo' && (
-                            <div className="flex items-start gap-2.5 py-0.5">
-                              <button
-                                type="button"
-                                disabled={!canEdit}
-                                onClick={() =>
-                                  void handleBlockChange(block.id, { checked: !block.checked })
-                                }
-                                className={`mt-1 w-4 h-4 rounded-[4px] border flex items-center justify-center shrink-0 transition ${
-                                  block.checked
-                                    ? 'bg-accent-strong border-accent-strong text-white dark:text-slate-950'
-                                    : 'border-text-secondary/50 hover:border-accent-strong'
-                                }`}
-                              >
-                                {block.checked && <Check className="w-3 h-3 stroke-[3]" />}
-                              </button>
-                              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                                <textarea
-                                  ref={(el) => {
-                                    blockRefs.current[block.id] = el;
-                                  }}
-                                  rows={Math.max(1, Math.ceil(block.content.length / 68))}
-                                  value={block.content}
-                                  onFocus={() => setEditingBlockId(block.id)}
-                                  onBlur={() =>
-                                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                                  }
-                                  onChange={(e) =>
-                                    void handleBlockChange(block.id, { content: e.target.value })
-                                  }
-                                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                  placeholder="To-do"
-                                  className={`flex-1 bg-transparent text-[15px] sm:text-base leading-[1.6] focus:outline-none resize-none ${
-                                    block.checked
-                                      ? 'line-through text-text-secondary'
-                                      : 'text-text-primary'
-                                  }`}
-                                />
-                              ) : (
-                                  <div
-                                  onClick={() => {
-                                    if (canEdit) setPendingFocusBlockId(block.id);
-                                  }}
-                                  className={`flex-1 text-[15px] sm:text-base leading-[1.6] break-words ${
-                                    canEdit ? 'cursor-text' : 'cursor-default'
-                                  } ${
-                                    block.checked
-                                      ? 'line-through text-text-secondary'
-                                      : 'text-text-primary'
-                                  }`}
-                                >
-                                  {renderInlineMarkdown(block.content)}
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {/* Slash Command Deadline Block (`/deadline` -> Auto-syncs to Calendar) */}
-                          {block.type === 'deadline' && (
-                            <div className="my-1 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                              <div className="flex items-start sm:items-center gap-2.5 flex-1 min-w-0">
-                                <button
-                                  type="button"
-                                  disabled={!canEdit}
-                                  onClick={() =>
-                                    void handleBlockChange(block.id, { checked: !block.checked })
-                                  }
-                                  className={`mt-0.5 sm:mt-0 w-4 h-4 rounded-[4px] border flex items-center justify-center shrink-0 transition ${
-                                    block.checked
-                                      ? 'bg-emerald-500 border-emerald-500 text-white'
-                                      : 'border-amber-600/60 dark:border-amber-300/60 bg-surface'
-                                  }`}
-                                >
-                                  {block.checked && <Check className="w-3 h-3 stroke-[3]" />}
-                                </button>
-
-                                {canEdit ? (
-                                  <input
-                                    ref={(el) => {
-                                      blockRefs.current[block.id] = el;
-                                    }}
-                                    type="text"
-                                    value={block.content}
-                                    onChange={(e) =>
-                                      void handleBlockChange(block.id, { content: e.target.value })
-                                    }
-                                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                    placeholder="Ketik nama tugas / deadline..."
-                                    className={`flex-1 min-w-0 bg-transparent text-sm font-semibold focus:outline-none ${
-                                      block.checked
-                                        ? 'line-through text-text-secondary'
-                                        : 'text-text-primary'
-                                    }`}
-                                  />
-                                ) : (
-                                  <span
-                                    className={`flex-1 min-w-0 text-sm font-semibold ${
-                                      block.checked
-                                        ? 'line-through text-text-secondary'
-                                        : 'text-text-primary'
-                                    }`}
-                                  >
-                                    {block.content || 'Deadline tanpa judul'}
-                                  </span>
-                                )}
-                              </div>
-
-                              <div className="flex flex-wrap items-center gap-1.5 shrink-0 no-print">
-                                {canEdit ? (
-                                  <>
-                                    <div className="inline-flex items-center gap-1 rounded-lg bg-surface border border-border-subtle px-2 py-1">
-                                      <CalendarDays className="w-3.5 h-3.5 text-amber-500" />
-                                      <input
-                                        type="date"
-                                        value={block.dueDate || ''}
-                                        onChange={(e) =>
-                                          void handleBlockChange(block.id, {
-                                            dueDate: e.target.value
-                                          })
-                                        }
-                                        className="bg-transparent text-[11px] font-medium text-text-primary focus:outline-none"
-                                      />
-                                    </div>
-                                    <input
-                                      type="time"
-                                      value={block.dueTime || ''}
-                                      onChange={(e) =>
-                                        void handleBlockChange(block.id, {
-                                          dueTime: e.target.value
-                                        })
-                                      }
-                                      title="Jam deadline (opsional)"
-                                      className="rounded-lg bg-surface border border-border-subtle px-2 py-1 text-[11px] text-text-primary focus:outline-none"
-                                    />
-                                  </>
-                                ) : (
-                                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[11px] font-semibold text-text-primary">
-                                    <CalendarDays className="w-3.5 h-3.5 text-amber-500" />
-                                    <span>
-                                      {block.dueDate || 'Tanpa Tanggal'}
-                                      {block.dueTime ? ` · ${block.dueTime}` : ''}
-                                    </span>
-                                  </span>
-                                )}
-
-                                <button
-                                  type="button"
-                                  onClick={() => setMainViewMode('calendar')}
-                                  className="px-2 py-1 rounded-lg bg-surface hover:bg-subtle border border-border-subtle text-[10px] font-bold text-accent-strong transition"
-                                  title="Buka tampilan Kalender"
-                                >
-                                  Kalender →
-                                </button>
-                              </div>
-                            </div>
-                          )}
-
-                          {block.type === 'toggle' && (() => {
-                            const isOpen = canEdit
-                              ? block.toggleOpen
-                              : (localToggleOverrides[block.id] ?? block.toggleOpen);
-                            return (
-                              <div className="py-0.5 space-y-1.5">
-                                <div className="flex items-center gap-1.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (canEdit) {
-                                        void handleBlockChange(block.id, {
-                                          toggleOpen: !block.toggleOpen
-                                        });
-                                      } else {
-                                        setLocalToggleOverrides((prev) => ({
-                                          ...prev,
-                                          [block.id]: !isOpen
-                                        }));
-                                      }
-                                    }}
-                                    className="p-0.5 rounded hover:bg-subtle text-text-secondary"
-                                  >
-                                    <ChevronRight
-                                      className={`w-4 h-4 transition-transform ${
-                                        isOpen ? 'rotate-90' : ''
-                                      }`}
-                                    />
-                                  </button>
-                                  <input
-                                    ref={(el) => {
-                                      blockRefs.current[block.id] = el;
-                                    }}
-                                    readOnly={!canEdit}
-                                    value={block.content}
-                                    onChange={(e) =>
-                                      void handleBlockChange(block.id, { content: e.target.value })
-                                    }
-                                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                    placeholder="Toggle"
-                                    className="flex-1 bg-transparent text-[15px] sm:text-base font-medium text-text-primary focus:outline-none"
-                                  />
-                                </div>
-                                {isOpen && (
-                                  <div className="pl-6 border-l border-border-subtle ml-2">
-                                    <textarea
-                                      readOnly={!canEdit}
-                                      rows={Math.max(2, (block.toggleBody || '').split('\n').length)}
-                                      value={block.toggleBody || ''}
-                                      onChange={(e) =>
-                                        void handleBlockChange(block.id, {
-                                          toggleBody: e.target.value
-                                        })
-                                      }
-                                      placeholder={canEdit ? 'Ketik isi di dalam toggle...' : ''}
-                                      className="w-full bg-transparent text-sm text-text-primary focus:outline-none resize-none"
-                                    />
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })()}
-
-                          {block.type === 'callout' && (
-                            <div className="flex items-start gap-3 bg-subtle/80 border border-border-subtle rounded-xl p-3.5 my-1">
-                              <button
-                                type="button"
-                                disabled={!canEdit}
-                                onClick={() => {
-                                  const icons = ['💡', '⚡', '📌', '🔥', '🎓', '⚠️', '✅'];
-                                  const nextIcon =
-                                    icons[
-                                      (icons.indexOf(block.calloutIcon || '💡') + 1) % icons.length
-                                    ];
-                                  void handleBlockChange(block.id, { calloutIcon: nextIcon });
-                                }}
-                                className="text-lg leading-none pt-0.5"
-                              >
-                                {block.calloutIcon || '💡'}
-                              </button>
-                              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                                <textarea
-                                  ref={(el) => {
-                                    blockRefs.current[block.id] = el;
-                                  }}
-                                  rows={Math.max(2, Math.ceil(block.content.length / 72))}
-                                  value={block.content}
-                                  onFocus={() => setEditingBlockId(block.id)}
-                                  onBlur={() =>
-                                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                                  }
-                                  onChange={(e) =>
-                                    void handleBlockChange(block.id, { content: e.target.value })
-                                  }
-                                  placeholder="Ketik isi callout..."
-                                  className="flex-1 bg-transparent text-sm leading-relaxed text-text-primary focus:outline-none resize-none"
-                                />
-                              ) : (
-                                <div
-                                  onClick={() => {
-                                    if (canEdit) setPendingFocusBlockId(block.id);
-                                  }}
-                                  className={`flex-1 text-sm leading-relaxed text-text-primary whitespace-pre-wrap break-words ${
-                                    canEdit ? 'cursor-text' : 'cursor-default'
-                                  }`}
-                                >
-                                  {renderInlineMarkdown(block.content)}
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {block.type === 'quote' && (
-                            <blockquote className="border-l-[3px] border-text-primary/70 pl-4 py-1 my-1 italic text-text-primary/90">
-                              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                                <textarea
-                                  ref={(el) => {
-                                    blockRefs.current[block.id] = el;
-                                  }}
-                                  rows={Math.max(1, Math.ceil(block.content.length / 75))}
-                                  value={block.content}
-                                  onFocus={() => setEditingBlockId(block.id)}
-                                  onBlur={() =>
-                                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                                  }
-                                  onChange={(e) =>
-                                    void handleBlockChange(block.id, { content: e.target.value })
-                                  }
-                                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                  placeholder="Kutipan..."
-                                  className="w-full bg-transparent text-[15px] leading-relaxed focus:outline-none resize-none"
-                                />
-                              ) : (
-                                <div
-                                  onClick={() => {
-                                    if (canEdit) setPendingFocusBlockId(block.id);
-                                  }}
-                                  className={`w-full text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
-                                    canEdit ? 'cursor-text' : 'cursor-default'
-                                  }`}
-                                >
-                                  {renderInlineMarkdown(block.content)}
-                                </div>
-                              )}
-                            </blockquote>
-                          )}
-
-                          {block.type === 'divider' && (
-                            <div className="py-3">
-                              <hr className="border-border-subtle" />
-                            </div>
-                          )}
-
-                          {/* Notion Embedded Subpage Card */}
-                          {block.type === 'subpage' && (() => {
-                            const linkedPage = allNotes.find((n) => n.id === block.subpageId);
-                            return (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (linkedPage) setActiveNoteId(linkedPage.id);
-                                }}
-                                className="w-full my-1 px-3.5 py-2.5 rounded-xl bg-subtle/60 hover:bg-subtle border border-border-subtle hover:border-accent-strong/60 flex items-center justify-between gap-2 text-left transition group/sub"
-                              >
-                                <div className="flex items-center gap-2.5 min-w-0">
-                                  <span className="text-lg leading-none shrink-0">
-                                    {linkedPage?.icon || block.subpageIcon || '📑'}
-                                  </span>
-                                  <span className="text-sm font-semibold text-text-primary underline decoration-border-subtle underline-offset-4 group-hover/sub:decoration-accent-strong truncate">
-                                    {linkedPage?.title || block.content || 'Subhalaman Baru'}
-                                  </span>
-                                </div>
-                                <span className="text-[11px] font-mono text-text-secondary shrink-0">
-                                  Buka Subhalaman →
-                                </span>
-                              </button>
-                            );
-                          })()}
-
-                          {block.type === 'code' && (
-                            <div className="rounded-xl overflow-hidden border border-border-subtle bg-slate-950 text-slate-100 my-1.5">
-                              <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900 border-b border-white/10 text-[11px] font-mono">
-                                <select
-                                  disabled={!canEdit}
-                                  value={block.language || 'javascript'}
-                                  onChange={(e) =>
-                                    void handleBlockChange(block.id, { language: e.target.value })
-                                  }
-                                  className="bg-transparent text-sky-300 focus:outline-none cursor-pointer"
-                                >
-                                  {[
-                                    'javascript',
-                                    'typescript',
-                                    'python',
-                                    'sql',
-                                    'bash',
-                                    'cpp',
-                                    'html'
-                                  ].map((lang) => (
-                                    <option key={lang} value={lang} className="bg-slate-900">
-                                      {lang}
-                                    </option>
-                                  ))}
-                                </select>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    void navigator.clipboard.writeText(block.content);
-                                    setCopiedId(block.id);
-                                    window.setTimeout(() => setCopiedId(null), 1500);
-                                  }}
-                                  className="inline-flex items-center gap-1 text-slate-300 hover:text-white"
-                                >
-                                  <Copy className="w-3 h-3" />
-                                  {copiedId === block.id ? 'Tersalin' : 'Salin'}
-                                </button>
-                              </div>
-                              <textarea
-                                ref={(el) => {
-                                  blockRefs.current[block.id] = el;
-                                }}
-                                readOnly={!canEdit}
-                                rows={Math.max(3, block.content.split('\n').length)}
-                                value={block.content}
-                                onChange={(e) =>
-                                  void handleBlockChange(block.id, { content: e.target.value })
-                                }
-                                placeholder="Ketik kode..."
-                                className="w-full p-3 bg-transparent font-mono text-xs leading-relaxed text-slate-100 focus:outline-none resize-y"
-                              />
-                            </div>
-                          )}
-
-                          {block.type === 'math' && (
-                            <div className="bg-subtle/60 border border-border-subtle rounded-xl p-3 my-1 space-y-2">
-                              <div
-                                onClick={() => {
-                                  if (canEdit) {
-                                    setEditingMathId(editingMathId === block.id ? null : block.id);
-                                  }
-                                }}
-                                className={`${canEdit ? 'cursor-pointer' : ''} text-text-primary`}
-                              >
-                                <MathPreview tex={block.content} />
-                              </div>
-                              {canEdit && (editingMathId === block.id || !block.content) && (
-                                <input
-                                  ref={(el) => {
-                                    blockRefs.current[block.id] = el;
-                                  }}
-                                  value={block.content}
-                                  onChange={(e) =>
-                                    void handleBlockChange(block.id, { content: e.target.value })
-                                  }
-                                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                                  placeholder="Rumus LaTeX (mis. E = mc^2)"
-                                  className="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 font-mono text-xs text-text-primary focus:outline-none"
-                                />
-                              )}
-                            </div>
-                          )}
-
-                          {/* Notion Image Block with Cloudinary Upload & Direct Ask AI */}
-                          {block.type === 'image' && (
-                            <div className="my-1.5">
-                              {block.content ? (
-                                <figure className="bg-subtle/40 border border-border-subtle rounded-xl p-2 space-y-1.5 relative group/img">
-                                  <img
-                                    src={block.content}
-                                    alt={block.caption || 'Gambar'}
-                                    className="max-h-96 w-auto mx-auto rounded-lg object-contain"
-                                  />
-                                  <div className="absolute top-3 right-3 flex items-center gap-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        triggerInlineAIExplain('', {
-                                          url: block.content,
-                                          caption: block.caption || 'Gambar Catatan'
-                                        });
-                                      }}
-                                      className="px-2.5 py-1 rounded-full bg-indigo-600/90 hover:bg-indigo-500 text-white text-[10px] font-semibold inline-flex items-center gap-1 shadow-md transition"
-                                      title="Jadikan gambar ini referensi untuk ditanyakan ke AI"
-                                    >
-                                      <Sparkles className="w-3 h-3" />
-                                      Tanya AI
-                                    </button>
-                                    {block.content.includes('cloudinary.com') && (
-                                      <span className="px-2 py-1 rounded-full bg-black/60 text-sky-300 font-mono text-[9px] inline-flex items-center gap-1">
-                                        <Cloud className="w-2.5 h-2.5" />
-                                        Cloud
-                                      </span>
-                                    )}
-                                  </div>
-                                  <input
-                                    readOnly={!canEdit}
-                                    value={block.caption || ''}
-                                    onChange={(e) =>
-                                      void handleBlockChange(block.id, { caption: e.target.value })
-                                    }
-                                    placeholder={canEdit ? 'Tambahkan keterangan gambar...' : ''}
-                                    className="w-full text-center bg-transparent text-xs text-text-secondary focus:outline-none"
-                                  />
-                                </figure>
-                              ) : canEdit ? (
-                                <label className="flex flex-col items-center justify-center gap-2 py-6 px-4 rounded-xl border border-dashed border-border-subtle bg-subtle/40 hover:bg-subtle/75 cursor-pointer transition text-center">
-                                  {uploadingBlockId === block.id ? (
-                                    <>
-                                      <Loader2 className="w-5 h-5 text-accent-strong animate-spin" />
-                                      <span className="text-xs font-medium text-text-primary">
-                                        Mengunggah gambar ke Cloud Catatan...
-                                      </span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <UploadCloud className="w-5 h-5 text-accent-strong" />
-                                      <div className="space-y-0.5">
-                                        <p className="text-xs font-semibold text-text-primary">
-                                          Klik untuk unggah gambar
-                                        </p>
-                                        <p className="text-[11px] text-text-secondary">
-                                          {cloudinaryActive
-                                            ? 'Tersimpan otomatis di Cloud Catatan'
-                                            : 'Atau tarik file gambar langsung ke halaman ini'}
-                                        </p>
-                                      </div>
-                                    </>
-                                  )}
-                                  <input
-                                    type="file"
-                                    accept="image/*"
-                                    className="hidden"
-                                    onChange={(e) => {
-                                      const f = e.target.files?.[0];
-                                      if (f) void handleUploadImageForBlock(block.id, f);
-                                    }}
-                                  />
-                                </label>
-                              ) : null}
-                            </div>
-                          )}
-
-                          {/* Notion Embedded YouTube / Video URL Block */}
-                          {block.type === 'video' && (() => {
-                            const draftUrl = videoUrlDrafts[block.id] ?? block.content;
-                            const isEditingUrl =
-                              canEdit && (!block.content || editingVideoId === block.id);
-                            const parsedEmbed = parseVideoEmbedUrl(
-                              isEditingUrl ? draftUrl : block.content
-                            );
-
-                            return (
-                              <div className="my-1.5">
-                                {isEditingUrl ? (
-                                  <form
-                                    onSubmit={async (e) => {
-                                      e.preventDefault();
-                                      if (parsedEmbed.kind === 'invalid') return;
-                                      await handleBlockChange(block.id, {
-                                        content: parsedEmbed.originalUrl
-                                      });
-                                      setEditingVideoId(null);
-                                    }}
-                                    className="p-4 rounded-xl border border-dashed border-border-subtle bg-subtle/45 space-y-2.5"
-                                  >
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="inline-flex items-center gap-1.5 text-xs font-bold text-text-primary">
-                                        <Video className="w-4 h-4 text-rose-500" />
-                                        <span>Sematkan YouTube atau URL Video</span>
-                                      </span>
-                                      {draftUrl.trim() && (
-                                        <span
-                                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
-                                            parsedEmbed.kind === 'invalid'
-                                              ? 'bg-rose-500/15 text-rose-500'
-                                              : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300'
-                                          }`}
-                                        >
-                                          {parsedEmbed.kind === 'invalid'
-                                            ? parsedEmbed.providerLabel
-                                            : `✓ ${parsedEmbed.providerLabel} terdeteksi`}
-                                        </span>
-                                      )}
-                                    </div>
-
-                                    <div className="flex flex-col sm:flex-row gap-2">
-                                      <input
-                                        type="text"
-                                        autoFocus={editingVideoId === block.id || !block.content}
-                                        value={draftUrl}
-                                        onChange={(e) =>
-                                          setVideoUrlDrafts((prev) => ({
-                                            ...prev,
-                                            [block.id]: e.target.value
-                                          }))
-                                        }
-                                        placeholder="Tempel link YouTube (youtube.com / youtu.be), Vimeo, Drive, atau .mp4..."
-                                        className="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
-                                      />
-                                      <div className="flex items-center gap-1.5 shrink-0">
-                                        <button
-                                          type="submit"
-                                          disabled={parsedEmbed.kind === 'invalid'}
-                                          className="px-3.5 py-1.5 rounded-lg bg-accent-strong text-white dark:text-slate-950 text-xs font-semibold hover:opacity-95 disabled:opacity-45 transition"
-                                        >
-                                          Sematkan
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setEditingVideoId(null);
-                                            if (!block.content) {
-                                              void handleBlockChange(block.id, {
-                                                type: 'text',
-                                                content: ''
-                                              });
-                                            } else {
-                                              setVideoUrlDrafts((prev) => ({
-                                                ...prev,
-                                                [block.id]: block.content
-                                              }));
-                                            }
-                                          }}
-                                          className="px-2.5 py-1.5 rounded-lg bg-surface border border-border-subtle text-xs text-text-secondary hover:text-text-primary transition"
-                                        >
-                                          Batal
-                                        </button>
-                                      </div>
-                                    </div>
-                                  </form>
-                                ) : parsedEmbed.kind !== 'invalid' ? (
-                                  <figure className="bg-subtle/40 border border-border-subtle rounded-xl p-2.5 space-y-2 group/vid">
-                                    <div className="flex items-center justify-between gap-2 px-1">
-                                      <span className="inline-flex items-center gap-1.5 text-[10px] font-mono font-semibold text-text-secondary">
-                                        <Video className="w-3.5 h-3.5 text-rose-500" />
-                                        <span>{parsedEmbed.providerLabel}</span>
-                                      </span>
-
-                                      <div className="flex items-center gap-1.5">
-                                        <a
-                                          href={parsedEmbed.originalUrl}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
-                                        >
-                                          <ExternalLink className="w-3 h-3" />
-                                          <span>Buka Link</span>
-                                        </a>
-                                        {canEdit && (
-                                          <button
-                                            type="button"
-                                            onClick={() => {
-                                              setVideoUrlDrafts((prev) => ({
-                                                ...prev,
-                                                [block.id]: block.content
-                                              }));
-                                              setEditingVideoId(block.id);
-                                            }}
-                                            className="px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
-                                          >
-                                            Ubah URL
-                                          </button>
-                                        )}
-                                      </div>
-                                    </div>
-
-                                    {parsedEmbed.kind === 'video' ? (
-                                      <video
-                                        src={parsedEmbed.embedUrl}
-                                        controls
-                                        playsInline
-                                        preload="metadata"
-                                        className="w-full max-h-[460px] rounded-lg bg-black"
-                                      />
-                                    ) : (
-                                      <div className="w-full aspect-video rounded-lg overflow-hidden bg-slate-950 border border-border-subtle">
-                                        <iframe
-                                          src={parsedEmbed.embedUrl}
-                                          title={block.caption || `${parsedEmbed.providerLabel} Video`}
-                                          className="w-full h-full border-0"
-                                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                                          referrerPolicy="strict-origin-when-cross-origin"
-                                          allowFullScreen
-                                        />
-                                      </div>
-                                    )}
-
-                                    <input
-                                      readOnly={!canEdit}
-                                      value={block.caption || ''}
-                                      onChange={(e) =>
-                                        void handleBlockChange(block.id, { caption: e.target.value })
-                                      }
-                                      placeholder={
-                                        canEdit
-                                          ? 'Tambahkan keterangan atau catatan timestamp video...'
-                                          : ''
-                                      }
-                                      className="w-full text-center bg-transparent text-xs text-text-secondary focus:outline-none"
-                                    />
-                                  </figure>
-                                ) : (
-                                  <div className="p-3 rounded-xl border border-rose-400/30 bg-rose-500/10 text-xs text-rose-500 flex items-center justify-between gap-2">
-                                    <span>URL video tidak valid: {block.content}</span>
-                                    {canEdit && (
-                                      <button
-                                        type="button"
-                                        onClick={() => setEditingVideoId(block.id)}
-                                        className="px-2.5 py-1 rounded-md bg-surface text-text-primary font-semibold"
-                                      >
-                                        Perbaiki URL
-                                      </button>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })()}
-
-                          {/* Notion URL Link / Bookmark Block (`/link` or `/url`) */}
-                          {block.type === 'link' && (() => {
-                            const draft = linkDrafts[block.id] ?? {
-                              url: block.content,
-                              caption: block.caption || ''
-                            };
-                            const parsedDraft = parseLinkUrl(draft.url);
-                            const parsedSaved = parseLinkUrl(block.content);
-                            const isEditingLink =
-                              canEdit && (!block.content || editingLinkId === block.id);
-
-                            const cancelLinkEdit = () => {
-                              setEditingLinkId(null);
-                              if (!block.content) {
-                                void handleBlockChange(block.id, {
-                                  type: 'text',
-                                  content: ''
-                                });
-                                setPendingFocusBlockId(block.id);
-                              } else {
-                                setLinkDrafts((prev) => ({
-                                  ...prev,
-                                  [block.id]: {
-                                    url: block.content,
-                                    caption: block.caption || ''
-                                  }
-                                }));
-                              }
-                            };
-
-                            return (
-                              <div className="my-1.5">
-                                {isEditingLink ? (
-                                  <form
-                                    onSubmit={async (e) => {
-                                      e.preventDefault();
-                                      if (!parsedDraft.isValid) return;
-                                      await handleBlockChange(block.id, {
-                                        content: parsedDraft.url,
-                                        caption: draft.caption.trim()
-                                      });
-                                      setEditingLinkId(null);
-                                    }}
-                                    className="p-4 rounded-xl border border-dashed border-border-subtle bg-subtle/45 space-y-2.5"
-                                  >
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="inline-flex items-center gap-1.5 text-xs font-bold text-text-primary">
-                                        <Link2 className="w-4 h-4 text-accent-strong" />
-                                        <span>
-                                          {block.content ? 'Ubah URL Link' : 'Tambahkan URL Link'}
-                                        </span>
-                                      </span>
-                                      {draft.url.trim() && (
-                                        <span
-                                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
-                                            parsedDraft.isValid
-                                              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300'
-                                              : 'bg-rose-500/15 text-rose-500'
-                                          }`}
-                                        >
-                                          {parsedDraft.isValid
-                                            ? `✓ ${parsedDraft.hostname}`
-                                            : parsedDraft.errorLabel}
-                                        </span>
-                                      )}
-                                    </div>
-
-                                    <div className="space-y-2">
-                                      <input
-                                        type="text"
-                                        autoFocus={editingLinkId === block.id || !block.content}
-                                        value={draft.url}
-                                        onChange={(e) =>
-                                          setLinkDrafts((prev) => ({
-                                            ...prev,
-                                            [block.id]: {
-                                              url: e.target.value,
-                                              caption: draft.caption
-                                            }
-                                          }))
-                                        }
-                                        onKeyDown={(e) => {
-                                          if (e.key === 'Escape') {
-                                            e.preventDefault();
-                                            cancelLinkEdit();
-                                          }
-                                        }}
-                                        placeholder="Tempel atau ketik URL (mis. https://example.com)..."
-                                        className="w-full bg-surface border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
-                                      />
-                                      <div className="flex flex-col sm:flex-row gap-2">
-                                        <input
-                                          type="text"
-                                          value={draft.caption}
-                                          onChange={(e) =>
-                                            setLinkDrafts((prev) => ({
-                                              ...prev,
-                                              [block.id]: {
-                                                url: draft.url,
-                                                caption: e.target.value
-                                              }
-                                            }))
-                                          }
-                                          onKeyDown={(e) => {
-                                            if (e.key === 'Escape') {
-                                              e.preventDefault();
-                                              cancelLinkEdit();
-                                            }
-                                          }}
-                                          placeholder="Judul / label link (opsional, mis. Referensi Kuliah)..."
-                                          className="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
-                                        />
-                                        <div className="flex items-center gap-1.5 shrink-0">
-                                          <button
-                                            type="submit"
-                                            disabled={!parsedDraft.isValid}
-                                            className="px-3.5 py-1.5 rounded-lg bg-accent-strong text-white dark:text-slate-950 text-xs font-semibold hover:opacity-95 disabled:opacity-45 transition"
-                                          >
-                                            Simpan Link
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={cancelLinkEdit}
-                                            className="px-2.5 py-1.5 rounded-lg bg-surface border border-border-subtle text-xs text-text-secondary hover:text-text-primary transition"
-                                          >
-                                            Batal
-                                          </button>
-                                        </div>
-                                      </div>
-                                    </div>
-                                  </form>
-                                ) : parsedSaved.isValid ? (
-                                  <div className="rounded-xl border border-border-subtle bg-subtle/50 hover:bg-subtle/80 hover:border-accent-strong/60 transition p-3 flex items-center justify-between gap-3 group/link">
-                                    <a
-                                      href={parsedSaved.url}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      onClick={(e) => {
-                                        if (isSelectMode) e.preventDefault();
-                                      }}
-                                      className="flex items-center gap-3 min-w-0 flex-1"
-                                    >
-                                      <div className="w-9 h-9 rounded-lg bg-accent-strong/10 border border-accent-strong/25 text-accent-strong flex items-center justify-center shrink-0">
-                                        <Globe className="w-4 h-4" />
-                                      </div>
-                                      <div className="min-w-0 flex-1 space-y-0.5">
-                                        <div className="flex items-center gap-2 min-w-0">
-                                          <p className="text-sm font-semibold text-text-primary group-hover/link:text-accent-strong truncate transition">
-                                            {block.caption?.trim() || parsedSaved.hostname}
-                                          </p>
-                                          {block.caption?.trim() && (
-                                            <span className="hidden sm:inline-block px-1.5 py-0.5 rounded-md bg-surface border border-border-subtle text-[10px] font-mono text-text-secondary shrink-0">
-                                              {parsedSaved.hostname}
-                                            </span>
-                                          )}
-                                        </div>
-                                        <p className="text-[11px] font-mono text-text-secondary truncate">
-                                          {parsedSaved.url}
-                                        </p>
-                                      </div>
-                                    </a>
-
-                                    <div className="flex items-center gap-1 shrink-0 no-print">
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          void navigator.clipboard.writeText(parsedSaved.url);
-                                          setCopiedId(block.id);
-                                          window.setTimeout(() => setCopiedId(null), 1500);
-                                        }}
-                                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
-                                        title="Salin URL"
-                                      >
-                                        <Copy className="w-3 h-3" />
-                                        <span className="hidden sm:inline">
-                                          {copiedId === block.id ? 'Tersalin' : 'Salin'}
-                                        </span>
-                                      </button>
-
-                                      <a
-                                        href={parsedSaved.url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        onClick={(e) => {
-                                          if (isSelectMode) e.preventDefault();
-                                        }}
-                                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
-                                        title="Buka URL di tab baru"
-                                      >
-                                        <ExternalLink className="w-3 h-3" />
-                                        <span className="hidden sm:inline">Buka</span>
-                                      </a>
-
-                                      {canEdit && (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setLinkDrafts((prev) => ({
-                                              ...prev,
-                                              [block.id]: {
-                                                url: block.content,
-                                                caption: block.caption || ''
-                                              }
-                                            }));
-                                            setEditingLinkId(block.id);
-                                          }}
-                                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
-                                          title="Ubah URL atau label"
-                                        >
-                                          <Pencil className="w-3 h-3" />
-                                          <span className="hidden sm:inline">Ubah</span>
-                                        </button>
-                                      )}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div className="p-3 rounded-xl border border-rose-400/30 bg-rose-500/10 text-xs text-rose-500 flex items-center justify-between gap-2">
-                                    <span className="truncate">URL link tidak valid: {block.content}</span>
-                                    {canEdit && (
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          setLinkDrafts((prev) => ({
-                                            ...prev,
-                                            [block.id]: {
-                                              url: block.content,
-                                              caption: block.caption || ''
-                                            }
-                                          }));
-                                          setEditingLinkId(block.id);
-                                        }}
-                                        className="px-2.5 py-1 rounded-md bg-surface text-text-primary font-semibold shrink-0"
-                                      >
-                                        Perbaiki URL
-                                      </button>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })()}
-
-                          {/* Notion PDF Document Block with Text Extraction & AI Reader */}
-                          {block.type === 'pdf' && (() => {
-                            const isPdfPreviewOpen = canEdit
-                              ? block.toggleOpen
-                              : (localToggleOverrides[block.id] ?? block.toggleOpen);
-                            return (
-                              <div className="my-1.5">
-                                {block.content ? (
-                                  <div className="bg-subtle/60 border border-border-subtle rounded-xl p-3 space-y-2.5">
-                                    <div className="flex flex-wrap items-center justify-between gap-2">
-                                      <div className="flex items-center gap-2.5 min-w-0">
-                                        <div className="w-9 h-9 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-500 flex items-center justify-center shrink-0">
-                                          <FileText className="w-4 h-4" />
-                                        </div>
-                                        <div className="min-w-0">
-                                          <p className="text-xs font-bold text-text-primary truncate">
-                                            {block.fileName || block.caption || 'Dokumen.pdf'}
-                                          </p>
-                                          <p className="text-[10px] text-text-secondary">
-                                            {block.pdfPages || 1} halaman • Teks siap dibaca AI
-                                          </p>
-                                        </div>
-                                      </div>
-
-                                      <div className="flex items-center gap-1.5 shrink-0">
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            if (canEdit) {
-                                              void handleBlockChange(block.id, {
-                                                toggleOpen: !block.toggleOpen
-                                              });
-                                            } else {
-                                              setLocalToggleOverrides((prev) => ({
-                                                ...prev,
-                                                [block.id]: !isPdfPreviewOpen
-                                              }));
-                                            }
-                                          }}
-                                          className="px-2.5 py-1 rounded-lg bg-surface border border-border-subtle text-[11px] font-medium text-text-primary hover:border-accent-strong transition"
-                                        >
-                                          {isPdfPreviewOpen ? 'Tutup Pratinjau' : 'Pratinjau PDF'}
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            triggerInlineAIExplain('', undefined, {
-                                              fileName:
-                                                block.fileName || block.caption || 'Dokumen.pdf',
-                                              text: block.pdfText || '',
-                                              pages: block.pdfPages || 1,
-                                              url: block.content
-                                            });
-                                          }}
-                                          className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold inline-flex items-center gap-1 shadow-sm transition"
-                                        >
-                                          <Sparkles className="w-3 h-3" />
-                                          Tanya AI
-                                        </button>
-                                      </div>
-                                    </div>
-
-                                    {isPdfPreviewOpen && (
-                                      <div className="pt-1">
-                                        <PdfDocumentPreview
-                                          src={block.content}
-                                          pdfText={block.pdfText}
-                                          totalPages={block.pdfPages || 1}
-                                        />
-                                      </div>
-                                    )}
-                                  </div>
-                                ) : canEdit ? (
-                                  <label className="flex flex-col items-center justify-center gap-2 py-6 px-4 rounded-xl border border-dashed border-border-subtle bg-subtle/40 hover:bg-subtle/75 cursor-pointer transition text-center">
-                                    {uploadingBlockId === block.id ? (
-                                      <>
-                                        <Loader2 className="w-5 h-5 text-accent-strong animate-spin" />
-                                        <span className="text-xs font-medium text-text-primary">
-                                          Mengekstrak teks PDF &amp; mengunggah ke Cloud Catatan...
-                                        </span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <FileText className="w-5 h-5 text-rose-500" />
-                                        <div className="space-y-0.5">
-                                          <p className="text-xs font-semibold text-text-primary">
-                                            Klik untuk unggah dokumen PDF
-                                          </p>
-                                          <p className="text-[11px] text-text-secondary">
-                                            Isi halaman PDF otomatis diekstrak agar bisa dirangkum &amp; ditanyakan ke AI
-                                          </p>
-                                        </div>
-                                      </>
-                                    )}
-                                    <input
-                                      type="file"
-                                      accept=".pdf,application/pdf"
-                                      className="hidden"
-                                      onChange={(e) => {
-                                        const f = e.target.files?.[0];
-                                        if (f) void handleUploadPdfForBlock(block.id, f);
-                                      }}
-                                    />
-                                  </label>
-                                ) : null}
-                              </div>
-                            );
-                          })()}
-
-                          {/* Notion Slash Command Menu (`/`) */}
-                          {isSlashOpen && (
-                            <div className="absolute left-0 top-full mt-1 z-30 w-68 max-h-72 overflow-y-auto miu-card shadow-xl p-1.5 space-y-0.5 no-print">
-                              {filteredSlashOptions.length === 0 ? (
-                                <div className="px-3 py-3 text-xs text-text-secondary text-center">
-                                  Tidak ada hasil
-                                </div>
-                              ) : (
-                                filteredSlashOptions.map((opt, i) => {
-                                  const isActive = i === slashState.selectedIndex;
-                                  const Icon = opt.Icon;
-                                  return (
-                                    <button
-                                      key={opt.type}
-                                      type="button"
-                                      onClick={() => void applySlashCommand(block.id, opt.type)}
-                                      className={`w-full flex items-center justify-between gap-2.5 px-2.5 py-1.5 rounded-xl text-left transition ${
-                                        isActive ? 'bg-subtle' : 'hover:bg-subtle/60'
-                                      }`}
-                                    >
-                                      <div className="flex items-center gap-2.5 min-w-0">
-                                        <div className="w-7 h-7 rounded-lg bg-surface border border-border-subtle flex items-center justify-center text-text-primary shrink-0">
-                                          <Icon className="w-3.5 h-3.5" />
-                                        </div>
-                                        <div className="min-w-0">
-                                          <p className="text-xs font-semibold text-text-primary truncate">
-                                            {opt.label}
-                                          </p>
-                                          <p className="text-[10px] text-text-secondary truncate">
-                                            {opt.desc}
-                                          </p>
-                                        </div>
-                                      </div>
-                                      <span className="font-mono text-[10px] text-text-secondary shrink-0">
-                                        {opt.shortcut}
-                                      </span>
-                                    </button>
-                                  );
-                                })
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
+                  {(() => {
+                    let rootNumber = 0;
+                    return activeNote.blocks.map((block) => {
+                      if (block.type === 'numbered') rootNumber += 1;
+                      else rootNumber = 0;
+                      return renderBlockRow(block, rootNumber);
+                    });
+                  })()}
 
                   {/* Clickable Blank Area Below Blocks */}
                   {canEdit && (

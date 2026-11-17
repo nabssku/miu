@@ -5,7 +5,8 @@ import {
   fetchServerSharedNote,
   isServerNeonConfigured,
   saveServerNote,
-  saveServerNoteComments
+  saveServerNoteComments,
+  submitServerFormResponse
 } from '@/lib/serverCloud';
 import type { NoteComment, NoteRecord } from '@/types/miu';
 
@@ -46,13 +47,51 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json()) as {
-      action?: 'save-note' | 'save-comments';
+      action?: 'save-note' | 'save-comments' | 'submit-form';
       userId?: string;
       userEmail?: string;
       noteId?: string;
       comments?: NoteComment[];
       note?: NoteRecord;
+      sourceNoteId?: string;
+      formBlockId?: string;
+      targetNoteId?: string;
+      targetBlockId?: string;
+      values?: Record<string, unknown>;
     };
+
+    if (body.action === 'submit-form') {
+      if (
+        !body.sourceNoteId ||
+        !body.formBlockId ||
+        !body.targetNoteId ||
+        !body.targetBlockId ||
+        !body.values
+      ) {
+        return NextResponse.json(
+          { ok: false, error: 'Payload pengiriman formulir tidak lengkap.' },
+          { status: 400 }
+        );
+      }
+      const res = await submitServerFormResponse({
+        sourceNoteId: body.sourceNoteId,
+        formBlockId: body.formBlockId,
+        targetNoteId: body.targetNoteId,
+        targetBlockId: body.targetBlockId,
+        values: body.values,
+        actorUserId: body.userId || '',
+        actorEmail: body.userEmail || ''
+      });
+      return NextResponse.json(
+        {
+          ok: res.ok,
+          row: res.row,
+          submissionCount: res.submissionCount,
+          error: res.error
+        },
+        { status: res.ok ? 200 : res.status }
+      );
+    }
 
     if (body.action === 'save-comments') {
       if (!body.noteId || !Array.isArray(body.comments)) {

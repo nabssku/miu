@@ -33,6 +33,7 @@ import {
 import { ConversationalVoicePanel } from './ConversationalVoicePanel';
 import { db } from '../../db/database';
 import { useMiu } from '../../context/MiuContext';
+import { flattenBlocks } from '../../utils/blockTreeHelper';
 import { syncCloudStatus, uploadImageToCloudinary } from '../../services/cloudServices';
 import {
   buildLiveNoteContext,
@@ -197,10 +198,11 @@ export const ExternalAIDrawer: React.FC = () => {
       ? Boolean(customConfig.ollamaUrl.trim() && customConfig.model.trim())
       : Boolean(customConfig.apiKey.trim() && customConfig.model.trim());
 
-  const noteImages = (activeNote?.blocks || []).filter(
+  const flatBlocks = flattenBlocks(activeNote?.blocks);
+  const noteImages = flatBlocks.filter(
     (b) => b.type === 'image' && Boolean(b.content)
   );
-  const notePdfs = (activeNote?.blocks || []).filter(
+  const notePdfs = flatBlocks.filter(
     (b) => b.type === 'pdf' && Boolean(b.content)
   );
 

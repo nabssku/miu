@@ -15,6 +15,7 @@ import {
   Users
 } from 'lucide-react';
 import type { NoteKanbanStatus, NoteRecord } from '@/types/miu';
+import { flattenBlocks } from '@/utils/blockTreeHelper';
 
 export const KANBAN_COLUMNS: Array<{
   id: NoteKanbanStatus;
@@ -199,7 +200,9 @@ export const KanbanBoardView: React.FC<KanbanBoardViewProps> = ({
                     const movable = canMoveNote(note);
                     const owner = isOwnerNote(note);
                     const previewSnippet =
-                      note.blocks.find((b) => b.content?.trim())?.content.trim() || '';
+                      flattenBlocks(note.blocks)
+                        .find((b) => b.type !== 'columns' && b.content?.trim())
+                        ?.content.trim() || '';
                     const parentNote = note.parentId
                       ? allNotes.find((p) => p.id === note.parentId)
                       : undefined;

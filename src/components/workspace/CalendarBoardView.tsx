@@ -26,6 +26,7 @@ import {
   type GoogleCalendarEventItem
 } from '@/services/googleCalendarService';
 import type { NoteRecord } from '@/types/miu';
+import { flattenBlocks } from '@/utils/blockTreeHelper';
 
 interface CalendarDeadlineEntry {
   kind: 'note-deadline' | 'todo-deadline';
@@ -147,7 +148,7 @@ export const CalendarBoardView: React.FC<CalendarBoardViewProps> = ({
           canEdit: editable
         });
       }
-      for (const blk of note.blocks || []) {
+      for (const blk of flattenBlocks(note.blocks)) {
         if ((blk.type === 'deadline' || blk.type === 'todo') && blk.dueDate) {
           entries.push({
             kind: 'todo-deadline',
