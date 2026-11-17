@@ -1,6 +1,7 @@
 import React from 'react';
 import katex from 'katex';
 import type { BlockType, NoteBlock } from '../types/miu';
+import { parseLinkUrl } from './linkHelper';
 
 /**
  * Remove <think>...</think> blocks produced by reasoning models (e.g. Qwen / DeepSeek)
@@ -21,7 +22,7 @@ export function renderInlineMarkdown(text: string): React.ReactNode[] {
   if (!text) return [];
 
   const tokenRegex =
-    /(`[^`]+`|\$\$[^$]+\$\$|\$[^$\n]+\$|\*\*[^*]+\*\*|__[^_]+__|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\))/g;
+    /(`[^`]+`|\$\$[^$]+\$\$|\$[^$\n]+\$|\*\*[^*]+\*\*|__[^_]+__|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>]+|\*[^*\n]+\*|_[^_\n]+_)/g;
 
   const parts = text.split(tokenRegex);
 
@@ -76,6 +77,77 @@ export function renderInlineMarkdown(text: string): React.ReactNode[] {
       );
     }
 
+    // Markdown link [label](url)
+    const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (linkMatch) {
+      const rawHref = linkMatch[2].trim();
+      const isAllowedHref = /^(https?:\/\/|mailto:|\/)/i.test(rawHref);
+      if (!isAllowedHref) {
+        return <React.Fragment key={idx}>{part}</React.Fragment>;
+      }
+      return (
+        <a
+          key={idx}
+          href={rawHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="text-accent-strong underline underline-offset-2 hover:opacity-80"
+        >
+          {linkMatch[1]}
+        </a>
+      );
+    }
+
+    // Bare external URL (https://... or http://...)
+    if (/^https?:\/\//i.test(part)) {
+      let cleanUrl = part;
+      let trailing = '';
+      while (cleanUrl.length > 8) {
+        const last = cleanUrl[cleanUrl.length - 1];
+        if (/[.,;:!?]/.test(last)) {
+          trailing = last + trailing;
+          cleanUrl = cleanUrl.slice(0, -1);
+          continue;
+        }
+        if (
+          last === ')' &&
+          (cleanUrl.match(/\(/g)?.length || 0) < (cleanUrl.match(/\)/g)?.length || 0)
+        ) {
+          trailing = last + trailing;
+          cleanUrl = cleanUrl.slice(0, -1);
+          continue;
+        }
+        if (
+          last === ']' &&
+          (cleanUrl.match(/\[/g)?.length || 0) < (cleanUrl.match(/\]/g)?.length || 0)
+        ) {
+          trailing = last + trailing;
+          cleanUrl = cleanUrl.slice(0, -1);
+          continue;
+        }
+        break;
+      }
+
+      const parsed = parseLinkUrl(cleanUrl);
+      if (parsed.isValid) {
+        return (
+          <React.Fragment key={idx}>
+            <a
+              href={parsed.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="text-accent-strong underline underline-offset-2 hover:opacity-80 break-all"
+            >
+              {cleanUrl}
+            </a>
+            {trailing}
+          </React.Fragment>
+        );
+      }
+    }
+
     // Italic *...* or _..._
     if (
       (part.startsWith('*') && part.endsWith('*') && part.length > 2) ||
@@ -85,23 +157,6 @@ export function renderInlineMarkdown(text: string): React.ReactNode[] {
         <em key={idx} className="italic">
           {renderInlineMarkdown(part.slice(1, -1))}
         </em>
-      );
-    }
-
-    // Markdown link [label](url)
-    const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-    if (linkMatch) {
-      return (
-        <a
-          key={idx}
-          href={linkMatch[2]}
-          target="_blank"
-          rel="noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          className="text-accent-strong underline hover:opacity-80"
-        >
-          {linkMatch[1]}
-        </a>
       );
     }
 

@@ -50,6 +50,7 @@ export type BlockType =
   | 'divider'
   | 'image'
   | 'video'
+  | 'link'
   | 'pdf'
   | 'subpage';
 

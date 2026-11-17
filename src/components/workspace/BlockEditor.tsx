@@ -29,6 +29,7 @@ import {
   Heading3,
   Image as ImageIcon,
   Lightbulb,
+  Link2,
   List,
   ListOrdered,
   Loader2,
@@ -75,6 +76,7 @@ import type {
 } from '../../types/miu';
 import { parseMarkdownToNotionBlocks, renderInlineMarkdown } from '../../utils/markdown';
 import { PdfDocumentPreview, processAndUploadPdf } from '../../utils/pdfHelper';
+import { parseLinkUrl } from '../../utils/linkHelper';
 import { parseVideoEmbedUrl } from '../../utils/videoHelper';
 import { formatLocalYYYYMMDD } from '../../services/googleCalendarService';
 import { CalendarBoardView } from './CalendarBoardView';
@@ -124,6 +126,7 @@ const SLASH_OPTIONS: Array<{
   { type: 'toggle', label: 'Toggle List', shortcut: '>', desc: 'Lipatan materi buka-tutup', Icon: ChevronRight },
   { type: 'image', label: 'Gambar', shortcut: 'img', desc: 'Unggah gambar ke Cloud Catatan', Icon: ImageIcon },
   { type: 'video', label: 'Video / YouTube', shortcut: 'yt', desc: 'Sematkan YouTube atau URL video (.mp4)', Icon: Video },
+  { type: 'link', label: 'URL Link', shortcut: 'link', desc: 'Tambahkan tautan URL web atau bookmark', Icon: Link2 },
   { type: 'pdf', label: 'Dokumen PDF', shortcut: 'pdf', desc: 'Unggah file PDF & ekstrak teks untuk AI', Icon: FileText },
   { type: 'subpage', label: 'Subhalaman Baru', shortcut: 'sub', desc: 'Buat subhalaman di dalam halaman ini', Icon: FilePlus2 },
   { type: 'callout', label: 'Callout', shortcut: '!', desc: 'Kotak sorotan penting', Icon: Lightbulb },
@@ -201,6 +204,8 @@ export const BlockEditor: React.FC = () => {
   const [editingMathId, setEditingMathId] = useState<string | null>(null);
   const [editingVideoId, setEditingVideoId] = useState<string | null>(null);
   const [videoUrlDrafts, setVideoUrlDrafts] = useState<Record<string, string>>({});
+  const [editingLinkId, setEditingLinkId] = useState<string | null>(null);
+  const [linkDrafts, setLinkDrafts] = useState<Record<string, { url: string; caption: string }>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [pendingFocusBlockId, setPendingFocusBlockId] = useState<string | null>(null);
   const [isSelectMode, setIsSelectMode] = useState(false);
@@ -228,6 +233,8 @@ export const BlockEditor: React.FC = () => {
     setSelectedBlockIds([]);
     setLastSelectedBlockId(null);
     setIsSelectMode(false);
+    setEditingLinkId(null);
+    setEditingVideoId(null);
   }, [activeNoteId]);
 
   useEffect(() => {
@@ -339,15 +346,27 @@ export const BlockEditor: React.FC = () => {
 
   const filteredSlashOptions = useMemo(() => {
     if (!slashState) return SLASH_OPTIONS;
-    const q = slashState.query.toLowerCase();
+    const q = slashState.query.trim().toLowerCase();
     if (!q) return SLASH_OPTIONS;
-    return SLASH_OPTIONS.filter(
-      (opt) =>
-        opt.label.toLowerCase().includes(q) ||
-        opt.type.toLowerCase().includes(q) ||
-        opt.shortcut.toLowerCase().includes(q) ||
-        opt.desc.toLowerCase().includes(q)
-    );
+
+    const getMatchRank = (opt: (typeof SLASH_OPTIONS)[number]): number => {
+      const label = opt.label.toLowerCase();
+      const type = opt.type.toLowerCase();
+      const shortcut = opt.shortcut.toLowerCase();
+      const desc = opt.desc.toLowerCase();
+
+      if (type === q || shortcut === q || label === q) return 0;
+      if (type.startsWith(q) || shortcut.startsWith(q) || label.startsWith(q)) return 1;
+      if (type.includes(q) || shortcut.includes(q) || label.includes(q)) return 2;
+      if (desc.includes(q)) return 3;
+      return -1;
+    };
+
+    return SLASH_OPTIONS
+      .map((opt, idx) => ({ opt, idx, rank: getMatchRank(opt) }))
+      .filter((item) => item.rank !== -1)
+      .sort((a, b) => a.rank - b.rank || a.idx - b.idx)
+      .map((item) => item.opt);
   }, [slashState]);
 
   // Debounced Neon Postgres Sync helper
@@ -769,6 +788,34 @@ export const BlockEditor: React.FC = () => {
     const next = activeNote.blocks.map((b) => {
       if (b.id !== blockId) return b;
       const cleanContent = b.content.startsWith('/') ? '' : b.content;
+
+      if (type === 'link') {
+        const parsedExisting = cleanContent ? parseLinkUrl(cleanContent) : null;
+        if (parsedExisting?.isValid) {
+          setLinkDrafts((prev) => ({
+            ...prev,
+            [blockId]: { url: parsedExisting.url, caption: b.caption || '' }
+          }));
+          return {
+            ...b,
+            type: 'link' as BlockType,
+            content: parsedExisting.url
+          };
+        }
+
+        const initialCaption = b.caption || cleanContent.trim();
+        setLinkDrafts((prev) => ({
+          ...prev,
+          [blockId]: { url: '', caption: initialCaption }
+        }));
+        return {
+          ...b,
+          type: 'link' as BlockType,
+          content: '',
+          ...(initialCaption ? { caption: initialCaption } : {})
+        };
+      }
+
       return {
         ...b,
         type,
@@ -789,6 +836,11 @@ export const BlockEditor: React.FC = () => {
     await updateNoteBlocks(next);
     if (type === 'video') {
       setEditingVideoId(blockId);
+    } else if (type === 'link') {
+      const updatedBlock = next.find((b) => b.id === blockId);
+      if (!updatedBlock?.content) {
+        setEditingLinkId(blockId);
+      }
     } else if (type !== 'image' && type !== 'pdf') {
       setPendingFocusBlockId(blockId);
     }
@@ -817,7 +869,13 @@ export const BlockEditor: React.FC = () => {
       blocks.splice(idx + 1, 0, newBlock);
     }
     await updateNoteBlocks(blocks);
-    setPendingFocusBlockId(newId);
+    if (type === 'link') {
+      setEditingLinkId(newId);
+    } else if (type === 'video') {
+      setEditingVideoId(newId);
+    } else {
+      setPendingFocusBlockId(newId);
+    }
   };
 
   const handleDuplicateBlock = async (block: NoteBlock) => {
@@ -1000,7 +1058,9 @@ export const BlockEditor: React.FC = () => {
       else if (b.type === 'math') mdLines.push(`$$\n${b.content}\n$$\n`);
       else if (b.type === 'image') mdLines.push(`![${b.caption || 'Image'}](${b.content})\n`);
       else if (b.type === 'video') mdLines.push(`[${b.caption || 'Video'}](${b.content})\n`);
-      else mdLines.push(`${b.content}\n`);
+      else if (b.type === 'link') {
+        if (b.content) mdLines.push(`[${b.caption || b.content}](${b.content})\n`);
+      } else mdLines.push(`${b.content}\n`);
     }
     const blob = new Blob([mdLines.join('\n')], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -1264,8 +1324,34 @@ export const BlockEditor: React.FC = () => {
       return;
     }
 
-    // 4. Plain Text Dropped from External Window / Browser
+    // 4. Plain Text or External URL Dropped from External Window / Browser
+    const uriList = e.dataTransfer.getData('text/uri-list');
+    const firstUri = uriList
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('#'));
     const plainText = e.dataTransfer.getData('text/plain');
+    const trimmedPlain = plainText.trim();
+    const singleHttpCandidate =
+      firstUri ||
+      (/^https?:\/\/[^\s]+$/i.test(trimmedPlain) && !trimmedPlain.includes('\n')
+        ? trimmedPlain
+        : '');
+
+    if (singleHttpCandidate && !e.dataTransfer.types.includes('application/miu-note-id')) {
+      const parsedLink = parseLinkUrl(singleHttpCandidate);
+      if (parsedLink.isValid) {
+        e.preventDefault();
+        e.stopPropagation();
+        await insertBlocksAtDropPoint(
+          [{ id: `blk-link-${Date.now()}`, type: 'link', content: parsedLink.url }],
+          targetBlockId,
+          position
+        );
+        return;
+      }
+    }
+
     if (
       plainText &&
       plainText.trim() &&
@@ -2446,6 +2532,10 @@ export const BlockEditor: React.FC = () => {
                                     triggerInlineAIExplain(
                                       `Video (${block.caption || 'Tautan Video'}): ${block.content}`
                                     );
+                                  } else if (block.type === 'link') {
+                                    triggerInlineAIExplain(
+                                      `Tautan URL (${block.caption || 'Link'}): ${block.content}`
+                                    );
                                   } else {
                                     triggerInlineAIExplain(block.content);
                                   }
@@ -3364,6 +3454,248 @@ export const BlockEditor: React.FC = () => {
                                         type="button"
                                         onClick={() => setEditingVideoId(block.id)}
                                         className="px-2.5 py-1 rounded-md bg-surface text-text-primary font-semibold"
+                                      >
+                                        Perbaiki URL
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+
+                          {/* Notion URL Link / Bookmark Block (`/link` or `/url`) */}
+                          {block.type === 'link' && (() => {
+                            const draft = linkDrafts[block.id] ?? {
+                              url: block.content,
+                              caption: block.caption || ''
+                            };
+                            const parsedDraft = parseLinkUrl(draft.url);
+                            const parsedSaved = parseLinkUrl(block.content);
+                            const isEditingLink =
+                              canEdit && (!block.content || editingLinkId === block.id);
+
+                            const cancelLinkEdit = () => {
+                              setEditingLinkId(null);
+                              if (!block.content) {
+                                void handleBlockChange(block.id, {
+                                  type: 'text',
+                                  content: ''
+                                });
+                                setPendingFocusBlockId(block.id);
+                              } else {
+                                setLinkDrafts((prev) => ({
+                                  ...prev,
+                                  [block.id]: {
+                                    url: block.content,
+                                    caption: block.caption || ''
+                                  }
+                                }));
+                              }
+                            };
+
+                            return (
+                              <div className="my-1.5">
+                                {isEditingLink ? (
+                                  <form
+                                    onSubmit={async (e) => {
+                                      e.preventDefault();
+                                      if (!parsedDraft.isValid) return;
+                                      await handleBlockChange(block.id, {
+                                        content: parsedDraft.url,
+                                        caption: draft.caption.trim()
+                                      });
+                                      setEditingLinkId(null);
+                                    }}
+                                    className="p-4 rounded-xl border border-dashed border-border-subtle bg-subtle/45 space-y-2.5"
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="inline-flex items-center gap-1.5 text-xs font-bold text-text-primary">
+                                        <Link2 className="w-4 h-4 text-accent-strong" />
+                                        <span>
+                                          {block.content ? 'Ubah URL Link' : 'Tambahkan URL Link'}
+                                        </span>
+                                      </span>
+                                      {draft.url.trim() && (
+                                        <span
+                                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+                                            parsedDraft.isValid
+                                              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300'
+                                              : 'bg-rose-500/15 text-rose-500'
+                                          }`}
+                                        >
+                                          {parsedDraft.isValid
+                                            ? `✓ ${parsedDraft.hostname}`
+                                            : parsedDraft.errorLabel}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    <div className="space-y-2">
+                                      <input
+                                        type="text"
+                                        autoFocus={editingLinkId === block.id || !block.content}
+                                        value={draft.url}
+                                        onChange={(e) =>
+                                          setLinkDrafts((prev) => ({
+                                            ...prev,
+                                            [block.id]: {
+                                              url: e.target.value,
+                                              caption: draft.caption
+                                            }
+                                          }))
+                                        }
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Escape') {
+                                            e.preventDefault();
+                                            cancelLinkEdit();
+                                          }
+                                        }}
+                                        placeholder="Tempel atau ketik URL (mis. https://example.com)..."
+                                        className="w-full bg-surface border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
+                                      />
+                                      <div className="flex flex-col sm:flex-row gap-2">
+                                        <input
+                                          type="text"
+                                          value={draft.caption}
+                                          onChange={(e) =>
+                                            setLinkDrafts((prev) => ({
+                                              ...prev,
+                                              [block.id]: {
+                                                url: draft.url,
+                                                caption: e.target.value
+                                              }
+                                            }))
+                                          }
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Escape') {
+                                              e.preventDefault();
+                                              cancelLinkEdit();
+                                            }
+                                          }}
+                                          placeholder="Judul / label link (opsional, mis. Referensi Kuliah)..."
+                                          className="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
+                                        />
+                                        <div className="flex items-center gap-1.5 shrink-0">
+                                          <button
+                                            type="submit"
+                                            disabled={!parsedDraft.isValid}
+                                            className="px-3.5 py-1.5 rounded-lg bg-accent-strong text-white dark:text-slate-950 text-xs font-semibold hover:opacity-95 disabled:opacity-45 transition"
+                                          >
+                                            Simpan Link
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={cancelLinkEdit}
+                                            className="px-2.5 py-1.5 rounded-lg bg-surface border border-border-subtle text-xs text-text-secondary hover:text-text-primary transition"
+                                          >
+                                            Batal
+                                          </button>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </form>
+                                ) : parsedSaved.isValid ? (
+                                  <div className="rounded-xl border border-border-subtle bg-subtle/50 hover:bg-subtle/80 hover:border-accent-strong/60 transition p-3 flex items-center justify-between gap-3 group/link">
+                                    <a
+                                      href={parsedSaved.url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => {
+                                        if (isSelectMode) e.preventDefault();
+                                      }}
+                                      className="flex items-center gap-3 min-w-0 flex-1"
+                                    >
+                                      <div className="w-9 h-9 rounded-lg bg-accent-strong/10 border border-accent-strong/25 text-accent-strong flex items-center justify-center shrink-0">
+                                        <Globe className="w-4 h-4" />
+                                      </div>
+                                      <div className="min-w-0 flex-1 space-y-0.5">
+                                        <div className="flex items-center gap-2 min-w-0">
+                                          <p className="text-sm font-semibold text-text-primary group-hover/link:text-accent-strong truncate transition">
+                                            {block.caption?.trim() || parsedSaved.hostname}
+                                          </p>
+                                          {block.caption?.trim() && (
+                                            <span className="hidden sm:inline-block px-1.5 py-0.5 rounded-md bg-surface border border-border-subtle text-[10px] font-mono text-text-secondary shrink-0">
+                                              {parsedSaved.hostname}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <p className="text-[11px] font-mono text-text-secondary truncate">
+                                          {parsedSaved.url}
+                                        </p>
+                                      </div>
+                                    </a>
+
+                                    <div className="flex items-center gap-1 shrink-0 no-print">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          void navigator.clipboard.writeText(parsedSaved.url);
+                                          setCopiedId(block.id);
+                                          window.setTimeout(() => setCopiedId(null), 1500);
+                                        }}
+                                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                                        title="Salin URL"
+                                      >
+                                        <Copy className="w-3 h-3" />
+                                        <span className="hidden sm:inline">
+                                          {copiedId === block.id ? 'Tersalin' : 'Salin'}
+                                        </span>
+                                      </button>
+
+                                      <a
+                                        href={parsedSaved.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        onClick={(e) => {
+                                          if (isSelectMode) e.preventDefault();
+                                        }}
+                                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                                        title="Buka URL di tab baru"
+                                      >
+                                        <ExternalLink className="w-3 h-3" />
+                                        <span className="hidden sm:inline">Buka</span>
+                                      </a>
+
+                                      {canEdit && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setLinkDrafts((prev) => ({
+                                              ...prev,
+                                              [block.id]: {
+                                                url: block.content,
+                                                caption: block.caption || ''
+                                              }
+                                            }));
+                                            setEditingLinkId(block.id);
+                                          }}
+                                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
+                                          title="Ubah URL atau label"
+                                        >
+                                          <Pencil className="w-3 h-3" />
+                                          <span className="hidden sm:inline">Ubah</span>
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="p-3 rounded-xl border border-rose-400/30 bg-rose-500/10 text-xs text-rose-500 flex items-center justify-between gap-2">
+                                    <span className="truncate">URL link tidak valid: {block.content}</span>
+                                    {canEdit && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setLinkDrafts((prev) => ({
+                                            ...prev,
+                                            [block.id]: {
+                                              url: block.content,
+                                              caption: block.caption || ''
+                                            }
+                                          }));
+                                          setEditingLinkId(block.id);
+                                        }}
+                                        className="px-2.5 py-1 rounded-md bg-surface text-text-primary font-semibold shrink-0"
                                       >
                                         Perbaiki URL
                                       </button>

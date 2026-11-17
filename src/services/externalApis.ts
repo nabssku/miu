@@ -330,6 +330,8 @@ export function serializeBlocksForPrompt(
       lines.push(`[Gambar terlampir${b.caption ? `: ${b.caption}` : ''}]`);
     } else if (b.type === 'video') {
       lines.push(`[Video tersemat${b.caption ? `: ${b.caption}` : ''}: ${b.content}]`);
+    } else if (b.type === 'link') {
+      lines.push(`[Tautan URL${b.caption ? `: ${b.caption}` : ''}: ${b.content}]`);
     } else if (b.type === 'pdf') {
       lines.push(
         `[Dokumen PDF: ${b.fileName || b.caption || 'Lampiran.pdf'} (${b.pdfPages || 1} halaman)]\n${
