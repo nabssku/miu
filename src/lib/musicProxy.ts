@@ -10,16 +10,20 @@ export interface UpstreamMusicTrack {
 
 const MUSIC_API_BASE_URL = 'http://alanwinter.alannxd.my.id:3301';
 const MUSIC_HADES_SESSION =
-  'hades_session=66ecfac534d26ef8493425a49c09e8652d374119b7bde1589978a95e881e491b';
+  'hades_session=b85b88486974cd9536e737301052b6f10fdb5037337ee64b4a1ac931f1979289';
 const MUSIC_X_KEY = '';
+const MUSIC_AUTH_IDENTITY = 'bilbul';
+const MUSIC_AUTH_PASSWORD = '123321123';
 
 const UPSTREAM_USER_AGENT =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36';
 export const MUSIC_PROXY_SESSION_COOKIE_NAME = 'miu_music_session';
 
-const SESSION_TTL_MS = 20 * 60 * 1000;
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 let cachedSessionCookie = MUSIC_HADES_SESSION;
 let cachedSessionAt = Date.now();
+let serverRefreshedSession = false;
+let inFlightLoginPromise: Promise<string> | null = null;
 
 export function getMusicUpstreamBaseUrl(): string {
   return MUSIC_API_BASE_URL;
@@ -52,6 +56,7 @@ function captureResponseCookies(headers: Headers): string {
   if (extracted) {
     cachedSessionCookie = extracted;
     cachedSessionAt = Date.now();
+    serverRefreshedSession = true;
   }
   return extracted;
 }
@@ -99,21 +104,51 @@ async function fetchWithTimeout(
   }
 }
 
-export async function refreshUpstreamSessionCookie(baseUrl: string): Promise<string> {
-  try {
-    const resp = await fetchWithTimeout(
-      `${baseUrl}/`,
-      {
-        method: 'GET',
-        headers: buildUpstreamHeaders(baseUrl, '')
-      },
-      4500
-    );
-    const captured = captureResponseCookies(resp.headers);
-    return captured || cachedSessionCookie || MUSIC_HADES_SESSION;
-  } catch {
-    return cachedSessionCookie || MUSIC_HADES_SESSION;
+export async function refreshUpstreamSessionCookie(
+  baseUrl: string,
+  failedCookie?: string
+): Promise<string> {
+  // Reuse recently refreshed in-memory cookie if it differs from the expired one
+  if (
+    serverRefreshedSession &&
+    cachedSessionCookie &&
+    cachedSessionCookie !== failedCookie &&
+    Date.now() - cachedSessionAt < 60 * 1000
+  ) {
+    return cachedSessionCookie;
   }
+
+  if (inFlightLoginPromise) {
+    return inFlightLoginPromise;
+  }
+
+  inFlightLoginPromise = (async () => {
+    try {
+      const resp = await fetchWithTimeout(
+        `${baseUrl}/api/auth/login`,
+        {
+          method: 'POST',
+          headers: buildUpstreamHeaders(baseUrl, '', true),
+          body: JSON.stringify({
+            identity: MUSIC_AUTH_IDENTITY,
+            password: MUSIC_AUTH_PASSWORD
+          })
+        },
+        7000
+      );
+      const captured = captureResponseCookies(resp.headers);
+      if (resp.ok && captured) {
+        return captured;
+      }
+      return captured || '';
+    } catch {
+      return '';
+    } finally {
+      inFlightLoginPromise = null;
+    }
+  })();
+
+  return inFlightLoginPromise;
 }
 
 export async function resolveInitialSessionCookie(
@@ -121,6 +156,10 @@ export async function resolveInitialSessionCookie(
   _baseUrl: string,
   _prefetchIfMissing = false
 ): Promise<string> {
+  if (serverRefreshedSession && cachedSessionCookie && Date.now() - cachedSessionAt < 5 * 60 * 1000) {
+    return cachedSessionCookie;
+  }
+
   const clientStoredCookie = req.cookies.get(MUSIC_PROXY_SESSION_COOKIE_NAME)?.value?.trim();
   if (clientStoredCookie && clientStoredCookie.includes('=')) {
     return clientStoredCookie;
@@ -215,8 +254,8 @@ export async function proxyMusicSearch(
   let capturedCookie = captureResponseCookies(resp.headers);
 
   if (resp.status === 401 || resp.status === 403) {
-    const refreshed = await refreshUpstreamSessionCookie(baseUrl);
-    if (refreshed && refreshed !== sessionCookie) {
+    const refreshed = await refreshUpstreamSessionCookie(baseUrl, sessionCookie);
+    if (refreshed) {
       sessionCookie = refreshed;
       try {
         resp = await fetchWithTimeout(
@@ -312,8 +351,8 @@ export async function proxyMusicPlayed(
   let capturedCookie = captureResponseCookies(resp.headers);
 
   if (resp.status === 401 || resp.status === 403) {
-    const refreshed = await refreshUpstreamSessionCookie(baseUrl);
-    if (refreshed && refreshed !== sessionCookie) {
+    const refreshed = await refreshUpstreamSessionCookie(baseUrl, sessionCookie);
+    if (refreshed) {
       sessionCookie = refreshed;
       try {
         resp = await fetchWithTimeout(
