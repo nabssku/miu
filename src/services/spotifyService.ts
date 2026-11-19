@@ -8,6 +8,10 @@ export interface SpotifyTrackItem {
   url: string;
   coverUrl: string;
   durationMs: number;
+  durationSec?: number;
+  youtubeId?: string;
+  sourceKind?: 'youtube' | 'spotify';
+  searchQuery?: string;
   audioUrl?: string;
   isFullTrack?: boolean;
   glowColor: string;
@@ -285,94 +289,140 @@ interface ItunesTrackRow {
 }
 
 /**
- * Search songs by title/artist and return full-length playable audio stream + Spotify source link
+ * Clean noisy YouTube video suffixes/emojis before searching synced lyrics in LRCLIB
+ */
+export function cleanTrackMetaForLyrics(
+  title: string,
+  artist: string
+): { title: string; artist: string } {
+  const cleanTitle = (title || '')
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
+    .replace(/\|.*$/g, ' ')
+    .replace(/\b(official\s*(music\s*)?video|official\s*audio|lyric\s*video|lyrics?|mv|hd|hq|4k|full\s*song|viral\s*tiktok|jedag\s*jedug|fyp\s*tiktok|terbaru\s*20\d\d|rmx|remix|style\s*bootleg)\b/gi, ' ')
+    .replace(/[!?.]{2,}/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const cleanArtist = (artist || '')
+    .replace(/\s*-\s*Topic$/i, '')
+    .replace(/\b(official|channel)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return {
+    title: cleanTitle || title.trim(),
+    artist: cleanArtist
+  };
+}
+
+/**
+ * Search songs via Next.js proxy -> /api/search?q={Judul Music}
+ */
+export async function searchMusicCatalog(
+  query: string
+): Promise<{ results: SpotifyTrackItem[]; error?: string }> {
+  const q = query.trim();
+  if (!q) return { results: SPOTIFY_STUDY_PRESETS };
+
+  try {
+    const resp = await fetch(`/api/music/search?q=${encodeURIComponent(q)}`, {
+      cache: 'no-store'
+    });
+    const data = (await resp.json().catch(() => ({}))) as {
+      results?: Array<{
+        vid: string;
+        title: string;
+        artist: string;
+        duration: number;
+        thumb: string;
+      }>;
+      error?: string;
+    };
+
+    if (!resp.ok) {
+      return {
+        results: [],
+        error: data.error || `Gagal mencari musik (HTTP ${resp.status}).`
+      };
+    }
+
+    const rows = Array.isArray(data.results) ? data.results : [];
+    const results: SpotifyTrackItem[] = rows
+      .filter((r) => Boolean(r && r.vid))
+      .map((r) => {
+        const durationSec = Math.max(0, Number(r.duration) || 0);
+        const durationMs = durationSec > 0 ? durationSec * 1000 : 180000;
+        const thumbUrl =
+          r.thumb || `https://i.ytimg.com/vi/${r.vid}/mqdefault.jpg`;
+
+        return {
+          id: `yt-${r.vid}`,
+          title: r.title || 'Tanpa Judul',
+          artist: r.artist || 'YouTube',
+          album: 'YouTube Music',
+          uri: '',
+          url: `https://www.youtube.com/watch?v=${r.vid}`,
+          coverUrl: thumbUrl,
+          durationMs,
+          durationSec,
+          youtubeId: r.vid,
+          sourceKind: 'youtube',
+          searchQuery: q,
+          isFullTrack: true,
+          glowColor: '#EF4444'
+        };
+      });
+
+    return {
+      results,
+      ...(data.error ? { error: data.error } : {})
+    };
+  } catch {
+    return {
+      results: [],
+      error: 'Tidak dapat terhubung ke server pencarian musik.'
+    };
+  }
+}
+
+/**
+ * Backward-compatible wrapper returning track array from searchMusicCatalog
  */
 export async function searchSpotifyCatalog(query: string): Promise<SpotifyTrackItem[]> {
-  const q = query.trim();
-  if (!q) return SPOTIFY_STUDY_PRESETS;
+  const res = await searchMusicCatalog(query);
+  return res.results;
+}
 
-  // Match any preset first
-  const presetMatches = SPOTIFY_STUDY_PRESETS.filter(
-    (p) =>
-      p.title.toLowerCase().includes(q.toLowerCase()) ||
-      p.artist.toLowerCase().includes(q.toLowerCase()) ||
-      (p.label && p.label.toLowerCase().includes(q.toLowerCase()))
-  );
+/**
+ * Notify backend /api/played telemetry when a track starts playing
+ */
+export async function reportTrackPlayed(
+  track: SpotifyTrackItem,
+  query?: string
+): Promise<void> {
+  if (!track.youtubeId) return;
+  const duration =
+    typeof track.durationSec === 'number'
+      ? track.durationSec
+      : Math.max(0, Math.round((track.durationMs || 0) / 1000));
 
-  // 1. Primary: Search full-length 320kbps tracks first (full song, not 30s preview!)
-  const fullStreamResults = await fetchFullStreamCatalog(q, 10);
-  if (fullStreamResults.length > 0) {
-    const mergedPresets = presetMatches.map((preset) => {
-      const streamMatch = fullStreamResults.find(
-        (s) => s.title.toLowerCase().includes(preset.title.toLowerCase())
-      );
-      return streamMatch?.audioUrl
-        ? {
-            ...preset,
-            audioUrl: streamMatch.audioUrl,
-            coverUrl: streamMatch.coverUrl,
-            durationMs: streamMatch.durationMs || preset.durationMs,
-            isFullTrack: true
-          }
-        : preset;
-    });
-
-    const nonDuplicateSearched = fullStreamResults.filter(
-      (s) =>
-        !mergedPresets.some(
-          (p) =>
-            p.title.toLowerCase() === s.title.toLowerCase() &&
-            p.artist.toLowerCase() === s.artist.toLowerCase()
-        )
-    );
-
-    return [...mergedPresets, ...nonDuplicateSearched];
-  }
-
-  // 2. Fallback: iTunes catalog if full-stream mirrors are unreachable
   try {
-    const resp = await fetch(
-      `https://itunes.apple.com/search?term=${encodeURIComponent(
-        q
-      )}&media=music&entity=song&limit=10&country=ID`
-    );
-    if (!resp.ok) return presetMatches;
-    const data = (await resp.json()) as { results?: ItunesTrackRow[] };
-    const rows = data.results || [];
-
-    const searchedItems: SpotifyTrackItem[] = rows.map((r) => {
-      const highResCover = r.artworkUrl100
-        ? r.artworkUrl100.replace('100x100bb', '400x400bb')
-        : 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?auto=format&fit=crop&w=300&q=80';
-
-      const matchedPreset = SPOTIFY_STUDY_PRESETS.find(
-        (p) =>
-          p.title.toLowerCase() === (r.trackName || '').toLowerCase() &&
-          p.artist.toLowerCase().includes((r.artistName || '').toLowerCase())
-      );
-
-      const spotifySearchUrl = `https://open.spotify.com/search/${encodeURIComponent(
-        `${r.trackName} ${r.artistName}`
-      )}`;
-
-      return {
-        id: `sp-search-${r.trackId}`,
-        title: r.trackName || 'Tanpa Judul',
-        artist: r.artistName || 'Artis',
-        album: r.collectionName || 'Single',
-        uri: matchedPreset?.uri || '',
-        url: matchedPreset?.url || spotifySearchUrl,
-        coverUrl: highResCover,
-        durationMs: 30000,
-        audioUrl: r.previewUrl || undefined,
-        isFullTrack: false,
-        glowColor: '#10B981'
-      };
+    await fetch('/api/music/played', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        track: {
+          vid: track.youtubeId,
+          title: track.title,
+          artist: track.artist,
+          duration,
+          thumb: track.coverUrl
+        },
+        query: (query || track.searchQuery || track.title).trim()
+      })
     });
-
-    return [...presetMatches, ...searchedItems];
   } catch {
-    return presetMatches;
+    // Non-blocking telemetry
   }
 }
 
@@ -430,7 +480,7 @@ export async function resolveDirectAudioStream(
   }
 }
 
-// --- Spotify Official Embed iFrame API Loader ---
+// --- Spotify Official Embed iFrame API & YouTube IFrame Player API Loaders ---
 export interface SpotifyEmbedController {
   loadUri: (uri: string) => void;
   play: () => void;
@@ -449,10 +499,65 @@ type SpotifyIframeApiObject = {
   ) => void;
 };
 
+export interface YouTubePlayerController {
+  loadVideoById: (
+    videoId: string | { videoId: string; startSeconds?: number }
+  ) => void;
+  cueVideoById?: (
+    videoId: string | { videoId: string; startSeconds?: number }
+  ) => void;
+  playVideo: () => void;
+  pauseVideo: () => void;
+  stopVideo?: () => void;
+  seekTo: (seconds: number, allowSeekAhead?: boolean) => void;
+  setVolume: (volume: number) => void;
+  getVolume?: () => number;
+  mute?: () => void;
+  unMute?: () => void;
+  getCurrentTime: () => number;
+  getDuration: () => number;
+  getPlayerState: () => number;
+  getIframe?: () => HTMLIFrameElement;
+  destroy?: () => void;
+}
+
+export interface YouTubeIframeNamespace {
+  Player: new (
+    el: HTMLElement | string,
+    options: {
+      videoId?: string;
+      width?: string | number;
+      height?: string | number;
+      playerVars?: Record<string, string | number | undefined>;
+      events?: {
+        onReady?: (event: { target: YouTubePlayerController }) => void;
+        onStateChange?: (event: {
+          target: YouTubePlayerController;
+          data: number;
+        }) => void;
+        onError?: (event: {
+          target: YouTubePlayerController;
+          data: number;
+        }) => void;
+      };
+    }
+  ) => YouTubePlayerController;
+  PlayerState?: {
+    UNSTARTED: number;
+    ENDED: number;
+    PLAYING: number;
+    PAUSED: number;
+    BUFFERING: number;
+    CUED: number;
+  };
+}
+
 declare global {
   interface Window {
     onSpotifyIframeApiReady?: (api: SpotifyIframeApiObject) => void;
     __miuSpotifyIframeApi?: SpotifyIframeApiObject;
+    onYouTubeIframeAPIReady?: () => void;
+    YT?: YouTubeIframeNamespace;
   }
 }
 
@@ -485,6 +590,67 @@ export function loadSpotifyIframeApi(): Promise<SpotifyIframeApiObject> {
   });
 
   return iframeApiPromise;
+}
+
+let ytIframeApiPromise: Promise<YouTubeIframeNamespace> | null = null;
+
+export function loadYouTubeIframeApi(): Promise<YouTubeIframeNamespace> {
+  if (typeof window === 'undefined') {
+    return Promise.reject(new Error('YouTube API hanya berjalan di browser.'));
+  }
+  if (window.YT?.Player) {
+    return Promise.resolve(window.YT);
+  }
+  if (ytIframeApiPromise) return ytIframeApiPromise;
+
+  ytIframeApiPromise = new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (yt: YouTubeIframeNamespace) => {
+      if (settled) return;
+      settled = true;
+      window.clearInterval(pollTimer);
+      resolve(yt);
+    };
+
+    const prevReady = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      if (typeof prevReady === 'function') {
+        try {
+          prevReady();
+        } catch {
+          // ignore
+        }
+      }
+      if (window.YT?.Player) {
+        finish(window.YT);
+      }
+    };
+
+    const pollTimer = window.setInterval(() => {
+      if (window.YT?.Player) {
+        finish(window.YT);
+      }
+    }, 100);
+
+    const existing = document.getElementById('youtube-iframe-api');
+    if (!existing) {
+      const script = document.createElement('script');
+      script.id = 'youtube-iframe-api';
+      script.src = 'https://www.youtube.com/iframe_api';
+      script.async = true;
+      script.onerror = () => {
+        if (!settled) {
+          settled = true;
+          window.clearInterval(pollTimer);
+          ytIframeApiPromise = null;
+          reject(new Error('Gagal memuat YouTube IFrame API.'));
+        }
+      };
+      document.body.appendChild(script);
+    }
+  });
+
+  return ytIframeApiPromise;
 }
 
 /** Extract dominant vibrant color from album artwork for Ambient Glow */

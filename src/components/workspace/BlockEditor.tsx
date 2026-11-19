@@ -100,7 +100,11 @@ import {
   sanitizeFormSubmission
 } from '../../utils/databaseHelper';
 import { parseMarkdownToNotionBlocks, renderInlineMarkdown } from '../../utils/markdown';
-import { PdfDocumentPreview, processAndUploadPdf } from '../../utils/pdfHelper';
+import {
+  extractTextFromPdfSource,
+  PdfDocumentPreview,
+  processAndUploadPdf
+} from '../../utils/pdfHelper';
 import { parseLinkUrl } from '../../utils/linkHelper';
 import {
   filterSlashOptions,
@@ -192,6 +196,8 @@ export const BlockEditor: React.FC = () => {
   const [localToggleOverrides, setLocalToggleOverrides] = useState<Record<string, boolean>>({});
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced'>('idle');
   const [uploadingBlockId, setUploadingBlockId] = useState<string | null>(null);
+  const [pdfProgressByBlockId, setPdfProgressByBlockId] = useState<Record<string, string>>({});
+  const [reExtractingBlockId, setReExtractingBlockId] = useState<string | null>(null);
   const [uploadingCover, setUploadingCover] = useState(false);
 
   const [slashState, setSlashState] = useState<{
@@ -921,8 +927,11 @@ export const BlockEditor: React.FC = () => {
     if (!activeNote || !canEdit) return;
     const targetNoteId = activeNote.id;
     setUploadingBlockId(blockId);
+    setPdfProgressByBlockId((prev) => ({ ...prev, [blockId]: 'Membaca file PDF...' }));
     try {
-      const { url, fileName, text, pages } = await processAndUploadPdf(file);
+      const { url, fileName, text, pages } = await processAndUploadPdf(file, (msg) =>
+        setPdfProgressByBlockId((prev) => ({ ...prev, [blockId]: msg }))
+      );
       await patchBlockByIdInDb(targetNoteId, blockId, {
         type: 'pdf',
         content: url,
@@ -936,7 +945,76 @@ export const BlockEditor: React.FC = () => {
       // ignore
     } finally {
       setUploadingBlockId(null);
+      setPdfProgressByBlockId((prev) => {
+        const next = { ...prev };
+        delete next[blockId];
+        return next;
+      });
     }
+  };
+
+  // Re-extract PDF text from stored URL/DataURL (also used for legacy blocks uploaded with old extractor)
+  const handleReExtractPdfBlock = async (
+    block: NoteBlockBase
+  ): Promise<{ text: string; pages: number } | null> => {
+    if (!activeNote || !block.content) return null;
+    const targetNoteId = activeNote.id;
+    const docName = block.fileName || block.caption || 'Dokumen.pdf';
+    setReExtractingBlockId(block.id);
+    setPdfProgressByBlockId((prev) => ({
+      ...prev,
+      [block.id]: 'Mengekstrak ulang teks PDF...'
+    }));
+    try {
+      const { text, pages } = await extractTextFromPdfSource(
+        block.content,
+        docName,
+        (msg) => setPdfProgressByBlockId((prev) => ({ ...prev, [block.id]: msg }))
+      );
+      if (canEdit) {
+        await patchBlockByIdInDb(targetNoteId, block.id, {
+          pdfText: text,
+          pdfPages: pages
+        });
+      }
+      return { text, pages };
+    } catch {
+      return null;
+    } finally {
+      setReExtractingBlockId(null);
+      setPdfProgressByBlockId((prev) => {
+        const next = { ...prev };
+        delete next[block.id];
+        return next;
+      });
+    }
+  };
+
+  const handleAskAiForPdfBlock = async (block: NoteBlockBase) => {
+    const fileName = block.fileName || block.caption || 'Dokumen.pdf';
+    const currentText = (block.pdfText || '').trim();
+    const isFallbackOrEmpty =
+      !currentText ||
+      currentText.startsWith('Dokumen PDF "') ||
+      currentText.startsWith('Tidak ada teks');
+
+    if (isFallbackOrEmpty && block.content) {
+      const fresh = await handleReExtractPdfBlock(block);
+      triggerInlineAIExplain('', undefined, {
+        fileName,
+        text: fresh?.text || block.pdfText || '',
+        pages: fresh?.pages || block.pdfPages || 1,
+        url: block.content
+      });
+      return;
+    }
+
+    triggerInlineAIExplain('', undefined, {
+      fileName,
+      text: block.pdfText || '',
+      pages: block.pdfPages || 1,
+      url: block.content
+    });
   };
 
   // Upload custom cover image to Cloudinary
@@ -2156,12 +2234,7 @@ export const BlockEditor: React.FC = () => {
                       caption: block.caption || 'Gambar Catatan'
                     });
                   } else if (block.type === 'pdf') {
-                    triggerInlineAIExplain('', undefined, {
-                      fileName: block.fileName || block.caption || 'Dokumen.pdf',
-                      text: block.pdfText || '',
-                      pages: block.pdfPages || 1,
-                      url: block.content
-                    });
+                    void handleAskAiForPdfBlock(block);
                   } else if (block.type === 'video') {
                     triggerInlineAIExplain(
                       `Video (${block.caption || 'Tautan Video'}): ${block.content}`
@@ -3390,7 +3463,9 @@ export const BlockEditor: React.FC = () => {
                             {block.fileName || block.caption || 'Dokumen.pdf'}
                           </p>
                           <p className="text-[10px] text-text-secondary">
-                            {block.pdfPages || 1} halaman • Teks siap dibaca AI
+                            {pdfProgressByBlockId[block.id]
+                              ? pdfProgressByBlockId[block.id]
+                              : `${block.pdfPages || 1} halaman • Teks siap dibaca AI`}
                           </p>
                         </div>
                       </div>
@@ -3416,19 +3491,16 @@ export const BlockEditor: React.FC = () => {
                         </button>
                         <button
                           type="button"
-                          onClick={() => {
-                            triggerInlineAIExplain('', undefined, {
-                              fileName:
-                                block.fileName || block.caption || 'Dokumen.pdf',
-                              text: block.pdfText || '',
-                              pages: block.pdfPages || 1,
-                              url: block.content
-                            });
-                          }}
-                          className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold inline-flex items-center gap-1 shadow-sm transition"
+                          disabled={reExtractingBlockId === block.id}
+                          onClick={() => void handleAskAiForPdfBlock(block)}
+                          className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white text-[11px] font-semibold inline-flex items-center gap-1 shadow-sm transition"
                         >
-                          <Sparkles className="w-3 h-3" />
-                          Tanya AI
+                          {reExtractingBlockId === block.id ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-3 h-3" />
+                          )}
+                          {reExtractingBlockId === block.id ? 'Membaca...' : 'Tanya AI'}
                         </button>
                       </div>
                     </div>
@@ -3439,6 +3511,14 @@ export const BlockEditor: React.FC = () => {
                           src={block.content}
                           pdfText={block.pdfText}
                           totalPages={block.pdfPages || 1}
+                          onReExtractText={
+                            canEdit
+                              ? async () => {
+                                  await handleReExtractPdfBlock(block);
+                                }
+                              : undefined
+                          }
+                          reExtracting={reExtractingBlockId === block.id}
                         />
                       </div>
                     )}
@@ -3449,7 +3529,8 @@ export const BlockEditor: React.FC = () => {
                       <>
                         <Loader2 className="w-5 h-5 text-accent-strong animate-spin" />
                         <span className="text-xs font-medium text-text-primary">
-                          Mengekstrak teks PDF &amp; mengunggah ke Cloud Catatan...
+                          {pdfProgressByBlockId[block.id] ||
+                            'Mengekstrak teks PDF & mengunggah ke Cloud Catatan...'}
                         </span>
                       </>
                     ) : (
@@ -3471,6 +3552,7 @@ export const BlockEditor: React.FC = () => {
                       className="hidden"
                       onChange={(e) => {
                         const f = e.target.files?.[0];
+                        e.target.value = '';
                         if (f) void handleUploadPdfForBlock(block.id, f);
                       }}
                     />

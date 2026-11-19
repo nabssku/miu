@@ -4,6 +4,7 @@ import React from 'react';
 import { usePathname } from 'next/navigation';
 import { useMiu } from '@/context/MiuContext';
 import { DynamicIsland } from '@/components/island/DynamicIsland';
+import { HiddenYouTubePlayer } from '@/components/island/HiddenYouTubePlayer';
 import { LazyshotOverlay } from '@/components/lazyshot/LazyshotOverlay';
 import { SupportModal } from '@/components/support/SupportModal';
 
@@ -14,6 +15,9 @@ export const MiuShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
   return (
     <div className="min-h-screen relative">
+      {/* Persistent Visually-Hidden YouTube Audio Engine */}
+      <HiddenYouTubePlayer />
+
       {/* Persistent Hover-to-Open Dynamic Island */}
       <DynamicIsland />
 

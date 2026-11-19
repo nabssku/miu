@@ -52,7 +52,7 @@ import {
   parseMarkdownToNotionBlocks,
   stripInlineMarkdown
 } from '../../utils/markdown';
-import { processAndUploadPdf } from '../../utils/pdfHelper';
+import { extractTextFromPdfSource, processAndUploadPdf } from '../../utils/pdfHelper';
 
 const CUSTOM_PROVIDER_PRESETS: Array<{
   id: AIProviderId;
@@ -116,6 +116,7 @@ export const ExternalAIDrawer: React.FC = () => {
   const [responseText, setResponseText] = useState('');
   const [loading, setLoading] = useState(false);
   const [uploadingRef, setUploadingRef] = useState(false);
+  const [pdfProgressMsg, setPdfProgressMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [insertedSuccess, setInsertedSuccess] = useState(false);
   const [copiedResponse, setCopiedResponse] = useState(false);
@@ -224,19 +225,101 @@ export const ExternalAIDrawer: React.FC = () => {
 
   const handleUploadReferencePdf = async (file: File) => {
     setUploadingRef(true);
+    setErrorMsg('');
+    setPdfProgressMsg('Membaca file PDF...');
     try {
-      const { url, fileName, text, pages } = await processAndUploadPdf(file);
+      const { url, fileName, text, pages } = await processAndUploadPdf(file, (msg) =>
+        setPdfProgressMsg(msg)
+      );
       setAiPdfAttachment({ fileName, text, pages, url });
       setAiImageAttachment(null);
-    } catch {
-      // ignore
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Gagal membaca file PDF yang dipilih.'
+      );
     } finally {
       setUploadingRef(false);
+      setPdfProgressMsg('');
+    }
+  };
+
+  const handleAttachNotePdf = async (
+    pdfBlk: (typeof notePdfs)[number],
+    fallbackIndex: number
+  ) => {
+    const fileName =
+      pdfBlk.fileName || pdfBlk.caption || `Dokumen_${fallbackIndex + 1}.pdf`;
+    const rawText = (pdfBlk.pdfText || '').trim();
+    const isFallbackOrEmpty =
+      !rawText ||
+      rawText.startsWith('Dokumen PDF "') ||
+      rawText.startsWith('Tidak ada teks');
+
+    setAiImageAttachment(null);
+    if (!isFallbackOrEmpty || !pdfBlk.content) {
+      setAiPdfAttachment({
+        fileName,
+        text: pdfBlk.pdfText || '',
+        pages: pdfBlk.pdfPages || 1,
+        url: pdfBlk.content
+      });
+      return;
+    }
+
+    setUploadingRef(true);
+    setErrorMsg('');
+    setPdfProgressMsg(`Membaca ulang "${fileName}"...`);
+    try {
+      const { text, pages } = await extractTextFromPdfSource(
+        pdfBlk.content,
+        fileName,
+        (msg) => setPdfProgressMsg(msg)
+      );
+      setAiPdfAttachment({ fileName, text, pages, url: pdfBlk.content });
+    } catch {
+      setAiPdfAttachment({
+        fileName,
+        text: pdfBlk.pdfText || '',
+        pages: pdfBlk.pdfPages || 1,
+        url: pdfBlk.content
+      });
+    } finally {
+      setUploadingRef(false);
+      setPdfProgressMsg('');
+    }
+  };
+
+  const handleReExtractAttachedPdf = async () => {
+    if (!aiPdfAttachment?.url || uploadingRef) return;
+    setUploadingRef(true);
+    setErrorMsg('');
+    setPdfProgressMsg(`Mengekstrak ulang "${aiPdfAttachment.fileName}"...`);
+    try {
+      const { text, pages } = await extractTextFromPdfSource(
+        aiPdfAttachment.url,
+        aiPdfAttachment.fileName,
+        (msg) => setPdfProgressMsg(msg)
+      );
+      setAiPdfAttachment({
+        ...aiPdfAttachment,
+        text,
+        pages
+      });
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Gagal membaca ulang isi PDF.'
+      );
+    } finally {
+      setUploadingRef(false);
+      setPdfProgressMsg('');
     }
   };
 
   const executePrompt = async (mode: 'summarize' | 'quiz' | 'breakdown' | 'explain' | 'custom') => {
     if (!activeNote) return;
+    if (mode === 'custom' && !customPrompt.trim() && !aiPdfAttachment && !aiImageAttachment) {
+      return;
+    }
     // Collapse custom provider settings automatically so the response area has full height
     if (aiTab === 'custom') {
       setShowCustomSettings(false);
@@ -248,50 +331,67 @@ export const ExternalAIDrawer: React.FC = () => {
     setShowQuizCards(mode === 'quiz');
     setFlashcardFlipped(false);
 
+    const rawQuery = customPrompt.trim();
     const liveContext = await buildLiveNoteContext(
       activeNoteId || activeNote.id,
       activeNote,
       aiPdfAttachment,
-      24000
+      34000,
+      mode === 'custom' || mode === 'explain' ? rawQuery : ''
     );
     const noteContent = liveContext.contextText;
     const attachedImageUrl = aiImageAttachment?.url || liveContext.noteImages[0]?.content;
-    let userPrompt = customPrompt.trim();
+    let userPrompt = rawQuery;
+    let contextInUserPrompt = false;
 
     if (mode === 'summarize') {
       userPrompt = `Ringkas materi berikut menjadi poin-poin inti terstruktur (gunakan Heading ##, Bullet -, dan Bold **kata kunci**) dalam Bahasa Indonesia:\n\n${noteContent}`;
+      contextInUserPrompt = true;
     } else if (mode === 'quiz') {
       userPrompt = `Buatkan 3 soal pilihan ganda latihan beserta kunci jawaban dan penjelasan singkat dari materi berikut:\n\n${noteContent}`;
+      contextInUserPrompt = true;
     } else if (mode === 'breakdown') {
       userPrompt = `Pecah materi/tugas berikut menjadi langkah-langkah To-do actionable beserta estimasi sesi Pomodoro (🍅):\n\n${noteContent}`;
+      contextInUserPrompt = true;
     } else if (mode === 'explain') {
-      userPrompt = aiPdfAttachment
-        ? `Jelaskan secara terstruktur dan lengkap poin-poin penting dari dokumen PDF "${aiPdfAttachment.fileName}" berikut dengan bahasa mahasiswa yang mudah dipahami:\n\n${noteContent}`
-        : aiImageAttachment
-          ? `Jelaskan secara lengkap dan terstruktur isi dari gambar referensi ini (${
-              aiImageAttachment.caption || 'Gambar Catatan'
-            }) beserta kaitannya dengan catatan:\n\n${noteContent}`
-          : userPrompt ||
-            `Jelaskan bagian tersulit atau rumus pada catatan ini menggunakan analogi sederhana:\n\n${noteContent}`;
+      if (aiPdfAttachment) {
+        userPrompt = `Jelaskan secara terstruktur dan lengkap poin-poin penting dari dokumen PDF "${aiPdfAttachment.fileName}" berikut dengan bahasa mahasiswa yang mudah dipahami:\n\n${noteContent}`;
+        contextInUserPrompt = true;
+      } else if (aiImageAttachment) {
+        userPrompt = `Jelaskan secara lengkap dan terstruktur isi dari gambar referensi ini (${
+          aiImageAttachment.caption || 'Gambar Catatan'
+        }) beserta kaitannya dengan catatan:\n\n${noteContent}`;
+        contextInUserPrompt = true;
+      } else if (!userPrompt) {
+        userPrompt = `Jelaskan bagian tersulit atau rumus pada catatan ini menggunakan analogi sederhana:\n\n${noteContent}`;
+        contextInUserPrompt = true;
+      }
     } else if (mode === 'custom') {
       if (!userPrompt && aiPdfAttachment) {
         userPrompt = `Jelaskan dan rangkum isi dokumen PDF "${aiPdfAttachment.fileName}" secara lengkap dan terstruktur:\n\n${noteContent}`;
-      } else if (aiPdfAttachment) {
-        userPrompt = `${userPrompt}\n\n${noteContent}`;
+        contextInUserPrompt = true;
       } else if (!userPrompt && aiImageAttachment) {
         userPrompt = `Jelaskan isi gambar referensi "${
           aiImageAttachment.caption || 'ini'
         }" secara detail dengan bahasa yang mudah dipahami.`;
-      } else if (aiImageAttachment) {
+      } else if (aiImageAttachment && userPrompt) {
         userPrompt = `${userPrompt}\n\n(Gunakan gambar referensi yang dilampirkan sebagai acuan utama).`;
       }
     }
+
+    const baseSystemPrompt =
+      'Kamu adalah Miu AI, asisten belajar mahasiswa yang ringkas, akurat, ramah, dan suportif dalam Bahasa Indonesia. Gunakan struktur Markdown yang bersih (## Subjudul, - Poin Bullet, 1. Poin Nomor, **Tebal** untuk istilah penting, dan $...$ atau $$...$$ untuk rumus LaTeX). Jangan tampilkan tag <think>. Jawablah secara akurat berdasarkan teks catatan dan isi dokumen PDF yang tersedia; jika bagian atau halaman tertentu tidak tercantum dalam teks yang diberikan, sampaikan dengan jujur tanpa mengarang.';
+
+    const finalSystemPrompt =
+      !contextInUserPrompt && noteContent.trim()
+        ? `${baseSystemPrompt}\n\n=== KONTEKS CATATAN & DOKUMEN PDF AKTIF ===\n${noteContent}`
+        : baseSystemPrompt;
 
     try {
       let finalOutput = '';
       await runExternalAIStream(
         activeConfig,
-        'Kamu adalah Miu AI, asisten belajar mahasiswa yang ringkas, akurat, ramah, dan suportif dalam Bahasa Indonesia. Gunakan struktur Markdown yang bersih (## Subjudul, - Poin Bullet, 1. Poin Nomor, **Tebal** untuk istilah penting, dan $...$ atau $$...$$ untuk rumus LaTeX). Jangan tampilkan tag <think>.',
+        finalSystemPrompt,
         userPrompt,
         (chunk) => {
           finalOutput = chunk;
@@ -771,15 +871,9 @@ export const ExternalAIDrawer: React.FC = () => {
               <button
                 key={pdfBlk.id}
                 type="button"
-                onClick={() =>
-                  setAiPdfAttachment({
-                    fileName: pdfBlk.fileName || pdfBlk.caption || `Dokumen_${i + 1}.pdf`,
-                    text: pdfBlk.pdfText || '',
-                    pages: pdfBlk.pdfPages || 1,
-                    url: pdfBlk.content
-                  })
-                }
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-surface border border-border-subtle hover:border-accent-strong text-xs font-medium text-text-primary transition"
+                disabled={uploadingRef}
+                onClick={() => void handleAttachNotePdf(pdfBlk, i)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-surface border border-border-subtle hover:border-accent-strong disabled:opacity-60 text-xs font-medium text-text-primary transition"
               >
                 <FileText className="w-3.5 h-3.5 text-rose-500 shrink-0" />
                 <span className="truncate max-w-[180px]">
@@ -807,6 +901,19 @@ export const ExternalAIDrawer: React.FC = () => {
               </p>
             </div>
           </div>
+          {aiPdfAttachment.url && (
+            <button
+              type="button"
+              disabled={uploadingRef}
+              onClick={() => void handleReExtractAttachedPdf()}
+              className="p-1 rounded-full hover:bg-subtle text-text-secondary hover:text-text-primary disabled:opacity-50 shrink-0"
+              title="Baca ulang isi teks PDF (layout & OCR)"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${uploadingRef && pdfProgressMsg ? 'animate-spin' : ''}`}
+              />
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setAiPdfAttachment(null)}
@@ -907,6 +1014,13 @@ export const ExternalAIDrawer: React.FC = () => {
         </button>
       )}
 
+      {uploadingRef && pdfProgressMsg && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-400/30 text-[11px] text-rose-600 dark:text-rose-300 shrink-0">
+          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+          <span className="truncate font-medium">{pdfProgressMsg}</span>
+        </div>
+      )}
+
       {/* Custom Prompt Input + Direct Image & PDF Attachment Buttons */}
       <form
         onSubmit={(e) => {
@@ -940,13 +1054,18 @@ export const ExternalAIDrawer: React.FC = () => {
               className="p-1 rounded-lg hover:bg-subtle text-text-secondary hover:text-rose-500 cursor-pointer transition"
               title="Unggah & baca file PDF dengan AI"
             >
-              <FileText className="w-4 h-4" />
+              {uploadingRef && pdfProgressMsg ? (
+                <Loader2 className="w-4 h-4 animate-spin text-rose-500" />
+              ) : (
+                <FileText className="w-4 h-4" />
+              )}
               <input
                 type="file"
                 accept=".pdf,application/pdf"
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
+                  e.target.value = '';
                   if (f) void handleUploadReferencePdf(f);
                 }}
               />
@@ -955,7 +1074,7 @@ export const ExternalAIDrawer: React.FC = () => {
               className="p-1 rounded-lg hover:bg-subtle text-text-secondary hover:text-accent-strong cursor-pointer transition"
               title="Lampirkan gambar untuk ditanyakan ke AI"
             >
-              {uploadingRef ? (
+              {uploadingRef && !pdfProgressMsg ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
                 <ImagePlus className="w-4 h-4" />
@@ -966,6 +1085,7 @@ export const ExternalAIDrawer: React.FC = () => {
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
+                  e.target.value = '';
                   if (f) void handleUploadReferenceImage(f);
                 }}
               />

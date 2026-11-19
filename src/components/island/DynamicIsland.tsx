@@ -66,7 +66,7 @@ const POPOVER_TITLES: Record<string, { title: string; subtitle: string; badgeCol
   },
   music: {
     title: 'Musik, Lirik & Mixer',
-    subtitle: 'Spotify + White Noise',
+    subtitle: 'YouTube Audio, Spotify & White Noise',
     badgeColor: 'text-emerald-300 bg-emerald-500/15 border-emerald-400/30'
   },
   mirror: {

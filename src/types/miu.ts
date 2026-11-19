@@ -312,7 +312,7 @@ export interface LyricLine {
   text: string;
 }
 
-export type SpotifySourceMode = 'embed' | 'pkce' | 'offline';
+export type SpotifySourceMode = 'youtube' | 'embed' | 'pkce' | 'offline';
 
 export interface ActiveTrack {
   id: string;
@@ -324,6 +324,8 @@ export interface ActiveTrack {
   positionMs: number;
   isPlaying: boolean;
   spotifyUri?: string;
+  youtubeId?: string;
+  sourceQuery?: string;
   source: SpotifySourceMode;
   glowColor: string;
 }

@@ -29,13 +29,17 @@ import {
   getPrayerTimingsForCity
 } from '../services/externalApis';
 import {
+  cleanTrackMetaForLyrics,
   extractDominantGlowColor,
   fetchSpotifyOEmbedMeta,
   parseSpotifyUri,
+  reportTrackPlayed,
   resolveDirectAudioStream,
+  searchMusicCatalog,
   SPOTIFY_STUDY_PRESETS,
   type SpotifyEmbedController,
-  type SpotifyTrackItem
+  type SpotifyTrackItem,
+  type YouTubePlayerController
 } from '../services/spotifyService';
 import type {
   ActiveTrack,
@@ -124,11 +128,13 @@ interface MiuContextValue {
   pausePomodoro: () => void;
   resetPomodoro: (phase?: PomodoroPhase) => void;
 
-  // Spotify Search, Source & LRCLIB
+  // Music Search, Hidden YouTube Player, Spotify Embed & LRCLIB
   activeTrack: ActiveTrack;
   lyrics: LyricLine[];
   activeLyricText: string;
   lyricsLoading: boolean;
+  musicError: string;
+  clearMusicError: () => void;
   spotifyMode: SpotifySourceMode;
   setSpotifyMode: (mode: SpotifySourceMode) => void;
   spotifyEmbedUri: string;
@@ -136,9 +142,16 @@ interface MiuContextValue {
     urlOrUri: string,
     presetMeta?: { title: string; artist: string; coverUrl: string; glowColor: string }
   ) => void;
-  playSpotifyTrackItem: (item: SpotifyTrackItem) => void;
+  playSpotifyTrackItem: (
+    item: SpotifyTrackItem,
+    queue?: SpotifyTrackItem[],
+    sourceQuery?: string
+  ) => void;
   registerEmbedController: (ctrl: SpotifyEmbedController | null) => void;
   updateEmbedPlaybackState: (positionMs: number, durationMs: number, isPaused: boolean) => void;
+  registerYouTubeController: (ctrl: YouTubePlayerController | null) => void;
+  updateYouTubePlaybackState: (stateCode: number, positionMs: number, durationMs: number) => void;
+  handleYouTubeError: (errorCode: number) => void;
   togglePlayMusic: () => void;
   seekMusic: (positionMs: number) => void;
   nextTrack: () => void;
@@ -234,14 +247,20 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [linkedTodoId, setLinkedTodoId] = useState<string | null>(null);
   const workerRef = useRef<Worker | null>(null);
 
-  // Music & Spotify state (Single Active Audio Owner: Full-Length Stream vs Official Spotify Embed)
-  const [spotifyMode, setSpotifyMode] = useState<SpotifySourceMode>('embed');
+  // Music state (Single Active Audio Owner: Hidden YouTube IFrame vs Full-Length Stream vs Spotify Embed)
+  const [spotifyMode, setSpotifyMode] = useState<SpotifySourceMode>('youtube');
   const [presetTrackIndex, setPresetTrackIndex] = useState(0);
   const [spotifyEmbedUri, setSpotifyEmbedUri] = useState(SPOTIFY_STUDY_PRESETS[0].uri);
   const embedControllerRef = useRef<SpotifyEmbedController | null>(null);
+  const youtubeControllerRef = useRef<YouTubePlayerController | null>(null);
   const pendingEmbedAutoPlayRef = useRef<boolean>(false);
+  const pendingYouTubeVideoRef = useRef<{ videoId: string; volumePercent: number } | null>(null);
+  const lastYouTubeLoadAtRef = useRef<number>(0);
   const streamRequestIdRef = useRef<number>(0);
-  const activeAudioOwnerRef = useRef<'stream' | 'embed'>('stream');
+  const activeAudioOwnerRef = useRef<'youtube' | 'stream' | 'embed'>('youtube');
+  const musicQueueRef = useRef<SpotifyTrackItem[]>(SPOTIFY_STUDY_PRESETS);
+  const nextTrackRef = useRef<() => void>(() => {});
+  const [musicError, setMusicError] = useState<string>('');
 
   const [activeTrack, setActiveTrack] = useState<ActiveTrack>(() => ({
     id: SPOTIFY_STUDY_PRESETS[0].id,
@@ -253,7 +272,7 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     positionMs: 0,
     isPlaying: false,
     spotifyUri: SPOTIFY_STUDY_PRESETS[0].uri,
-    source: 'embed',
+    source: 'youtube',
     glowColor: SPOTIFY_STUDY_PRESETS[0].glowColor
   }));
   const [lyrics, setLyrics] = useState<LyricLine[]>([]);
@@ -262,6 +281,7 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // White noise & Mixer
   const [activeNoises, setActiveNoises] = useState<NoiseChannelId[]>([]);
   const [volumes, setVolumes] = useState(() => audioEngine.getVolumes());
+  const volumesRef = useRef(volumes);
 
   // Screen Time & Reminders
   const [hydrationEnabled, setHydrationEnabled] = useState(true);
@@ -659,26 +679,55 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [prayerTimings]
   );
 
-  // Load initial synced lyrics for the default Spotify preset
+  const presetTrackIndexRef = useRef<number>(0);
   useEffect(() => {
-    fetchSyncedLyricsFromLRCLIB(SPOTIFY_STUDY_PRESETS[0].title, SPOTIFY_STUDY_PRESETS[0].artist)
+    presetTrackIndexRef.current = presetTrackIndex;
+  }, [presetTrackIndex]);
+
+  const clearMusicError = useCallback(() => setMusicError(''), []);
+
+  // Load initial synced lyrics for the default preset
+  useEffect(() => {
+    const cleaned = cleanTrackMetaForLyrics(
+      SPOTIFY_STUDY_PRESETS[0].title,
+      SPOTIFY_STUDY_PRESETS[0].artist
+    );
+    fetchSyncedLyricsFromLRCLIB(cleaned.title, cleaned.artist)
       .then((lines) => setLyrics(lines))
       .catch(() => {});
   }, []);
 
-  // Local 200ms progress interpolation ONLY when Spotify Embed is the active audio owner
+  // Live 250ms playback progress polling for YouTube IFrame (real time) and Spotify Embed (interpolated)
   useEffect(() => {
     if (!activeTrack.isPlaying) return;
     const timer = window.setInterval(() => {
-      if (activeAudioOwnerRef.current !== 'embed') return;
-      setActiveTrack((prev) => {
-        const nextPos = prev.positionMs + 200;
-        if (nextPos >= prev.durationMs) {
-          return { ...prev, positionMs: 0 };
+      if (activeAudioOwnerRef.current === 'embed') {
+        setActiveTrack((prev) => {
+          const nextPos = prev.positionMs + 250;
+          if (nextPos >= prev.durationMs) {
+            return { ...prev, positionMs: 0 };
+          }
+          return { ...prev, positionMs: Math.min(prev.durationMs, nextPos) };
+        });
+      } else if (activeAudioOwnerRef.current === 'youtube') {
+        const yt = youtubeControllerRef.current;
+        if (!yt) return;
+        try {
+          const playerState = yt.getPlayerState?.();
+          if (playerState === 1) {
+            const curSec = Number(yt.getCurrentTime?.() || 0);
+            const durSec = Number(yt.getDuration?.() || 0);
+            setActiveTrack((prev) => ({
+              ...prev,
+              positionMs: Math.max(0, Math.round(curSec * 1000)),
+              durationMs: durSec > 0 ? Math.round(durSec * 1000) : prev.durationMs
+            }));
+          }
+        } catch {
+          // ignore transient YouTube player read
         }
-        return { ...prev, positionMs: Math.min(prev.durationMs, nextPos) };
-      });
-    }, 200);
+      }
+    }, 250);
 
     return () => window.clearInterval(timer);
   }, [activeTrack.isPlaying]);
@@ -696,85 +745,196 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return matched;
   }, [lyrics, activeTrack.positionMs, activeTrack.title, activeTrack.artist]);
 
-  const playSpotifyTrackItem = useCallback((item: SpotifyTrackItem) => {
-    const reqId = ++streamRequestIdRef.current;
-    activeAudioOwnerRef.current = 'stream';
-    pendingEmbedAutoPlayRef.current = false;
-    setSpotifyMode('embed');
-
-    // Always pause both sources first so audio NEVER overlaps / doubles
-    audioEngine.pauseStream();
-    if (embedControllerRef.current) {
+  const startYouTubeVideo = useCallback((videoId: string) => {
+    const volPercent = Math.round((volumesRef.current.spotify ?? 0.8) * 100);
+    lastYouTubeLoadAtRef.current = Date.now();
+    if (youtubeControllerRef.current) {
       try {
-        embedControllerRef.current.pause();
+        youtubeControllerRef.current.setVolume(volPercent);
+        youtubeControllerRef.current.unMute?.();
+        youtubeControllerRef.current.loadVideoById(videoId);
+        pendingYouTubeVideoRef.current = null;
+      } catch {
+        pendingYouTubeVideoRef.current = { videoId, volumePercent: volPercent };
+      }
+    } else {
+      pendingYouTubeVideoRef.current = { videoId, volumePercent: volPercent };
+    }
+  }, []);
+
+  const fetchLyricsForTrack = useCallback(
+    (title: string, artist: string, durationMs: number | undefined, reqId: number) => {
+      const cleaned = cleanTrackMetaForLyrics(title, artist);
+      setLyricsLoading(true);
+      fetchSyncedLyricsFromLRCLIB(cleaned.title, cleaned.artist, durationMs)
+        .then((lines) => {
+          if (reqId === streamRequestIdRef.current) {
+            setLyrics(lines);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (reqId === streamRequestIdRef.current) {
+            setLyricsLoading(false);
+          }
+        });
+    },
+    []
+  );
+
+  const playSpotifyTrackItem = useCallback(
+    (item: SpotifyTrackItem, queue?: SpotifyTrackItem[], sourceQuery?: string) => {
+      const reqId = ++streamRequestIdRef.current;
+      if (Array.isArray(queue) && queue.length > 0) {
+        musicQueueRef.current = queue;
+      }
+
+      setMusicError('');
+      pendingEmbedAutoPlayRef.current = false;
+
+      // Always pause HTML5 stream & Spotify Embed first so audio NEVER overlaps
+      audioEngine.pauseStream();
+      if (embedControllerRef.current) {
+        try {
+          embedControllerRef.current.pause();
+        } catch {
+          // ignore
+        }
+      }
+
+      if (item.uri) {
+        setSpotifyEmbedUri(item.uri);
+      }
+
+      if (item.youtubeId) {
+        // Primary path: Play via hidden YouTube IFrame and notify /api/played
+        activeAudioOwnerRef.current = 'youtube';
+        setSpotifyMode('youtube');
+        const effectiveQuery = (sourceQuery || item.searchQuery || item.title).trim();
+
+        void reportTrackPlayed(item, effectiveQuery);
+        startYouTubeVideo(item.youtubeId);
+
+        setActiveTrack({
+          id: item.id,
+          title: item.title,
+          artist: item.artist,
+          album: item.album || 'YouTube Music',
+          coverUrl: item.coverUrl,
+          durationMs: item.durationMs || 180000,
+          positionMs: 0,
+          isPlaying: true,
+          spotifyUri: item.uri || undefined,
+          youtubeId: item.youtubeId,
+          sourceQuery: effectiveQuery,
+          source: 'youtube',
+          glowColor: item.glowColor || '#EF4444'
+        });
+
+        void extractDominantGlowColor(item.coverUrl, item.glowColor || '#EF4444').then(
+          (glowColor) => {
+            if (reqId !== streamRequestIdRef.current) return;
+            setActiveTrack((prev) => ({ ...prev, glowColor }));
+          }
+        );
+
+        fetchLyricsForTrack(item.title, item.artist, item.durationMs, reqId);
+        return;
+      }
+
+      // Preset / track without youtubeId: resolve dynamically through /api/music/search first
+      try {
+        youtubeControllerRef.current?.pauseVideo();
       } catch {
         // ignore
       }
-    }
 
-    // Sync the Spotify Embed URI for reference without auto-playing the iframe on top of our stream
-    if (item.uri) {
-      setSpotifyEmbedUri(item.uri);
-    }
+      activeAudioOwnerRef.current = 'youtube';
+      setSpotifyMode('youtube');
 
-    if (item.audioUrl) {
-      audioEngine.playStreamUrl(item.audioUrl);
-    } else {
-      resolveDirectAudioStream(item.title, item.artist).then((resolved) => {
-        // Ignore stale async response if user already paused or switched tracks
+      setActiveTrack({
+        id: item.id,
+        title: item.title,
+        artist: item.artist,
+        album: item.album || 'Spotify',
+        coverUrl: item.coverUrl,
+        durationMs: item.durationMs || 210000,
+        positionMs: 0,
+        isPlaying: true,
+        spotifyUri: item.uri || item.url,
+        youtubeId: undefined,
+        sourceQuery: `${item.title} ${item.artist}`.trim(),
+        source: 'youtube',
+        glowColor: item.glowColor || '#10B981'
+      });
+
+      void extractDominantGlowColor(item.coverUrl, item.glowColor || '#10B981').then(
+        (glowColor) => {
+          if (reqId !== streamRequestIdRef.current) return;
+          setActiveTrack((prev) => ({ ...prev, glowColor }));
+        }
+      );
+
+      fetchLyricsForTrack(item.title, item.artist, item.durationMs, reqId);
+
+      const lookupQuery = `${item.title} ${item.artist}`.trim();
+      void searchMusicCatalog(lookupQuery).then((res) => {
         if (reqId !== streamRequestIdRef.current) return;
-        if (resolved?.audioUrl) {
-          if (embedControllerRef.current) {
+        const ytMatch = res.results.find((r) => Boolean(r.youtubeId));
+        if (ytMatch?.youtubeId) {
+          activeAudioOwnerRef.current = 'youtube';
+          setSpotifyMode('youtube');
+          void reportTrackPlayed(ytMatch, lookupQuery);
+          startYouTubeVideo(ytMatch.youtubeId);
+          setActiveTrack((prev) => ({
+            ...prev,
+            youtubeId: ytMatch.youtubeId,
+            sourceQuery: lookupQuery,
+            durationMs: ytMatch.durationMs || prev.durationMs,
+            coverUrl: ytMatch.coverUrl || prev.coverUrl,
+            source: 'youtube',
+            isPlaying: true
+          }));
+          return;
+        }
+
+        // Fallback if search endpoint returned nothing
+        activeAudioOwnerRef.current = 'stream';
+        if (item.audioUrl) {
+          setSpotifyMode('embed');
+          audioEngine.playStreamUrl(item.audioUrl);
+          return;
+        }
+        resolveDirectAudioStream(item.title, item.artist).then((resolved) => {
+          if (reqId !== streamRequestIdRef.current) return;
+          if (resolved?.audioUrl) {
+            setSpotifyMode('embed');
+            audioEngine.playStreamUrl(resolved.audioUrl);
+            setActiveTrack((prev) => ({
+              ...prev,
+              source: 'embed',
+              coverUrl: resolved.coverUrl || prev.coverUrl,
+              durationMs: resolved.durationMs || prev.durationMs
+            }));
+          } else if (item.uri && embedControllerRef.current) {
+            activeAudioOwnerRef.current = 'embed';
+            setSpotifyMode('embed');
+            embedControllerRef.current.loadUri(item.uri);
             try {
-              embedControllerRef.current.pause();
+              embedControllerRef.current.play();
             } catch {
               // ignore
             }
+            setActiveTrack((prev) => ({ ...prev, source: 'embed' }));
+          } else if (res.error) {
+            setMusicError(res.error);
+            setActiveTrack((prev) => ({ ...prev, isPlaying: false }));
           }
-          audioEngine.playStreamUrl(resolved.audioUrl);
-        }
-        if (resolved?.coverUrl || resolved?.durationMs) {
-          setActiveTrack((prev) => ({
-            ...prev,
-            coverUrl: resolved.coverUrl || prev.coverUrl,
-            durationMs: resolved.durationMs || prev.durationMs
-          }));
-        }
+        });
       });
-    }
-
-    void extractDominantGlowColor(item.coverUrl, item.glowColor || '#10B981').then((glowColor) => {
-      if (reqId !== streamRequestIdRef.current) return;
-      setActiveTrack((prev) => ({ ...prev, glowColor }));
-    });
-
-    setActiveTrack({
-      id: item.id,
-      title: item.title,
-      artist: item.artist,
-      album: item.album || 'Spotify',
-      coverUrl: item.coverUrl,
-      durationMs: item.durationMs || 210000,
-      positionMs: 0,
-      isPlaying: true,
-      spotifyUri: item.uri || item.url,
-      source: 'embed',
-      glowColor: item.glowColor || '#10B981'
-    });
-
-    setLyricsLoading(true);
-    fetchSyncedLyricsFromLRCLIB(item.title, item.artist, item.durationMs)
-      .then((lines) => {
-        if (reqId === streamRequestIdRef.current) {
-          setLyrics(lines);
-        }
-      })
-      .finally(() => {
-        if (reqId === streamRequestIdRef.current) {
-          setLyricsLoading(false);
-        }
-      });
-  }, []);
+    },
+    [fetchLyricsForTrack, startYouTubeVideo]
+  );
 
   const loadSpotifyUrlOrPreset = useCallback(
     (
@@ -788,11 +948,19 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const isPlaylistOrAlbum =
         parsed.startsWith('spotify:playlist:') || parsed.startsWith('spotify:album:');
 
-      // Stop both engines first to prevent any double audio
+      setMusicError('');
+      // Stop all engines first to prevent double audio
       audioEngine.pauseStream();
       if (embedControllerRef.current) {
         try {
           embedControllerRef.current.pause();
+        } catch {
+          // ignore
+        }
+      }
+      if (youtubeControllerRef.current) {
+        try {
+          youtubeControllerRef.current.pauseVideo();
         } catch {
           // ignore
         }
@@ -818,7 +986,7 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }, 180);
         }
       } else {
-        // Individual tracks resolve full-length audio stream so they are not capped at 30s preview
+        // Individual Spotify track URLs also try stream / fallback embed
         activeAudioOwnerRef.current = 'stream';
         pendingEmbedAutoPlayRef.current = false;
       }
@@ -835,6 +1003,8 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           presetMeta?.coverUrl ||
           'https://images.unsplash.com/photo-1614680376593-902f74cf0d41?auto=format&fit=crop&w=200&q=80',
         spotifyUri: parsed,
+        youtubeId: undefined,
+        sourceQuery: undefined,
         source: 'embed',
         positionMs: 0,
         isPlaying: true,
@@ -855,14 +1025,7 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           });
         }
-        setLyricsLoading(true);
-        fetchSyncedLyricsFromLRCLIB(presetMeta.title, presetMeta.artist)
-          .then((lines) => {
-            if (reqId === streamRequestIdRef.current) setLyrics(lines);
-          })
-          .finally(() => {
-            if (reqId === streamRequestIdRef.current) setLyricsLoading(false);
-          });
+        fetchLyricsForTrack(presetMeta.title, presetMeta.artist, undefined, reqId);
       } else {
         fetchSpotifyOEmbedMeta(parsed).then((meta) => {
           if (!meta || reqId !== streamRequestIdRef.current) return;
@@ -882,7 +1045,6 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   coverUrl: resolved.coverUrl || prev.coverUrl
                 }));
               } else if (embedControllerRef.current) {
-                // Fallback to Spotify Embed if no stream found
                 activeAudioOwnerRef.current = 'embed';
                 embedControllerRef.current.loadUri(parsed);
                 try {
@@ -893,18 +1055,11 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               }
             });
           }
-          setLyricsLoading(true);
-          fetchSyncedLyricsFromLRCLIB(meta.title, '')
-            .then((lines) => {
-              if (reqId === streamRequestIdRef.current) setLyrics(lines);
-            })
-            .finally(() => {
-              if (reqId === streamRequestIdRef.current) setLyricsLoading(false);
-            });
+          fetchLyricsForTrack(meta.title, '', undefined, reqId);
         });
       }
     },
-    []
+    [fetchLyricsForTrack]
   );
 
   const registerEmbedController = useCallback((ctrl: SpotifyEmbedController | null) => {
@@ -924,10 +1079,15 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updateEmbedPlaybackState = useCallback(
     (positionMs: number, durationMs: number, isPaused: boolean) => {
       if (!isPaused) {
-        // User clicked Play inside the Spotify Embed iframe directly -> immediately stop HTML5 stream!
+        // User clicked Play inside the Spotify Embed iframe directly -> stop HTML5 stream & YouTube!
         streamRequestIdRef.current++;
         activeAudioOwnerRef.current = 'embed';
         audioEngine.stopStream();
+        try {
+          youtubeControllerRef.current?.pauseVideo();
+        } catch {
+          // ignore
+        }
         setActiveTrack((prev) => ({
           ...prev,
           positionMs,
@@ -946,6 +1106,80 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     []
   );
 
+  const registerYouTubeController = useCallback((ctrl: YouTubePlayerController | null) => {
+    youtubeControllerRef.current = ctrl;
+    if (ctrl) {
+      const volPercent = Math.round((volumesRef.current.spotify ?? 0.8) * 100);
+      try {
+        ctrl.setVolume(volPercent);
+      } catch {
+        // ignore
+      }
+      if (pendingYouTubeVideoRef.current && activeAudioOwnerRef.current === 'youtube') {
+        const pending = pendingYouTubeVideoRef.current;
+        pendingYouTubeVideoRef.current = null;
+        lastYouTubeLoadAtRef.current = Date.now();
+        try {
+          ctrl.setVolume(pending.volumePercent);
+          ctrl.unMute?.();
+          ctrl.loadVideoById(pending.videoId);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }, []);
+
+  const updateYouTubePlaybackState = useCallback(
+    (stateCode: number, positionMs: number, durationMs: number) => {
+      if (activeAudioOwnerRef.current !== 'youtube') return;
+
+      // 0: ENDED
+      if (stateCode === 0) {
+        nextTrackRef.current();
+        return;
+      }
+
+      // 1: PLAYING
+      if (stateCode === 1) {
+        setMusicError('');
+        setActiveTrack((prev) => ({
+          ...prev,
+          positionMs: Math.max(0, positionMs),
+          durationMs: durationMs > 0 ? durationMs : prev.durationMs,
+          isPlaying: true
+        }));
+        return;
+      }
+
+      // 2: PAUSED (ignore transient PAUSED events raised during initial loadVideoById transition)
+      if (stateCode === 2 && Date.now() - lastYouTubeLoadAtRef.current > 1000) {
+        setActiveTrack((prev) => ({
+          ...prev,
+          positionMs: Math.max(0, positionMs),
+          durationMs: durationMs > 0 ? durationMs : prev.durationMs,
+          isPlaying: false
+        }));
+      }
+    },
+    []
+  );
+
+  const handleYouTubeError = useCallback((errorCode: number) => {
+    if (activeAudioOwnerRef.current !== 'youtube') return;
+    let msg = 'Gagal memutar audio dari YouTube.';
+    if (errorCode === 101 || errorCode === 150) {
+      msg =
+        'Video YouTube ini dibatasi untuk diputar di embed. Silakan pilih lagu/versi lain dari pencarian.';
+    } else if (errorCode === 100) {
+      msg = 'Video YouTube tidak ditemukan atau bersifat privat.';
+    } else if (errorCode === 2 || errorCode === 5) {
+      msg = 'ID atau pemutar video YouTube bermasalah. Coba pilih lagu lain.';
+    }
+    setMusicError(msg);
+    setActiveTrack((prev) => ({ ...prev, isPlaying: false }));
+  }, []);
+
   const togglePlayMusic = useCallback(() => {
     const nextPlaying = !activeTrack.isPlaying;
     if (!nextPlaying) {
@@ -959,13 +1193,25 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           // ignore
         }
       }
+      if (youtubeControllerRef.current) {
+        try {
+          youtubeControllerRef.current.pauseVideo();
+        } catch {
+          // ignore
+        }
+      }
       setActiveTrack((prev) => ({ ...prev, isPlaying: false }));
       return;
     }
 
-    // Play ONLY the active audio owner (never both!)
+    // Play ONLY the active audio owner
     if (activeAudioOwnerRef.current === 'embed') {
       audioEngine.stopStream();
+      try {
+        youtubeControllerRef.current?.pauseVideo();
+      } catch {
+        // ignore
+      }
       if (embedControllerRef.current) {
         try {
           embedControllerRef.current.play();
@@ -974,7 +1220,14 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
       setActiveTrack((prev) => ({ ...prev, isPlaying: true }));
-    } else {
+      return;
+    }
+
+    if (activeTrack.youtubeId) {
+      activeAudioOwnerRef.current = 'youtube';
+      setSpotifyMode('youtube');
+      setMusicError('');
+      audioEngine.pauseStream();
       if (embedControllerRef.current) {
         try {
           embedControllerRef.current.pause();
@@ -982,24 +1235,39 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           // ignore
         }
       }
-      const resumed = audioEngine.resumeStream();
-      if (!resumed) {
-        const reqId = ++streamRequestIdRef.current;
-        resolveDirectAudioStream(activeTrack.title, activeTrack.artist).then((resolved) => {
-          if (reqId !== streamRequestIdRef.current) return;
-          if (resolved?.audioUrl) {
-            audioEngine.playStreamUrl(resolved.audioUrl);
-            setActiveTrack((prev) => ({
-              ...prev,
-              durationMs: resolved.durationMs || prev.durationMs,
-              coverUrl: resolved.coverUrl || prev.coverUrl
-            }));
+
+      const yt = youtubeControllerRef.current;
+      const volPercent = Math.round((volumesRef.current.spotify ?? 0.8) * 100);
+      if (yt) {
+        try {
+          yt.setVolume(volPercent);
+          yt.unMute?.();
+          const state = yt.getPlayerState?.();
+          if (state === undefined || state === -1 || state === 5) {
+            lastYouTubeLoadAtRef.current = Date.now();
+            yt.loadVideoById(activeTrack.youtubeId);
+          } else {
+            yt.playVideo();
           }
-        });
+        } catch {
+          lastYouTubeLoadAtRef.current = Date.now();
+          yt.loadVideoById(activeTrack.youtubeId);
+        }
+      } else {
+        pendingYouTubeVideoRef.current = {
+          videoId: activeTrack.youtubeId,
+          volumePercent: volPercent
+        };
       }
       setActiveTrack((prev) => ({ ...prev, isPlaying: true }));
+      return;
     }
-  }, [activeTrack.isPlaying, activeTrack.title, activeTrack.artist]);
+
+    // Default initial track has not been resolved to YouTube yet -> resolve via search API
+    const activePreset =
+      SPOTIFY_STUDY_PRESETS[presetTrackIndexRef.current] || SPOTIFY_STUDY_PRESETS[0];
+    playSpotifyTrackItem(activePreset);
+  }, [activeTrack.isPlaying, activeTrack.youtubeId, playSpotifyTrackItem]);
 
   const seekMusic = useCallback((positionMs: number) => {
     const clamped = Math.max(0, positionMs);
@@ -1007,7 +1275,13 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...prev,
       positionMs: Math.min(prev.durationMs, clamped)
     }));
-    if (activeAudioOwnerRef.current === 'embed') {
+    if (activeAudioOwnerRef.current === 'youtube') {
+      try {
+        youtubeControllerRef.current?.seekTo(clamped / 1000, true);
+      } catch {
+        // ignore
+      }
+    } else if (activeAudioOwnerRef.current === 'embed') {
       try {
         embedControllerRef.current?.seek(Math.floor(clamped / 1000));
       } catch {
@@ -1018,17 +1292,36 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, []);
 
-  const switchPresetTrack = useCallback(
+  const switchQueueTrack = useCallback(
     (dir: 1 | -1) => {
-      setPresetTrackIndex((prev) => {
+      const queue = musicQueueRef.current;
+      if (queue.length > 0) {
+        const curIdx = queue.findIndex(
+          (item) =>
+            (activeTrack.youtubeId && item.youtubeId === activeTrack.youtubeId) ||
+            item.id === activeTrack.id
+        );
         const nextIdx =
-          (prev + dir + SPOTIFY_STUDY_PRESETS.length) % SPOTIFY_STUDY_PRESETS.length;
-        const nextItem = SPOTIFY_STUDY_PRESETS[nextIdx];
-        playSpotifyTrackItem(nextItem);
-        return nextIdx;
-      });
+          curIdx === -1
+            ? dir === 1
+              ? 0
+              : queue.length - 1
+            : (curIdx + dir + queue.length) % queue.length;
+        const nextItem = queue[nextIdx];
+        if (queue === SPOTIFY_STUDY_PRESETS) {
+          setPresetTrackIndex(nextIdx);
+        }
+        playSpotifyTrackItem(nextItem, queue, activeTrack.sourceQuery || nextItem.searchQuery);
+        return;
+      }
+
+      const nextPresetIdx =
+        (presetTrackIndexRef.current + dir + SPOTIFY_STUDY_PRESETS.length) %
+        SPOTIFY_STUDY_PRESETS.length;
+      setPresetTrackIndex(nextPresetIdx);
+      playSpotifyTrackItem(SPOTIFY_STUDY_PRESETS[nextPresetIdx]);
     },
-    [playSpotifyTrackItem]
+    [activeTrack.id, activeTrack.youtubeId, activeTrack.sourceQuery, playSpotifyTrackItem]
   );
 
   // Bind real HTML5 <audio> timeupdate, duration & auto-next on ended
@@ -1036,7 +1329,7 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     audioEngine.onStreamStateChange(({ positionMs, durationMs, isPlaying, ended }) => {
       if (activeAudioOwnerRef.current !== 'stream') return;
       if (ended) {
-        switchPresetTrack(1);
+        nextTrackRef.current();
         return;
       }
       setActiveTrack((prev) => ({
@@ -1047,15 +1340,19 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }));
     });
     return () => audioEngine.onStreamStateChange(null);
-  }, [switchPresetTrack]);
+  }, []);
 
   const nextTrack = useCallback(() => {
-    switchPresetTrack(1);
-  }, [switchPresetTrack]);
+    switchQueueTrack(1);
+  }, [switchQueueTrack]);
 
   const prevTrack = useCallback(() => {
-    switchPresetTrack(-1);
-  }, [switchPresetTrack]);
+    switchQueueTrack(-1);
+  }, [switchQueueTrack]);
+
+  useEffect(() => {
+    nextTrackRef.current = nextTrack;
+  }, [nextTrack]);
 
   const toggleNoiseChannel = useCallback((id: NoiseChannelId) => {
     setActiveNoises((prev) => {
@@ -1068,7 +1365,16 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const setChannelVolume = useCallback(
     (channel: 'spotify' | 'noise' | 'notif', val: number) => {
       audioEngine.setVolume(channel, val);
-      setVolumes(audioEngine.getVolumes());
+      const nextVolumes = audioEngine.getVolumes();
+      volumesRef.current = nextVolumes;
+      setVolumes(nextVolumes);
+      if (channel === 'spotify' && youtubeControllerRef.current) {
+        try {
+          youtubeControllerRef.current.setVolume(Math.round(val * 100));
+        } catch {
+          // ignore
+        }
+      }
     },
     []
   );
@@ -1375,6 +1681,8 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     lyrics,
     activeLyricText,
     lyricsLoading,
+    musicError,
+    clearMusicError,
     spotifyMode,
     setSpotifyMode,
     spotifyEmbedUri,
@@ -1382,6 +1690,9 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     playSpotifyTrackItem,
     registerEmbedController,
     updateEmbedPlaybackState,
+    registerYouTubeController,
+    updateYouTubePlaybackState,
+    handleYouTubeError,
     togglePlayMusic,
     seekMusic,
     nextTrack,

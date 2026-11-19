@@ -17,12 +17,13 @@ import {
   Sparkles,
   Trees,
   Volume2,
-  Waves
+  Waves,
+  X
 } from 'lucide-react';
 import { useMiu } from '../../../context/MiuContext';
 import {
   loadSpotifyIframeApi,
-  searchSpotifyCatalog,
+  searchMusicCatalog,
   SPOTIFY_STUDY_PRESETS,
   spotifyUriToWebUrl,
   type SpotifyTrackItem
@@ -48,6 +49,8 @@ export const MusicMixerPopover: React.FC = () => {
     lyrics,
     activeLyricText,
     lyricsLoading,
+    musicError,
+    clearMusicError,
     spotifyEmbedUri,
     loadSpotifyUrlOrPreset,
     playSpotifyTrackItem,
@@ -68,38 +71,67 @@ export const MusicMixerPopover: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SpotifyTrackItem[]>(SPOTIFY_STUDY_PRESETS);
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState('');
   const [urlInput, setUrlInput] = useState('');
   const [embedError, setEmbedError] = useState('');
 
   const embedHostRef = useRef<HTMLDivElement | null>(null);
   const controllerInitializedRef = useRef(false);
   const activeLyricRef = useRef<HTMLParagraphElement | null>(null);
+  const searchSeqRef = useRef(0);
 
   // Auto-scroll lyrics inside popover
   useEffect(() => {
     activeLyricRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }, [activeLyricText]);
 
-  // Debounced Spotify catalog search
+  const executeMusicSearch = async (rawQuery: string) => {
+    const q = rawQuery.trim();
+    const seq = ++searchSeqRef.current;
+    if (!q) {
+      setSearchResults(SPOTIFY_STUDY_PRESETS);
+      setSearchError('');
+      setSearching(false);
+      return;
+    }
+
+    setSearching(true);
+    setSearchError('');
+    const { results, error } = await searchMusicCatalog(q);
+    if (seq !== searchSeqRef.current) return;
+    setSearchResults(results);
+    setSearchError(error || '');
+    setSearching(false);
+  };
+
+  // Debounced music search
   useEffect(() => {
     const q = searchQuery.trim();
     if (!q) {
+      searchSeqRef.current++;
       setSearchResults(SPOTIFY_STUDY_PRESETS);
+      setSearchError('');
       setSearching(false);
       return;
     }
 
     let cancelled = false;
+    const seq = ++searchSeqRef.current;
     setSearching(true);
+    setSearchError('');
     const timer = window.setTimeout(() => {
-      searchSpotifyCatalog(q)
-        .then((items) => {
-          if (!cancelled) setSearchResults(items);
+      searchMusicCatalog(q)
+        .then(({ results, error }) => {
+          if (cancelled || seq !== searchSeqRef.current) return;
+          setSearchResults(results);
+          setSearchError(error || '');
         })
         .finally(() => {
-          if (!cancelled) setSearching(false);
+          if (!cancelled && seq === searchSeqRef.current) {
+            setSearching(false);
+          }
         });
-    }, 320);
+    }, 350);
 
     return () => {
       cancelled = true;
@@ -107,7 +139,7 @@ export const MusicMixerPopover: React.FC = () => {
     };
   }, [searchQuery]);
 
-  // Mount Official Spotify Embed iFrame Controller once and keep it alive across tab switches
+  // Mount Official Spotify Embed iFrame Controller once (kept for optional Spotify Playlist/Track URLs)
   useEffect(() => {
     if (!embedHostRef.current || controllerInitializedRef.current) return;
 
@@ -164,11 +196,14 @@ export const MusicMixerPopover: React.FC = () => {
     100,
     Math.round((activeTrack.positionMs / Math.max(1, activeTrack.durationMs)) * 100)
   );
-  const currentSpotifyWebUrl = activeTrack.spotifyUri
-    ? spotifyUriToWebUrl(activeTrack.spotifyUri)
-    : `https://open.spotify.com/search/${encodeURIComponent(
-        `${activeTrack.title} ${activeTrack.artist}`
-      )}`;
+  const isYouTubeSource = Boolean(activeTrack.youtubeId);
+  const currentSourceWebUrl = isYouTubeSource
+    ? `https://www.youtube.com/watch?v=${activeTrack.youtubeId}`
+    : activeTrack.spotifyUri
+      ? spotifyUriToWebUrl(activeTrack.spotifyUri)
+      : `https://open.spotify.com/search/${encodeURIComponent(
+          `${activeTrack.title} ${activeTrack.artist}`
+        )}`;
 
   return (
     <div className="w-full p-3.5 space-y-3 text-island-text">
@@ -195,7 +230,7 @@ export const MusicMixerPopover: React.FC = () => {
           }`}
         >
           <Search className="w-3 h-3" />
-          Cari &amp; Sumber Spotify
+          Cari &amp; Sumber Musik
         </button>
       </div>
 
@@ -206,7 +241,7 @@ export const MusicMixerPopover: React.FC = () => {
           className="rounded-xl overflow-hidden bg-black/40 border border-emerald-400/25 min-h-[80px]"
         />
         <p className="text-[9.5px] text-slate-400 leading-tight px-1">
-          Info: Pemutar utama Miu di bawah memutar <strong>lagu penuh (Full Track)</strong>. Widget Embed Spotify di atas hanya diperlukan untuk Playlist/Album.
+          Info: Audio YouTube diputar lewat iframe tersembunyi. Widget Embed Spotify di atas hanya diperlukan untuk Playlist/Album Spotify.
         </p>
         {embedError && <p className="text-[10px] text-amber-300 mt-1">{embedError}</p>}
       </div>
@@ -237,27 +272,37 @@ export const MusicMixerPopover: React.FC = () => {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <a
-                    href={currentSpotifyWebUrl}
+                    href={currentSourceWebUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 hover:bg-emerald-500/30 transition"
-                    title="Lihat sumber lagu di Spotify"
+                    className={`inline-flex items-center gap-1 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded border transition ${
+                      isYouTubeSource
+                        ? 'bg-rose-500/20 border-rose-400/35 text-rose-200 hover:bg-rose-500/30'
+                        : 'bg-emerald-500/20 border-emerald-400/30 text-emerald-300 hover:bg-emerald-500/30'
+                    }`}
+                    title={
+                      isYouTubeSource
+                        ? 'Buka sumber video di YouTube'
+                        : 'Lihat sumber lagu di Spotify'
+                    }
                   >
-                    <span>Sumber: Spotify</span>
+                    <span>{isYouTubeSource ? 'Sumber: YouTube' : 'Sumber: Spotify'}</span>
                     <ExternalLink className="w-2.5 h-2.5" />
                   </a>
-                  <button
-                    type="button"
-                    onClick={() => setShowSpotifyEmbedWidget((v) => !v)}
-                    className={`text-[9px] font-mono px-1.5 py-0.5 rounded border transition ${
-                      showSpotifyEmbedWidget
-                        ? 'bg-sky-500/20 border-sky-400/40 text-sky-200'
-                        : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
-                    }`}
-                    title="Tampilkan/sembunyikan Widget Embed Spotify"
-                  >
-                    {showSpotifyEmbedWidget ? 'Tutup Embed' : 'Embed'}
-                  </button>
+                  {(!isYouTubeSource || activeTrack.spotifyUri || showSpotifyEmbedWidget) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowSpotifyEmbedWidget((v) => !v)}
+                      className={`text-[9px] font-mono px-1.5 py-0.5 rounded border transition ${
+                        showSpotifyEmbedWidget
+                          ? 'bg-sky-500/20 border-sky-400/40 text-sky-200'
+                          : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
+                      }`}
+                      title="Tampilkan/sembunyikan Widget Embed Spotify"
+                    >
+                      {showSpotifyEmbedWidget ? 'Tutup Embed' : 'Embed'}
+                    </button>
+                  )}
                 </div>
                 <p className="text-xs font-bold text-white truncate mt-1">{activeTrack.title}</p>
                 <p className="text-[11px] text-slate-300 truncate">{activeTrack.artist}</p>
@@ -295,6 +340,33 @@ export const MusicMixerPopover: React.FC = () => {
               </div>
             </div>
 
+            {musicError && (
+              <div className="flex items-start justify-between gap-2 px-2.5 py-2 rounded-xl bg-rose-500/15 border border-rose-400/35 text-[10.5px] text-rose-100 leading-snug">
+                <div className="space-y-1 min-w-0">
+                  <p>{musicError}</p>
+                  {isYouTubeSource && (
+                    <a
+                      href={currentSourceWebUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-rose-300 hover:underline font-medium"
+                    >
+                      Buka langsung di YouTube
+                      <ExternalLink className="w-2.5 h-2.5" />
+                    </a>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={clearMusicError}
+                  className="p-0.5 rounded hover:bg-white/10 text-rose-200 shrink-0"
+                  aria-label="Tutup pesan error"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+
             {/* Seekable Track Progress Bar */}
             <div className="space-y-1">
               <div
@@ -313,7 +385,13 @@ export const MusicMixerPopover: React.FC = () => {
               </div>
               <div className="flex items-center justify-between text-[9px] font-mono text-slate-400">
                 <span>{formatTimerMMSS(Math.floor(activeTrack.positionMs / 1000))}</span>
-                <span className="text-emerald-300/80">Full Audio Stream</span>
+                <span className="text-emerald-300/80">
+                  {activeTrack.source === 'youtube'
+                    ? 'YouTube Audio (Tersembunyi)'
+                    : activeTrack.source === 'embed'
+                      ? 'Spotify Embed Player'
+                      : 'Full Audio Stream'}
+                </span>
                 <span>{formatTimerMMSS(Math.floor(activeTrack.durationMs / 1000))}</span>
               </div>
             </div>
@@ -384,7 +462,7 @@ export const MusicMixerPopover: React.FC = () => {
               <span>Audio Mixer Independen</span>
             </div>
             {[
-              { key: 'spotify' as const, label: 'Spotify / Musik', Icon: Music2 },
+              { key: 'spotify' as const, label: 'Musik / Lagu', Icon: Music2 },
               { key: 'noise' as const, label: 'White Noise', Icon: CloudRain },
               { key: 'notif' as const, label: 'Notifikasi Timer', Icon: Volume2 }
             ].map(({ key, label, Icon }) => (
@@ -408,45 +486,72 @@ export const MusicMixerPopover: React.FC = () => {
           </div>
         </>
       ) : (
-        /* Tab 2: Pencarian Lagu Spotify + Tempel Sumber Link Spotify */
+        /* Tab 2: Pencarian Lagu YouTube + Tempel Sumber Link Spotify */
         <div className="space-y-3 text-xs">
           {/* 1. Search Bar */}
           <div className="miu-island-card rounded-2xl p-3 space-y-2.5">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-emerald-300">
-                Cari Lagu atau Artis di Spotify
+                Cari Lagu atau Video Musik
               </span>
               {searching && <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin" />}
             </div>
 
-            <div className="relative">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void executeMusicSearch(searchQuery);
+              }}
+              className="relative"
+            >
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Ketik judul lagu / artis (mis. Hindia, Tulus, Nadin)..."
+                placeholder="Ketik judul lagu / artis (mis. Dj Amnesia, Hindia)..."
                 autoFocus
-                className="w-full bg-black/40 border border-white/10 rounded-xl pl-8 pr-3 py-2 text-xs text-white placeholder:text-slate-400 focus:outline-none focus:border-emerald-400"
+                className="w-full bg-black/40 border border-white/10 rounded-xl pl-8 pr-8 py-2 text-xs text-white placeholder:text-slate-400 focus:outline-none focus:border-emerald-400"
               />
-            </div>
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="p-1 rounded-full text-slate-400 hover:text-white absolute right-2 top-1.5"
+                  aria-label="Hapus kata kunci"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </form>
+
+            {searchError && (
+              <p className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-400/25 rounded-lg px-2.5 py-1.5">
+                {searchError}
+              </p>
+            )}
 
             {/* Search Results List */}
             <div className="max-h-48 overflow-y-auto space-y-1.5 pr-0.5">
-              {searchResults.length === 0 ? (
+              {searchResults.length === 0 && !searching ? (
                 <p className="text-[11px] text-slate-400 text-center py-4">
                   Lagu tidak ditemukan. Coba kata kunci lain atau tempel link Spotify di bawah.
                 </p>
               ) : (
                 searchResults.map((item) => {
-                  const isCurrent =
-                    activeTrack.title.toLowerCase() === item.title.toLowerCase() &&
-                    activeTrack.artist.toLowerCase() === item.artist.toLowerCase();
+                  const isCurrent = item.youtubeId
+                    ? activeTrack.youtubeId === item.youtubeId
+                    : activeTrack.title.toLowerCase() === item.title.toLowerCase() &&
+                      activeTrack.artist.toLowerCase() === item.artist.toLowerCase();
                   return (
                     <div
                       key={item.id}
                       onClick={() => {
-                        playSpotifyTrackItem(item);
+                        playSpotifyTrackItem(
+                          item,
+                          searchResults,
+                          searchQuery.trim() || item.title
+                        );
                         setTab('player');
                       }}
                       className={`group flex items-center gap-2.5 p-2 rounded-xl border cursor-pointer transition ${
@@ -475,10 +580,16 @@ export const MusicMixerPopover: React.FC = () => {
                             target="_blank"
                             rel="noreferrer"
                             onClick={(e) => e.stopPropagation()}
-                            className="inline-flex items-center gap-0.5 text-emerald-300 hover:underline shrink-0"
-                            title="Buka Sumber di Spotify"
+                            className={`inline-flex items-center gap-0.5 hover:underline shrink-0 ${
+                              item.youtubeId ? 'text-rose-300' : 'text-emerald-300'
+                            }`}
+                            title={
+                              item.youtubeId
+                                ? 'Buka Sumber di YouTube'
+                                : 'Buka Sumber di Spotify'
+                            }
                           >
-                            Spotify
+                            {item.youtubeId ? 'YouTube' : 'Spotify'}
                             <ExternalLink className="w-2.5 h-2.5" />
                           </a>
                         </div>

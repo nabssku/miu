@@ -180,13 +180,14 @@ export const ConversationalVoicePanel: React.FC<ConversationalVoicePanelProps> =
   const hasElevenLabsKey = serverElevenLabsReady || Boolean(cfg.apiKey.trim());
   const supportsBrowserSpeech = browserSupportsSpeechRecognition();
 
-  const getFreshNoteContext = async () => {
+  const getFreshNoteContext = async (userQuery = '') => {
     const currentNote = latestActiveNoteRef.current;
     return buildLiveNoteContext(
       currentNote?.id || '',
       currentNote,
       latestPdfRef.current,
-      10000
+      10000,
+      userQuery
     );
   };
 
@@ -305,7 +306,7 @@ export const ConversationalVoicePanel: React.FC<ConversationalVoicePanelProps> =
     setErrorMsg('');
 
     try {
-      const liveCtx = await getFreshNoteContext();
+      const liveCtx = await getFreshNoteContext(cleanUserText);
       const history: AIChatMessage[] = turnsRef.current.slice(-12).map((t) => ({
         role: t.role,
         content: t.text

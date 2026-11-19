@@ -276,10 +276,178 @@ export function saveAIConfig(config: AIConfig): void {
   );
 }
 
+const STOPWORDS_ID_EN = new Set([
+  'yang', 'dan', 'atau', 'dari', 'pada', 'untuk', 'dengan', 'adalah', 'ini', 'itu',
+  'dalam', 'ke', 'di', 'sebagai', 'oleh', 'akan', 'juga', 'tidak', 'bisa', 'dapat',
+  'the', 'and', 'or', 'from', 'for', 'with', 'this', 'that', 'are', 'was', 'were',
+  'apa', 'bagaimana', 'jelaskan', 'ringkas', 'rangkum', 'buatkan', 'tentang', 'isi',
+  'dokumen', 'pdf', 'halaman', 'tolong', 'coba', 'please', 'explain', 'summarize'
+]);
+
+export function selectRelevantPdfContext(
+  pdfText: string,
+  maxBudgetChars: number,
+  userQuery = ''
+): string {
+  const clean = pdfText.trim();
+  if (!clean) return '';
+  if (clean.length <= maxBudgetChars) return clean;
+
+  // Split into page chunks using `[Halaman N]` or `[Halaman N (OCR)]` markers
+  const markerRegex = /(?=\[Halaman\s+\d+(?:\s*\(OCR\))?\])/g;
+  const rawChunks = clean.split(markerRegex).map((c) => c.trim()).filter(Boolean);
+
+  if (rawChunks.length <= 1) {
+    // Unstructured long text: keep start (70%) + tail (30%) instead of losing ending completely
+    const headLen = Math.floor(maxBudgetChars * 0.7);
+    const tailLen = Math.max(400, maxBudgetChars - headLen - 60);
+    return `${clean.slice(0, headLen)}\n\n[... bagian tengah dipotong karena batas panjang ...]\n\n${clean.slice(-tailLen)}`;
+  }
+
+  const parsedChunks = rawChunks.map((chunk, idx) => {
+    const pageMatch = chunk.match(/^\[Halaman\s+(\d+)/);
+    const pageNum = pageMatch ? Number(pageMatch[1]) : idx + 1;
+    return { idx, pageNum, text: chunk };
+  });
+
+  // Detect explicit page number requests in userQuery (e.g. "hal 12", "halaman 15", "page 3")
+  const exactRequestedPages = new Set<number>();
+  const neighborRequestedPages = new Set<number>();
+  const pageReqMatches = userQuery.matchAll(/(?:hal(?:aman)?|page|p\.?)\s*(\d{1,3})/gi);
+  for (const m of pageReqMatches) {
+    const num = Number(m[1]);
+    if (num > 0) {
+      exactRequestedPages.add(num);
+      neighborRequestedPages.add(num - 1);
+      neighborRequestedPages.add(num + 1);
+    }
+  }
+
+  // Extract query keywords for relevance scoring
+  const keywords = Array.from(
+    new Set(
+      userQuery
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length >= 3 && !STOPWORDS_ID_EN.has(w))
+    )
+  );
+
+  const scored = parsedChunks.map((chunk) => {
+    let score = 0;
+    const lower = chunk.text.toLowerCase();
+
+    if (chunk.idx === 0) score += 8; // Title / intro / TOC page
+    if (chunk.idx === parsedChunks.length - 1) score += 3; // Conclusion / end page
+    if (exactRequestedPages.has(chunk.pageNum)) score += 150;
+    else if (neighborRequestedPages.has(chunk.pageNum)) score += 45;
+
+    for (const kw of keywords) {
+      if (lower.includes(kw)) {
+        // Count up to 5 occurrences per keyword
+        let count = 0;
+        let pos = 0;
+        while (count < 5) {
+          pos = lower.indexOf(kw, pos);
+          if (pos === -1) break;
+          count++;
+          pos += kw.length;
+        }
+        score += 10 + count * 2;
+      }
+    }
+
+    return { ...chunk, score };
+  });
+
+  const selectedIndices = new Set<number>();
+  const selectionBudget = maxBudgetChars > 600 ? maxBudgetChars - 180 : maxBudgetChars;
+  let usedChars = 0;
+
+  const trySelect = (idx: number) => {
+    if (selectedIndices.has(idx)) return false;
+    const chunk = parsedChunks[idx];
+    if (!chunk) return false;
+    const cost = chunk.text.length + 24;
+    if (usedChars + cost > selectionBudget && selectedIndices.size > 0) return false;
+    selectedIndices.add(idx);
+    usedChars += cost;
+    return true;
+  };
+
+  if (keywords.length > 0 || exactRequestedPages.size > 0) {
+    // Select by relevance score first
+    const byScore = [...scored].sort((a, b) => b.score - a.score || a.idx - b.idx);
+    for (const item of byScore) {
+      trySelect(item.idx);
+    }
+  } else {
+    // Broad summary: cover start, middle, and conclusion evenly
+    trySelect(0);
+    trySelect(parsedChunks.length - 1);
+    for (let i = 1; i < parsedChunks.length - 1; i++) {
+      trySelect(i);
+    }
+  }
+
+  // Fallback if Page 1 alone exceeded budget
+  if (selectedIndices.size === 0) {
+    return parsedChunks[0].text.slice(0, maxBudgetChars);
+  }
+
+  const orderedIndices = Array.from(selectedIndices).sort((a, b) => a - b);
+  const outputParts: string[] = [];
+  let prevIdx = -1;
+
+  if (orderedIndices[0] > 0) {
+    const firstSkippedStart = parsedChunks[0].pageNum;
+    const firstSkippedEnd = parsedChunks[orderedIndices[0] - 1].pageNum;
+    outputParts.push(
+      firstSkippedStart === firstSkippedEnd
+        ? `[... Halaman ${firstSkippedStart} dilewati karena batas panjang konteks ...]`
+        : `[... Halaman ${firstSkippedStart}-${firstSkippedEnd} dilewati karena batas panjang konteks ...]`
+    );
+  }
+
+  for (const idx of orderedIndices) {
+    if (prevIdx !== -1 && idx > prevIdx + 1) {
+      const skippedStart = parsedChunks[prevIdx + 1].pageNum;
+      const skippedEnd = parsedChunks[idx - 1].pageNum;
+      outputParts.push(
+        skippedStart === skippedEnd
+          ? `[... Halaman ${skippedStart} dilewati karena batas panjang konteks ...]`
+          : `[... Halaman ${skippedStart}-${skippedEnd} dilewati karena batas panjang konteks ...]`
+      );
+    }
+    outputParts.push(parsedChunks[idx].text);
+    prevIdx = idx;
+  }
+
+  if (prevIdx < parsedChunks.length - 1) {
+    const skippedStart = parsedChunks[prevIdx + 1].pageNum;
+    const skippedEnd = parsedChunks[parsedChunks.length - 1].pageNum;
+    outputParts.push(
+      skippedStart === skippedEnd
+        ? `[... Halaman ${skippedStart} tidak disertakan karena batas panjang konteks ...]`
+        : `[... Halaman ${skippedStart}-${skippedEnd} tidak disertakan karena batas panjang konteks ...]`
+    );
+  }
+
+  return outputParts.join('\n\n').slice(0, maxBudgetChars);
+}
+
+interface PdfExclusionTarget {
+  fileName?: string;
+  url?: string;
+}
+
 function serializeBlockListForPrompt(
   blocks: Array<NoteBlock | NoteBlockBase>,
   allNotes: NoteRecord[],
-  activeBlocks: NoteBlock[]
+  activeBlocks: NoteBlock[],
+  excludePdf?: PdfExclusionTarget | null,
+  userQuery = ''
 ): string[] {
   const lines: string[] = [];
   let numberedIdx = 0;
@@ -327,11 +495,25 @@ function serializeBlockListForPrompt(
     } else if (b.type === 'link') {
       lines.push(`[Tautan URL${b.caption ? `: ${b.caption}` : ''}: ${b.content}]`);
     } else if (b.type === 'pdf') {
-      lines.push(
-        `[Dokumen PDF: ${b.fileName || b.caption || 'Lampiran.pdf'} (${b.pdfPages || 1} halaman)]\n${
-          b.pdfText ? b.pdfText.slice(0, 12000) : ''
-        }`
-      );
+      const pdfName = b.fileName || b.caption || 'Lampiran.pdf';
+      const isDuplicateOfAttachment =
+        Boolean(excludePdf) &&
+        ((excludePdf?.url && b.content && excludePdf.url === b.content) ||
+          (excludePdf?.fileName &&
+            pdfName.toLowerCase() === excludePdf.fileName.toLowerCase()));
+
+      if (isDuplicateOfAttachment) {
+        lines.push(
+          `[Dokumen PDF: ${pdfName} (${b.pdfPages || 1} halaman) — isi lengkap dilampirkan pada bagian Referensi PDF di bawah]`
+        );
+      } else {
+        const selectedText = b.pdfText
+          ? selectRelevantPdfContext(b.pdfText, 24000, userQuery)
+          : '';
+        lines.push(
+          `[Dokumen PDF: ${pdfName} (${b.pdfPages || 1} halaman)]\n${selectedText}`
+        );
+      }
     } else if (b.type === 'subpage') {
       lines.push(`[Subhalaman: ${b.content || 'Halaman Tanpa Judul'}]`);
     } else if (b.type === 'database' && b.databaseData) {
@@ -367,7 +549,15 @@ function serializeBlockListForPrompt(
     } else if ('columns' in b && b.type === 'columns' && Array.isArray(b.columns)) {
       b.columns.forEach((col, colIdx) => {
         lines.push(`[Kolom ${colIdx + 1}/${b.columns?.length || 0}]`);
-        lines.push(...serializeBlockListForPrompt(col.blocks || [], allNotes, activeBlocks));
+        lines.push(
+          ...serializeBlockListForPrompt(
+            col.blocks || [],
+            allNotes,
+            activeBlocks,
+            excludePdf,
+            userQuery
+          )
+        );
       });
     } else if (b.content) {
       lines.push(b.content);
@@ -384,7 +574,9 @@ export function serializeBlocksForPrompt(
   kanbanStatus?: NoteRecord['kanbanStatus'],
   dueDate?: string,
   dueTime?: string,
-  allNotes: NoteRecord[] = []
+  allNotes: NoteRecord[] = [],
+  excludePdf?: PdfExclusionTarget | null,
+  userQuery = ''
 ): string {
   const statusLabel =
     kanbanStatus === 'in_progress'
@@ -397,7 +589,7 @@ export function serializeBlocksForPrompt(
     lines.push(`Deadline Catatan: ${dueDate}${dueTime ? ` ${dueTime}` : ''}`);
   }
   lines.push('---');
-  lines.push(...serializeBlockListForPrompt(blocks, allNotes, blocks));
+  lines.push(...serializeBlockListForPrompt(blocks, allNotes, blocks, excludePdf, userQuery));
 
   if (subpages.length > 0) {
     lines.push('\n--- Subhalaman Terkait ---');
@@ -425,7 +617,8 @@ export async function buildLiveNoteContext(
   noteId: string,
   fallbackNote?: NoteRecord,
   pdfAttachment?: { fileName: string; text: string; pages: number; url?: string } | null,
-  maxChars = 24000
+  maxChars = 34000,
+  userQuery = ''
 ): Promise<LiveNoteContextResult> {
   const targetId = noteId || fallbackNote?.id || '';
   const freshNote = targetId ? (await db.notes.get(targetId)) || fallbackNote : fallbackNote;
@@ -446,13 +639,28 @@ export async function buildLiveNoteContext(
         freshNote.kanbanStatus,
         freshNote.dueDate,
         freshNote.dueTime,
-        allNotes
+        allNotes,
+        pdfAttachment ? { fileName: pdfAttachment.fileName, url: pdfAttachment.url } : null,
+        userQuery
       )
     : 'Tidak ada catatan aktif.';
-  const pdfContextStr = pdfAttachment
-    ? `\n\n=== ISI DOKUMEN PDF REFERENSI (${pdfAttachment.fileName}, ${pdfAttachment.pages} halaman) ===\n${pdfAttachment.text}`
-    : '';
-  const combined = `${rawNoteContent}${pdfContextStr}`.slice(0, maxChars);
+
+  let combined = '';
+  if (pdfAttachment) {
+    const header = `\n\n=== ISI DOKUMEN PDF REFERENSI (${pdfAttachment.fileName}, ${pdfAttachment.pages} halaman) ===\n`;
+    const minPdfBudget = Math.floor(maxChars * 0.72);
+    const maxNoteBudget = Math.max(1200, maxChars - minPdfBudget - header.length);
+    const trimmedNote =
+      rawNoteContent.length > maxNoteBudget
+        ? `${rawNoteContent.slice(0, maxNoteBudget)}\n[... catatan dipersingkat agar isi PDF utuh ...]`
+        : rawNoteContent;
+
+    const remainingForPdf = Math.max(minPdfBudget, maxChars - trimmedNote.length - header.length);
+    const selectedPdf = selectRelevantPdfContext(pdfAttachment.text, remainingForPdf, userQuery);
+    combined = `${trimmedNote}${header}${selectedPdf}`.slice(0, maxChars);
+  } else {
+    combined = rawNoteContent.slice(0, maxChars);
+  }
 
   return {
     note: freshNote,
