@@ -4,6 +4,13 @@ import type {
   NoteRecord,
   NoteShareSettings
 } from '../types/miu';
+import {
+  normalizePointerCoordinate,
+  normalizePresenceField,
+  pickCollaboratorColor,
+  PRESENCE_TTL_MS,
+  type PresenceField
+} from './presenceHelper';
 
 export interface LiveItemRow {
   id: string;
@@ -35,6 +42,46 @@ export interface NeonNoteRow {
   comments: unknown;
   created_at: string | number;
   updated_at: string | number;
+}
+
+export interface NeonNotePresenceRow {
+  id: string;
+  note_id: string;
+  session_id: string;
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  user_picture: string;
+  color: string;
+  block_id: string;
+  field: string;
+  selection_start: number | string;
+  selection_end: number | string;
+  is_editing: boolean;
+  pointer_block_id: string | null;
+  pointer_x: number | string | null;
+  pointer_y: number | string | null;
+  updated_at: string | number;
+}
+
+export interface CollaboratorPresence {
+  id: string;
+  noteId: string;
+  sessionId: string;
+  userId: string;
+  userName: string;
+  userEmail: string;
+  userPicture: string;
+  color: string;
+  blockId: string;
+  field: PresenceField;
+  selectionStart: number;
+  selectionEnd: number;
+  isEditing: boolean;
+  pointerBlockId: string | null;
+  pointerX: number | null;
+  pointerY: number | null;
+  updatedAt: number;
 }
 
 export function normalizeRealtimeWsUrl(rawUrl: string): string {
@@ -124,4 +171,54 @@ export function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
     createdAt: Number(r.created_at) || Date.now(),
     updatedAt: Number(r.updated_at) || Date.now()
   };
+}
+
+export function parseNeonPresenceRow(r: NeonNotePresenceRow): CollaboratorPresence {
+  const start = Math.max(0, Math.floor(Number(r.selection_start) || 0));
+  const end = Math.max(start, Math.floor(Number(r.selection_end) || start));
+  const pointerX = normalizePointerCoordinate(r.pointer_x);
+  const pointerY = normalizePointerCoordinate(r.pointer_y);
+  const pointerBlockId =
+    typeof r.pointer_block_id === 'string' && r.pointer_block_id.trim()
+      ? r.pointer_block_id.trim()
+      : null;
+
+  return {
+    id: r.id,
+    noteId: r.note_id,
+    sessionId: r.session_id,
+    userId: r.user_id || '',
+    userName: (r.user_name || '').trim() || 'Kolaborator',
+    userEmail: r.user_email || '',
+    userPicture: r.user_picture || '',
+    color: (r.color || '').trim() || pickCollaboratorColor(r.session_id || r.user_id || r.id),
+    blockId: r.block_id || '',
+    field: normalizePresenceField(r.field),
+    selectionStart: start,
+    selectionEnd: end,
+    isEditing: Boolean(r.is_editing),
+    pointerBlockId: pointerBlockId && pointerX !== null && pointerY !== null ? pointerBlockId : null,
+    pointerX: pointerBlockId ? pointerX : null,
+    pointerY: pointerBlockId ? pointerY : null,
+    updatedAt: Number(r.updated_at) || 0
+  };
+}
+
+export function filterActiveRemoteCollaborators(
+  rows: readonly CollaboratorPresence[],
+  noteId: string,
+  mySessionId: string,
+  adjustedNow: number,
+  ttlMs = PRESENCE_TTL_MS
+): CollaboratorPresence[] {
+  if (!noteId) return [];
+  const active: CollaboratorPresence[] = [];
+  for (const row of rows) {
+    if (row.noteId !== noteId) continue;
+    if (mySessionId && row.sessionId === mySessionId) continue;
+    if (row.updatedAt > 0 && adjustedNow - row.updatedAt > ttlMs) continue;
+    active.push(row);
+  }
+  active.sort((a, b) => b.updatedAt - a.updatedAt || a.sessionId.localeCompare(b.sessionId));
+  return active;
 }

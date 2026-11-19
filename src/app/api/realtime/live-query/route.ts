@@ -3,6 +3,7 @@ import {
   getPublicRealtimeUrl,
   isServerRealtimeConfigured,
   sealLiveItemsQuery,
+  sealLiveNotePresenceQuery,
   sealLiveNoteQuery
 } from '@/lib/realtime';
 import {
@@ -25,7 +26,8 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json().catch(() => ({}))) as {
-      kind?: 'items' | 'note';
+      kind?: 'items' | 'note' | 'presence';
+      includePresence?: boolean;
       channel?: string;
       noteId?: string;
       userId?: string;
@@ -34,7 +36,7 @@ export async function POST(req: NextRequest) {
 
     const realtimeUrl = getPublicRealtimeUrl();
 
-    if (body.kind === 'note') {
+    if (body.kind === 'note' || body.kind === 'presence') {
       if (!isServerNeonConfigured()) {
         return NextResponse.json(
           { error: 'Database Postgres belum dikonfigurasi.', dbDisabled: true },
@@ -71,9 +73,28 @@ export async function POST(req: NextRequest) {
         );
       }
 
+      if (body.kind === 'presence') {
+        const sealedQuery = await sealLiveNotePresenceQuery(noteId);
+        return NextResponse.json(
+          { sealedQuery, realtimeUrl, serverTime: Date.now() },
+          { headers: NO_STORE_HEADERS }
+        );
+      }
+
+      if (body.includePresence) {
+        const [sealedQuery, presenceSealedQuery] = await Promise.all([
+          sealLiveNoteQuery(noteId),
+          sealLiveNotePresenceQuery(noteId)
+        ]);
+        return NextResponse.json(
+          { sealedQuery, presenceSealedQuery, realtimeUrl, serverTime: Date.now() },
+          { headers: NO_STORE_HEADERS }
+        );
+      }
+
       const sealedQuery = await sealLiveNoteQuery(noteId);
       return NextResponse.json(
-        { sealedQuery, realtimeUrl },
+        { sealedQuery, realtimeUrl, serverTime: Date.now() },
         { headers: NO_STORE_HEADERS }
       );
     }
@@ -81,7 +102,7 @@ export async function POST(req: NextRequest) {
     const channel = (body.channel || 'default').trim().slice(0, 64) || 'default';
     const sealedQuery = await sealLiveItemsQuery(channel);
     return NextResponse.json(
-      { sealedQuery, realtimeUrl },
+      { sealedQuery, realtimeUrl, serverTime: Date.now() },
       { headers: NO_STORE_HEADERS }
     );
   } catch (err) {

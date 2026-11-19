@@ -10,6 +10,13 @@ import type {
 import { findBlockById, mapBlockDeep } from '../utils/blockTreeHelper';
 import { sanitizeFormSubmission } from '../utils/databaseHelper';
 import {
+  buildPresenceRowId,
+  normalizePointerCoordinate,
+  normalizePresenceField,
+  pickCollaboratorColor,
+  PRESENCE_TTL_MS
+} from './presenceHelper';
+import {
   parseBlocksField,
   parseNeonNoteRow,
   parseShareSettingsField as parseShareSettings,
@@ -172,101 +179,170 @@ export async function executeServerNeonQuery<T = Record<string, unknown>>(
 }
 
 let schemaInitializedForUrl = '';
+let schemaInitPromise: Promise<boolean> | null = null;
+let schemaInitPromiseUrl = '';
 
 export async function ensureServerNeonSchema(): Promise<boolean> {
   const { neonDatabaseUrl } = getServerCloudEnv();
   if (!isServerNeonConfigured()) return false;
   if (schemaInitializedForUrl === neonDatabaseUrl) return true;
-
-  try {
-    await executeServerNeonQuery(`
-      CREATE TABLE IF NOT EXISTS miu_users (
-        id TEXT PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        name TEXT NOT NULL,
-        picture TEXT,
-        created_at BIGINT NOT NULL
-      );
-    `);
-
-    await executeServerNeonQuery(`
-      CREATE TABLE IF NOT EXISTS miu_notes (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        owner_email TEXT DEFAULT '',
-        owner_name TEXT DEFAULT '',
-        parent_id TEXT DEFAULT NULL,
-        semester_id TEXT NOT NULL DEFAULT 'sem-1',
-        course_id TEXT NOT NULL DEFAULT 'course-default',
-        title TEXT NOT NULL DEFAULT '',
-        icon TEXT DEFAULT '📄',
-        cover TEXT DEFAULT '',
-        is_favorite BOOLEAN DEFAULT FALSE,
-        is_full_width BOOLEAN DEFAULT FALSE,
-        kanban_status TEXT DEFAULT 'todo',
-        due_date TEXT DEFAULT '',
-        due_time TEXT DEFAULT '',
-        google_event_id TEXT DEFAULT '',
-        blocks JSONB NOT NULL DEFAULT '[]'::jsonb,
-        share_settings JSONB NOT NULL DEFAULT '{"isPublicLink":false,"publicRole":"view","collaborators":[]}'::jsonb,
-        comments JSONB NOT NULL DEFAULT '[]'::jsonb,
-        created_at BIGINT NOT NULL,
-        updated_at BIGINT NOT NULL
-      );
-    `);
-
-    await executeServerNeonQuery(`
-      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS owner_email TEXT DEFAULT '';
-    `);
-    await executeServerNeonQuery(`
-      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS owner_name TEXT DEFAULT '';
-    `);
-    await executeServerNeonQuery(`
-      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS parent_id TEXT DEFAULT NULL;
-    `);
-    await executeServerNeonQuery(`
-      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS share_settings JSONB NOT NULL DEFAULT '{"isPublicLink":false,"publicRole":"view","collaborators":[]}'::jsonb;
-    `);
-    await executeServerNeonQuery(`
-      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS comments JSONB NOT NULL DEFAULT '[]'::jsonb;
-    `);
-    await executeServerNeonQuery(`
-      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS kanban_status TEXT DEFAULT 'todo';
-    `);
-    await executeServerNeonQuery(`
-      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS due_date TEXT DEFAULT '';
-    `);
-    await executeServerNeonQuery(`
-      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS due_time TEXT DEFAULT '';
-    `);
-    await executeServerNeonQuery(`
-      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS google_event_id TEXT DEFAULT '';
-    `);
-    await executeServerNeonQuery(`
-      ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS is_full_width BOOLEAN DEFAULT FALSE;
-    `);
-    await executeServerNeonQuery(`
-      CREATE INDEX IF NOT EXISTS idx_miu_notes_user_id ON miu_notes(user_id);
-    `);
-    await executeServerNeonQuery(`
-      CREATE TABLE IF NOT EXISTS miu_live_items (
-        id TEXT PRIMARY KEY,
-        channel TEXT NOT NULL DEFAULT 'default',
-        content TEXT NOT NULL,
-        author TEXT NOT NULL DEFAULT 'system',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-    `);
-    await executeServerNeonQuery(`
-      CREATE INDEX IF NOT EXISTS idx_miu_live_items_channel_created ON miu_live_items(channel, created_at DESC, id DESC);
-    `);
-
-    schemaInitializedForUrl = neonDatabaseUrl;
-    return true;
-  } catch (err) {
-    console.warn('[Server Cloud] Gagal inisialisasi skema:', err);
-    return false;
+  if (schemaInitPromise && schemaInitPromiseUrl === neonDatabaseUrl) {
+    return schemaInitPromise;
   }
+
+  const runInit = async (): Promise<boolean> => {
+    try {
+      // Single-roundtrip metadata probe avoids running 15+ sequential DDLs on warm databases
+      const probe = await executeServerNeonQuery<{
+        has_users: boolean;
+        has_notes: boolean;
+        has_items: boolean;
+        has_presence: boolean;
+        has_notes_latest_col: boolean;
+        has_presence_latest_col: boolean;
+        notes_repl_full: boolean;
+        presence_repl_full: boolean;
+      }>(`
+        SELECT
+          to_regclass('public.miu_users') IS NOT NULL AS has_users,
+          to_regclass('public.miu_notes') IS NOT NULL AS has_notes,
+          to_regclass('public.miu_live_items') IS NOT NULL AS has_items,
+          to_regclass('public.miu_note_presence') IS NOT NULL AS has_presence,
+          EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'miu_notes' AND column_name = 'is_full_width'
+          ) AS has_notes_latest_col,
+          EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'miu_note_presence' AND column_name = 'pointer_block_id'
+          ) AS has_presence_latest_col,
+          EXISTS (
+            SELECT 1 FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relname = 'miu_notes' AND c.relreplident = 'f'
+          ) AS notes_repl_full,
+          EXISTS (
+            SELECT 1 FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relname = 'miu_note_presence' AND c.relreplident = 'f'
+          ) AS presence_repl_full
+      `).catch(() => ({ rows: [] }));
+
+      const status = probe.rows[0];
+      if (
+        status &&
+        status.has_users &&
+        status.has_notes &&
+        status.has_items &&
+        status.has_presence &&
+        status.has_notes_latest_col &&
+        status.has_presence_latest_col &&
+        status.notes_repl_full &&
+        status.presence_repl_full
+      ) {
+        schemaInitializedForUrl = neonDatabaseUrl;
+        return true;
+      }
+
+      await Promise.all([
+        executeServerNeonQuery(`
+          CREATE TABLE IF NOT EXISTS miu_users (
+            id TEXT PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            picture TEXT,
+            created_at BIGINT NOT NULL
+          );
+        `),
+        executeServerNeonQuery(`
+          CREATE TABLE IF NOT EXISTS miu_notes (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            owner_email TEXT DEFAULT '',
+            owner_name TEXT DEFAULT '',
+            parent_id TEXT DEFAULT NULL,
+            semester_id TEXT NOT NULL DEFAULT 'sem-1',
+            course_id TEXT NOT NULL DEFAULT 'course-default',
+            title TEXT NOT NULL DEFAULT '',
+            icon TEXT DEFAULT '📄',
+            cover TEXT DEFAULT '',
+            is_favorite BOOLEAN DEFAULT FALSE,
+            is_full_width BOOLEAN DEFAULT FALSE,
+            kanban_status TEXT DEFAULT 'todo',
+            due_date TEXT DEFAULT '',
+            due_time TEXT DEFAULT '',
+            google_event_id TEXT DEFAULT '',
+            blocks JSONB NOT NULL DEFAULT '[]'::jsonb,
+            share_settings JSONB NOT NULL DEFAULT '{"isPublicLink":false,"publicRole":"view","collaborators":[]}'::jsonb,
+            comments JSONB NOT NULL DEFAULT '[]'::jsonb,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL
+          );
+        `),
+        executeServerNeonQuery(`
+          CREATE TABLE IF NOT EXISTS miu_live_items (
+            id TEXT PRIMARY KEY,
+            channel TEXT NOT NULL DEFAULT 'default',
+            content TEXT NOT NULL,
+            author TEXT NOT NULL DEFAULT 'system',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+          );
+        `),
+        executeServerNeonQuery(`
+          CREATE TABLE IF NOT EXISTS miu_note_presence (
+            id TEXT PRIMARY KEY,
+            note_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            user_id TEXT NOT NULL DEFAULT '',
+            user_name TEXT NOT NULL DEFAULT 'Kolaborator',
+            user_email TEXT NOT NULL DEFAULT '',
+            user_picture TEXT NOT NULL DEFAULT '',
+            color TEXT NOT NULL DEFAULT '#0284C7',
+            block_id TEXT NOT NULL DEFAULT '',
+            field TEXT NOT NULL DEFAULT 'content',
+            selection_start INTEGER NOT NULL DEFAULT 0,
+            selection_end INTEGER NOT NULL DEFAULT 0,
+            is_editing BOOLEAN NOT NULL DEFAULT FALSE,
+            pointer_block_id TEXT DEFAULT NULL,
+            pointer_x DOUBLE PRECISION DEFAULT NULL,
+            pointer_y DOUBLE PRECISION DEFAULT NULL,
+            updated_at BIGINT NOT NULL
+          );
+        `)
+      ]);
+
+      await Promise.all([
+        executeServerNeonQuery(`ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS owner_email TEXT DEFAULT '';`),
+        executeServerNeonQuery(`ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS owner_name TEXT DEFAULT '';`),
+        executeServerNeonQuery(`ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS parent_id TEXT DEFAULT NULL;`),
+        executeServerNeonQuery(`ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS share_settings JSONB NOT NULL DEFAULT '{"isPublicLink":false,"publicRole":"view","collaborators":[]}'::jsonb;`),
+        executeServerNeonQuery(`ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS comments JSONB NOT NULL DEFAULT '[]'::jsonb;`),
+        executeServerNeonQuery(`ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS kanban_status TEXT DEFAULT 'todo';`),
+        executeServerNeonQuery(`ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS due_date TEXT DEFAULT '';`),
+        executeServerNeonQuery(`ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS due_time TEXT DEFAULT '';`),
+        executeServerNeonQuery(`ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS google_event_id TEXT DEFAULT '';`),
+        executeServerNeonQuery(`ALTER TABLE miu_notes ADD COLUMN IF NOT EXISTS is_full_width BOOLEAN DEFAULT FALSE;`),
+        executeServerNeonQuery(`CREATE INDEX IF NOT EXISTS idx_miu_notes_user_id ON miu_notes(user_id);`),
+        executeServerNeonQuery(`CREATE INDEX IF NOT EXISTS idx_miu_live_items_channel_created ON miu_live_items(channel, created_at DESC, id DESC);`),
+        executeServerNeonQuery(`CREATE INDEX IF NOT EXISTS idx_miu_note_presence_note_updated ON miu_note_presence(note_id, updated_at DESC);`),
+        executeServerNeonQuery(`ALTER TABLE miu_notes REPLICA IDENTITY FULL;`).catch(() => {}),
+        executeServerNeonQuery(`ALTER TABLE miu_note_presence REPLICA IDENTITY FULL;`).catch(() => {})
+      ]);
+
+      schemaInitializedForUrl = neonDatabaseUrl;
+      return true;
+    } catch (err) {
+      console.warn('[Server Cloud] Gagal inisialisasi skema:', err);
+      return false;
+    } finally {
+      schemaInitPromise = null;
+      schemaInitPromiseUrl = '';
+    }
+  };
+
+  schemaInitPromiseUrl = neonDatabaseUrl;
+  schemaInitPromise = runInit();
+  return schemaInitPromise;
 }
 
 export async function listServerLiveItems(channel = 'default'): Promise<LiveItemRow[] | null> {
@@ -551,6 +627,7 @@ export async function saveServerNote(
        share_settings = EXCLUDED.share_settings,
        comments = EXCLUDED.comments,
        updated_at = EXCLUDED.updated_at
+     WHERE miu_notes.updated_at <= EXCLUDED.updated_at
      RETURNING pg_current_xact_id()::text AS txid`,
     [
       note.id,
@@ -575,6 +652,160 @@ export async function saveServerNote(
       Number(note.createdAt) || Date.now(),
       Number(note.updatedAt) || Date.now()
     ]
+  );
+
+  return { ok: true, status: 200, txid: rows[0]?.txid };
+}
+
+export async function upsertServerNotePresence(params: {
+  noteId: string;
+  sessionId: string;
+  userId?: string;
+  userName?: string;
+  userEmail?: string;
+  userPicture?: string;
+  color?: string;
+  blockId?: string;
+  field?: string;
+  selectionStart?: number;
+  selectionEnd?: number;
+  isEditing?: boolean;
+  pointerBlockId?: string | null;
+  pointerX?: number | null;
+  pointerY?: number | null;
+}): Promise<{
+  ok: boolean;
+  status: number;
+  txid?: string;
+  serverTime?: number;
+  error?: string;
+}> {
+  if (!isServerNeonConfigured()) {
+    return { ok: false, status: 503, error: 'Cloud Catatan tidak aktif.' };
+  }
+  await ensureServerNeonSchema();
+
+  const noteId = params.noteId.trim();
+  const sessionId = params.sessionId.trim();
+  const userId = (params.userId || '').trim();
+  const userEmail = (params.userEmail || '').trim();
+
+  const access = await getEffectiveNoteRole(noteId, userId, userEmail);
+  if (!access.exists) {
+    return { ok: false, status: 404, error: 'Catatan belum tersimpan di cloud.' };
+  }
+  if (!access.role) {
+    return { ok: false, status: 403, error: 'Tidak memiliki izin mengakses catatan ini.' };
+  }
+
+  const rowId = buildPresenceRowId(noteId, sessionId);
+  const safeName =
+    (params.userName || '').trim().slice(0, 80) ||
+    (userEmail ? userEmail.split('@')[0] : '') ||
+    `Tamu #${sessionId.slice(-4).toUpperCase()}`;
+  const safeColor =
+    (params.color || '').trim().match(/^#[0-9a-fA-F]{6}$/)?.[0] ||
+    pickCollaboratorColor(sessionId || userId || rowId);
+  const safeBlockId = (params.blockId || '').trim().slice(0, 160);
+  const safeField = normalizePresenceField(params.field);
+  const safeStart = Math.max(0, Math.min(200_000, Math.floor(Number(params.selectionStart) || 0)));
+  const safeEnd = Math.max(
+    safeStart,
+    Math.min(200_000, Math.floor(Number(params.selectionEnd) || safeStart))
+  );
+  const safeIsEditing =
+    Boolean(params.isEditing) && (access.role === 'owner' || access.role === 'edit');
+  const safePointerX = normalizePointerCoordinate(params.pointerX);
+  const safePointerY = normalizePointerCoordinate(params.pointerY);
+  const safePointerBlockId =
+    typeof params.pointerBlockId === 'string' &&
+    params.pointerBlockId.trim() &&
+    safePointerX !== null &&
+    safePointerY !== null
+      ? params.pointerBlockId.trim().slice(0, 160)
+      : null;
+
+  const serverNow = Date.now();
+  const staleBefore = serverNow - Math.max(PRESENCE_TTL_MS, 45_000);
+
+  const { rows } = await executeServerNeonQuery<{ txid: string; updated_at: string | number }>(
+    `WITH pruned AS (
+       DELETE FROM miu_note_presence
+       WHERE note_id = $2 AND updated_at < $18 AND id <> $1
+     )
+     INSERT INTO miu_note_presence (
+       id, note_id, session_id, user_id, user_name, user_email, user_picture, color,
+       block_id, field, selection_start, selection_end, is_editing,
+       pointer_block_id, pointer_x, pointer_y, updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+     ON CONFLICT (id) DO UPDATE SET
+       user_id = EXCLUDED.user_id,
+       user_name = EXCLUDED.user_name,
+       user_email = EXCLUDED.user_email,
+       user_picture = EXCLUDED.user_picture,
+       color = EXCLUDED.color,
+       block_id = EXCLUDED.block_id,
+       field = EXCLUDED.field,
+       selection_start = EXCLUDED.selection_start,
+       selection_end = EXCLUDED.selection_end,
+       is_editing = EXCLUDED.is_editing,
+       pointer_block_id = EXCLUDED.pointer_block_id,
+       pointer_x = EXCLUDED.pointer_x,
+       pointer_y = EXCLUDED.pointer_y,
+       updated_at = EXCLUDED.updated_at
+     RETURNING updated_at, pg_current_xact_id()::text AS txid`,
+    [
+      rowId,
+      noteId,
+      sessionId,
+      userId,
+      safeName,
+      userEmail,
+      (params.userPicture || '').trim().slice(0, 500),
+      safeColor,
+      safeBlockId,
+      safeField,
+      safeStart,
+      safeEnd,
+      safeIsEditing,
+      safePointerBlockId,
+      safePointerBlockId ? safePointerX : null,
+      safePointerBlockId ? safePointerY : null,
+      serverNow,
+      staleBefore
+    ]
+  );
+
+  return {
+    ok: true,
+    status: 200,
+    txid: rows[0]?.txid,
+    serverTime: Number(rows[0]?.updated_at) || serverNow
+  };
+}
+
+export async function deleteServerNotePresence(params: {
+  noteId: string;
+  sessionId: string;
+}): Promise<{ ok: boolean; status: number; txid?: string }> {
+  if (!isServerNeonConfigured()) {
+    return { ok: false, status: 503 };
+  }
+  await ensureServerNeonSchema();
+
+  const noteId = params.noteId.trim();
+  const sessionId = params.sessionId.trim();
+  if (!noteId || !sessionId) {
+    return { ok: false, status: 400 };
+  }
+
+  const rowId = buildPresenceRowId(noteId, sessionId);
+  const { rows } = await executeServerNeonQuery<{ txid: string }>(
+    `DELETE FROM miu_note_presence
+     WHERE id = $1 AND note_id = $2 AND session_id = $3
+     RETURNING pg_current_xact_id()::text AS txid`,
+    [rowId, noteId, sessionId]
   );
 
   return { ok: true, status: 200, txid: rows[0]?.txid };
@@ -781,6 +1012,9 @@ export async function deleteServerNote(
        SELECT c.id FROM miu_notes c
        INNER JOIN note_tree p ON c.parent_id = p.id
        WHERE c.user_id = $2
+     ),
+     deleted_presence AS (
+       DELETE FROM miu_note_presence WHERE note_id IN (SELECT id FROM note_tree)
      )
      DELETE FROM miu_notes WHERE id IN (SELECT id FROM note_tree)`,
     [noteId, userId]

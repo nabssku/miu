@@ -47,6 +47,9 @@ import {
 } from 'lucide-react';
 import { db } from '../../db/database';
 import { useMiu } from '../../context/MiuContext';
+import { useNotePresence } from '../../context/NotePresenceContext';
+import { normalizePointerCoordinate } from '../../lib/presenceHelper';
+import type { CollaboratorPresence } from '../../lib/realtimeShared';
 import {
   deleteNoteFromNeon,
   getCloudStatusSnapshot,
@@ -114,6 +117,12 @@ import {
 import { parseVideoEmbedUrl } from '../../utils/videoHelper';
 import { formatLocalYYYYMMDD } from '../../services/googleCalendarService';
 import { CalendarBoardView } from './CalendarBoardView';
+import {
+  BlockCollaboratorBadges,
+  BlockCollaboratorPointers,
+  CollaboratorCaretOverlay,
+  CollaboratorsHeaderStrip
+} from './CollaboratorOverlays';
 import { NotesAuthModal } from './NotesAuthModal';
 import { ShareNoteModal } from './ShareNoteModal';
 import { ChartBlockView } from './blocks/ChartBlockView';
@@ -177,6 +186,8 @@ export const BlockEditor: React.FC = () => {
     triggerInlineAIExplain
   } = useMiu();
 
+  const { remoteCollaborators, reportLocalCursor, reportLocalPointer } = useNotePresence();
+
   const allNotes = useLiveQuery(
     async () => {
       const list = await db.notes.toArray();
@@ -221,6 +232,7 @@ export const BlockEditor: React.FC = () => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [pendingFocusBlockId, setPendingFocusBlockId] = useState<string | null>(null);
   const [justDictatedBlockId, setJustDictatedBlockId] = useState<string | null>(null);
+  const [jumpHighlightBlockId, setJumpHighlightBlockId] = useState<string | null>(null);
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedBlockIds, setSelectedBlockIds] = useState<string[]>([]);
   const [lastSelectedBlockId, setLastSelectedBlockId] = useState<string | null>(null);
@@ -239,17 +251,71 @@ export const BlockEditor: React.FC = () => {
 
   const blockRefs = useRef<Record<string, HTMLInputElement | HTMLTextAreaElement | null>>({});
   const toggleBodyRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+  const caretHostRefs = useRef<Record<string, HTMLElement | null>>({});
   const activeBlockTargetRef = useRef(activeBlockTarget);
   activeBlockTargetRef.current = activeBlockTarget;
   const lastHandledFlashAtRef = useRef<number>(0);
   const lastHandledCaretAtRef = useRef<number>(0);
   const dictationFlashTimerRef = useRef<number | null>(null);
+  const jumpFlashTimerRef = useRef<number | null>(null);
   const neonDebounceMapRef = useRef<Record<string, number>>({});
+  const neonDebounceStartMapRef = useRef<Record<string, number>>({});
+
+  const setCaretHostRef = (
+    blockId: string,
+    field: 'content' | 'toggleBody' | 'title',
+    el: HTMLElement | null
+  ) => {
+    caretHostRefs.current[`${blockId}:${field}`] = el;
+  };
+
+  const collaboratorsByBlockId = useMemo(() => {
+    const grouped: Record<string, CollaboratorPresence[]> = {};
+    for (const collab of remoteCollaborators) {
+      if (!collab.blockId) continue;
+      if (!grouped[collab.blockId]) grouped[collab.blockId] = [];
+      grouped[collab.blockId].push(collab);
+    }
+    return grouped;
+  }, [remoteCollaborators]);
+
+  const pointersByBlockId = useMemo(() => {
+    const grouped: Record<string, CollaboratorPresence[]> = {};
+    for (const collab of remoteCollaborators) {
+      if (!collab.pointerBlockId || collab.pointerX === null || collab.pointerY === null) {
+        continue;
+      }
+      if (!grouped[collab.pointerBlockId]) grouped[collab.pointerBlockId] = [];
+      grouped[collab.pointerBlockId].push(collab);
+    }
+    return grouped;
+  }, [remoteCollaborators]);
 
   const openDocumentNote = (noteId: string) => {
     setActiveNoteId(noteId);
     setMainViewMode('document');
   };
+
+  // Clear active cursor & pointer when leaving document view
+  useEffect(() => {
+    if (mainViewMode !== 'document' && activeNote) {
+      reportLocalCursor({
+        noteId: activeNote.id,
+        blockId: '',
+        field: 'content',
+        selectionStart: 0,
+        selectionEnd: 0,
+        isEditing: false,
+        immediate: true
+      });
+      reportLocalPointer({
+        noteId: activeNote.id,
+        pointerBlockId: null,
+        pointerX: null,
+        pointerY: null
+      });
+    }
+  }, [mainViewMode, activeNote, reportLocalCursor, reportLocalPointer]);
 
   // Clear block selection when switching notes
   useEffect(() => {
@@ -286,6 +352,9 @@ export const BlockEditor: React.FC = () => {
     return () => {
       if (dictationFlashTimerRef.current) {
         window.clearTimeout(dictationFlashTimerRef.current);
+      }
+      if (jumpFlashTimerRef.current) {
+        window.clearTimeout(jumpFlashTimerRef.current);
       }
     };
   }, []);
@@ -351,6 +420,46 @@ export const BlockEditor: React.FC = () => {
       source,
       updatedAt: Date.now()
     });
+    reportLocalCursor({
+      noteId: activeNote.id,
+      blockId: blk.id,
+      field,
+      selectionStart: start,
+      selectionEnd: end,
+      isEditing: canEdit,
+      immediate: true
+    });
+  };
+
+  const handleJumpToCollaborator = (collab: CollaboratorPresence) => {
+    const targetId = collab.blockId || collab.pointerBlockId;
+    if (!targetId) return;
+    setMainViewMode('document');
+
+    if (collab.field === 'toggleBody' && targetId !== '__title__' && !canEdit) {
+      setLocalToggleOverrides((prev) => ({ ...prev, [targetId]: true }));
+    }
+
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => {
+        const selector =
+          targetId === '__title__'
+            ? '[data-miu-title-wrap="true"]'
+            : `[data-miu-block-id="${targetId.replace(/"/g, '\\"')}"]`;
+        const targetEl = document.querySelector<HTMLElement>(selector);
+        if (targetEl) {
+          targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        setJumpHighlightBlockId(targetId);
+        if (jumpFlashTimerRef.current) {
+          window.clearTimeout(jumpFlashTimerRef.current);
+        }
+        jumpFlashTimerRef.current = window.setTimeout(() => {
+          jumpFlashTimerRef.current = null;
+          setJumpHighlightBlockId((prev) => (prev === targetId ? null : prev));
+        }, 1800);
+      }, 40);
+    });
   };
 
   const focusPreviewBlock = (blk: NoteBlockBase) => {
@@ -365,6 +474,27 @@ export const BlockEditor: React.FC = () => {
     setPendingFocusBlockId(blk.id);
   };
 
+  const syncCursorPresence = (
+    blk: NoteBlockBase,
+    field: 'content' | 'toggleBody',
+    el: HTMLInputElement | HTMLTextAreaElement,
+    isEditing: boolean,
+    immediate = false
+  ) => {
+    if (!activeNote) return;
+    const start = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+    const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+    reportLocalCursor({
+      noteId: activeNote.id,
+      blockId: blk.id,
+      field,
+      selectionStart: start,
+      selectionEnd: end,
+      isEditing,
+      immediate
+    });
+  };
+
   const getEditableBlockAttrs = (
     blk: NoteBlockBase,
     field: 'content' | 'toggleBody' = 'content'
@@ -373,9 +503,12 @@ export const BlockEditor: React.FC = () => {
     'data-miu-block-id': blk.id,
     'data-miu-block-field': field,
     onFocus: (e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      if (!canEdit) return;
-      setEditingBlockId(blk.id);
       const el = e.currentTarget;
+      if (!canEdit) {
+        syncCursorPresence(blk, field, el, false, true);
+        return;
+      }
+      setEditingBlockId(blk.id);
       reportBlockTarget(
         blk,
         field,
@@ -384,9 +517,16 @@ export const BlockEditor: React.FC = () => {
         'focus'
       );
     },
-    onClick: (e: React.MouseEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      if (!activeNote || !canEdit) return;
+    onInput: (e: React.FormEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (!activeNote) return;
       const el = e.currentTarget;
+      syncCursorPresence(blk, field, el, canEdit, false);
+    },
+    onClick: (e: React.MouseEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (!activeNote) return;
+      const el = e.currentTarget;
+      syncCursorPresence(blk, field, el, canEdit, false);
+      if (!canEdit) return;
       updateActiveBlockSelection(
         activeNote.id,
         blk.id,
@@ -397,8 +537,10 @@ export const BlockEditor: React.FC = () => {
       );
     },
     onKeyUp: (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      if (!activeNote || !canEdit) return;
+      if (!activeNote) return;
       const el = e.currentTarget;
+      syncCursorPresence(blk, field, el, canEdit, false);
+      if (!canEdit) return;
       updateActiveBlockSelection(
         activeNote.id,
         blk.id,
@@ -409,8 +551,10 @@ export const BlockEditor: React.FC = () => {
       );
     },
     onSelect: (e: React.SyntheticEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      if (!activeNote || !canEdit) return;
+      if (!activeNote) return;
       const el = e.currentTarget;
+      syncCursorPresence(blk, field, el, canEdit, false);
+      if (!canEdit) return;
       updateActiveBlockSelection(
         activeNote.id,
         blk.id,
@@ -421,8 +565,11 @@ export const BlockEditor: React.FC = () => {
       );
     },
     onBlur: (e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      const el = e.currentTarget;
+      if (activeNote) {
+        syncCursorPresence(blk, field, el, false, false);
+      }
       if (activeNote && canEdit) {
-        const el = e.currentTarget;
         updateActiveBlockSelection(
           activeNote.id,
           blk.id,
@@ -537,20 +684,29 @@ export const BlockEditor: React.FC = () => {
     return filterSlashOptions(slashState.query, isSlashInsideColumn);
   }, [slashState, isSlashInsideColumn]);
 
-  // Debounced Neon Postgres Sync helper (keyed per noteId so cross-note updates never cancel each other)
+  // Debounced Neon Postgres Sync helper with bounded maxWait (180ms idle / 450ms ceiling)
   const scheduleNeonSave = (noteToSave: NoteRecord) => {
     const targetOwner = noteToSave.ownerId || currentUser?.id;
     if (!targetOwner || !isNeonConfigured()) return;
     setSyncStatus('syncing');
+    const now = Date.now();
+    if (!neonDebounceStartMapRef.current[noteToSave.id]) {
+      neonDebounceStartMapRef.current[noteToSave.id] = now;
+    }
     const prevTimer = neonDebounceMapRef.current[noteToSave.id];
     if (prevTimer) {
       window.clearTimeout(prevTimer);
     }
+    const elapsed = now - neonDebounceStartMapRef.current[noteToSave.id];
+    const remainingMaxWait = Math.max(0, 450 - elapsed);
+    const waitMs = Math.min(180, remainingMaxWait);
     neonDebounceMapRef.current[noteToSave.id] = window.setTimeout(async () => {
+      delete neonDebounceMapRef.current[noteToSave.id];
+      delete neonDebounceStartMapRef.current[noteToSave.id];
       const latestToSave = (await db.notes.get(noteToSave.id)) || noteToSave;
       const ok = await saveNoteToNeon(targetOwner, latestToSave);
       setSyncStatus(ok ? 'synced' : 'idle');
-    }, 450);
+    }, waitMs);
   };
 
   const updateNote = async (patch: Partial<NoteRecord>) => {
@@ -2341,12 +2497,17 @@ export const BlockEditor: React.FC = () => {
     const isDropAfter =
       dropTargetBlock?.blockId === block.id && dropTargetBlock.position === 'after';
 
+    const blockCollaborators = collaboratorsByBlockId[block.id] || [];
+    const blockPointers = pointersByBlockId[block.id] || [];
+    const primaryCollab = blockCollaborators[0];
+    const isJumpHighlighted = jumpHighlightBlockId === block.id;
+
     return (
       <div
         key={block.id}
         data-miu-block-id={block.id}
         onMouseDownCapture={(e) => {
-          if (!canEdit || !activeNote) return;
+          if (!activeNote) return;
           const targetEl = e.target as Element | null;
           if (!targetEl || typeof targetEl.closest !== 'function') return;
           const nearestBlockEl = targetEl.closest('[data-miu-block-id]');
@@ -2360,13 +2521,43 @@ export const BlockEditor: React.FC = () => {
           if (targetEl.closest('[data-miu-block-field]')) {
             return;
           }
-          reportBlockTarget(
-            block,
-            'content',
-            block.content.length,
-            block.content.length,
-            'focus'
-          );
+          if (canEdit) {
+            reportBlockTarget(
+              block,
+              'content',
+              block.content.length,
+              block.content.length,
+              'focus'
+            );
+          } else {
+            reportLocalCursor({
+              noteId: activeNote.id,
+              blockId: block.id,
+              field: 'content',
+              selectionStart: 0,
+              selectionEnd: 0,
+              isEditing: false,
+              immediate: true
+            });
+          }
+        }}
+        onMouseMove={(e) => {
+          if (!activeNote || mainViewMode !== 'document') return;
+          const targetEl = e.target as Element | null;
+          const nearestBlockId = targetEl
+            ?.closest('[data-miu-block-id]')
+            ?.getAttribute('data-miu-block-id');
+          if (nearestBlockId !== block.id) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return;
+          const px = normalizePointerCoordinate((e.clientX - rect.left) / rect.width);
+          const py = normalizePointerCoordinate((e.clientY - rect.top) / rect.height);
+          reportLocalPointer({
+            noteId: activeNote.id,
+            pointerBlockId: block.id,
+            pointerX: px,
+            pointerY: py
+          });
         }}
         onDragOver={(e) => {
           if (!canEdit || draggedNoteId || draggedBlockId === block.id) return;
@@ -2401,6 +2592,20 @@ export const BlockEditor: React.FC = () => {
             toggleSelectBlock(block.id, e.shiftKey);
           }
         }}
+        style={
+          primaryCollab
+            ? {
+                boxShadow: isJumpHighlighted
+                  ? `inset 4px 0 0 ${primaryCollab.color}, 0 0 0 2px ${primaryCollab.color}88`
+                  : `inset 3px 0 0 ${primaryCollab.color}, 0 0 0 1px ${primaryCollab.color}36`,
+                backgroundColor: `${primaryCollab.color}0D`
+              }
+            : isJumpHighlighted
+              ? {
+                  boxShadow: '0 0 0 2px rgba(56, 189, 248, 0.7)'
+                }
+              : undefined
+        }
         className={`${
           isInsideColumn
             ? 'group/colblk relative flex items-start gap-1 py-0.5 rounded-lg transition'
@@ -2654,247 +2859,383 @@ export const BlockEditor: React.FC = () => {
 
         {/* Block Renderer */}
         <div className="flex-1 min-w-0 relative">
-          {block.type === 'h1' &&
-            (canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-              <input
-                ref={(el) => {
-                  blockRefs.current[block.id] = el;
-                }}
-                value={block.content}
-                {...getEditableBlockAttrs(block, 'content')}
-                onChange={(e) =>
-                  void handleBlockChange(block.id, { content: e.target.value })
-                }
-                onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                placeholder="Heading 1"
-                className="w-full bg-transparent text-2xl font-bold text-text-primary focus:outline-none pt-3 pb-1"
-              />
-            ) : (
-              <div
-                onClick={() => focusPreviewBlock(block)}
-                className={`w-full text-2xl font-bold text-text-primary pt-3 pb-1 break-words ${
-                  canEdit ? 'cursor-text' : 'cursor-default'
-                }`}
-              >
-                {renderInlineMarkdown(block.content)}
-              </div>
-            ))}
+          {blockCollaborators.length > 0 && (
+            <BlockCollaboratorBadges
+              collaborators={blockCollaborators}
+              contentText={block.content}
+              toggleBodyText={block.toggleBody || ''}
+              compact={isInsideColumn}
+            />
+          )}
+          {blockPointers.length > 0 && (
+            <BlockCollaboratorPointers pointers={blockPointers} />
+          )}
 
-          {block.type === 'h2' &&
-            (canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-              <input
-                ref={(el) => {
-                  blockRefs.current[block.id] = el;
-                }}
-                value={block.content}
-                {...getEditableBlockAttrs(block, 'content')}
-                onChange={(e) =>
-                  void handleBlockChange(block.id, { content: e.target.value })
-                }
-                onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                placeholder="Heading 2"
-                className="w-full bg-transparent text-xl font-bold text-text-primary focus:outline-none pt-2 pb-0.5"
-              />
-            ) : (
-              <div
-                onClick={() => focusPreviewBlock(block)}
-                className={`w-full text-xl font-bold text-text-primary pt-2 pb-0.5 break-words ${
-                  canEdit ? 'cursor-text' : 'cursor-default'
-                }`}
-              >
-                {renderInlineMarkdown(block.content)}
-              </div>
-            ))}
-
-          {block.type === 'h3' &&
-            (canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-              <input
-                ref={(el) => {
-                  blockRefs.current[block.id] = el;
-                }}
-                value={block.content}
-                {...getEditableBlockAttrs(block, 'content')}
-                onChange={(e) =>
-                  void handleBlockChange(block.id, { content: e.target.value })
-                }
-                onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                placeholder="Heading 3"
-                className="w-full bg-transparent text-base font-bold text-text-primary focus:outline-none pt-1.5 pb-0.5"
-              />
-            ) : (
-              <div
-                onClick={() => focusPreviewBlock(block)}
-                className={`w-full text-base font-bold text-text-primary pt-1.5 pb-0.5 break-words ${
-                  canEdit ? 'cursor-text' : 'cursor-default'
-                }`}
-              >
-                {renderInlineMarkdown(block.content)}
-              </div>
-            ))}
-
-          {block.type === 'text' &&
-            (canEdit &&
-            (editingBlockId === block.id ||
-              !block.content.trim() ||
-              block.content.startsWith('/')) ? (
-              <textarea
-                ref={(el) => {
-                  blockRefs.current[block.id] = el;
-                }}
-                rows={Math.max(
-                  1,
-                  Math.max(
-                    block.content.split('\n').length,
-                    Math.ceil(block.content.length / (isInsideColumn ? 28 : 72))
-                  )
+          {block.type === 'h1' && (() => {
+            const isEditingH1 = canEdit && (editingBlockId === block.id || !block.content.trim());
+            return (
+              <div className="relative w-full">
+                {isEditingH1 ? (
+                  <input
+                    ref={(el) => {
+                      blockRefs.current[block.id] = el;
+                      setCaretHostRef(block.id, 'content', el);
+                    }}
+                    value={block.content}
+                    {...getEditableBlockAttrs(block, 'content')}
+                    onChange={(e) =>
+                      void handleBlockChange(block.id, { content: e.target.value })
+                    }
+                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                    placeholder="Heading 1"
+                    className="w-full bg-transparent text-2xl font-bold text-text-primary focus:outline-none pt-3 pb-1"
+                  />
+                ) : (
+                  <div
+                    ref={(el) => setCaretHostRef(block.id, 'content', el)}
+                    onClick={() => focusPreviewBlock(block)}
+                    className={`w-full min-h-[2.5rem] text-2xl font-bold text-text-primary pt-3 pb-1 whitespace-pre-wrap break-words ${
+                      canEdit ? 'cursor-text' : 'cursor-default'
+                    }`}
+                  >
+                    {renderInlineMarkdown(block.content)}
+                  </div>
                 )}
-                value={block.content}
-                {...getEditableBlockAttrs(block, 'content')}
-                onChange={(e) =>
-                  void handleBlockChange(block.id, { content: e.target.value })
-                }
-                onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                placeholder="Ketik '/' untuk perintah, atau mulai menulis..."
-                className="w-full bg-transparent text-[15px] sm:text-base leading-[1.68] text-text-primary placeholder:text-text-secondary/35 focus:outline-none resize-none py-0.5"
-              />
-            ) : (
-              <div
-                onClick={() => focusPreviewBlock(block)}
-                className={`w-full text-[15px] sm:text-base leading-[1.68] text-text-primary py-0.5 whitespace-pre-wrap break-words ${
-                  canEdit ? 'cursor-text' : 'cursor-default'
-                }`}
-              >
-                {renderInlineMarkdown(block.content)}
+                {blockCollaborators.length > 0 && (
+                  <CollaboratorCaretOverlay
+                    hostRefs={caretHostRefs}
+                    hostKey={`${block.id}:content`}
+                    layoutKey={isEditingH1 ? 'edit' : 'view'}
+                    text={block.content}
+                    field="content"
+                    collaborators={blockCollaborators}
+                  />
+                )}
               </div>
-            ))}
+            );
+          })()}
 
-          {block.type === 'bullet' && (
-            <div className="flex items-start gap-2.5 py-0.5">
-              <span className="text-text-primary font-bold select-none pt-0.5">•</span>
-              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                <textarea
-                  ref={(el) => {
-                    blockRefs.current[block.id] = el;
-                  }}
-                  rows={Math.max(
-                    1,
-                    Math.max(
-                      block.content.split('\n').length,
-                      Math.ceil(block.content.length / (isInsideColumn ? 26 : 68))
-                    )
+          {block.type === 'h2' && (() => {
+            const isEditingH2 = canEdit && (editingBlockId === block.id || !block.content.trim());
+            return (
+              <div className="relative w-full">
+                {isEditingH2 ? (
+                  <input
+                    ref={(el) => {
+                      blockRefs.current[block.id] = el;
+                      setCaretHostRef(block.id, 'content', el);
+                    }}
+                    value={block.content}
+                    {...getEditableBlockAttrs(block, 'content')}
+                    onChange={(e) =>
+                      void handleBlockChange(block.id, { content: e.target.value })
+                    }
+                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                    placeholder="Heading 2"
+                    className="w-full bg-transparent text-xl font-bold text-text-primary focus:outline-none pt-2 pb-0.5"
+                  />
+                ) : (
+                  <div
+                    ref={(el) => setCaretHostRef(block.id, 'content', el)}
+                    onClick={() => focusPreviewBlock(block)}
+                    className={`w-full min-h-[2.1rem] text-xl font-bold text-text-primary pt-2 pb-0.5 whitespace-pre-wrap break-words ${
+                      canEdit ? 'cursor-text' : 'cursor-default'
+                    }`}
+                  >
+                    {renderInlineMarkdown(block.content)}
+                  </div>
+                )}
+                {blockCollaborators.length > 0 && (
+                  <CollaboratorCaretOverlay
+                    hostRefs={caretHostRefs}
+                    hostKey={`${block.id}:content`}
+                    layoutKey={isEditingH2 ? 'edit' : 'view'}
+                    text={block.content}
+                    field="content"
+                    collaborators={blockCollaborators}
+                  />
+                )}
+              </div>
+            );
+          })()}
+
+          {block.type === 'h3' && (() => {
+            const isEditingH3 = canEdit && (editingBlockId === block.id || !block.content.trim());
+            return (
+              <div className="relative w-full">
+                {isEditingH3 ? (
+                  <input
+                    ref={(el) => {
+                      blockRefs.current[block.id] = el;
+                      setCaretHostRef(block.id, 'content', el);
+                    }}
+                    value={block.content}
+                    {...getEditableBlockAttrs(block, 'content')}
+                    onChange={(e) =>
+                      void handleBlockChange(block.id, { content: e.target.value })
+                    }
+                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                    placeholder="Heading 3"
+                    className="w-full bg-transparent text-base font-bold text-text-primary focus:outline-none pt-1.5 pb-0.5"
+                  />
+                ) : (
+                  <div
+                    ref={(el) => setCaretHostRef(block.id, 'content', el)}
+                    onClick={() => focusPreviewBlock(block)}
+                    className={`w-full min-h-[1.8rem] text-base font-bold text-text-primary pt-1.5 pb-0.5 whitespace-pre-wrap break-words ${
+                      canEdit ? 'cursor-text' : 'cursor-default'
+                    }`}
+                  >
+                    {renderInlineMarkdown(block.content)}
+                  </div>
+                )}
+                {blockCollaborators.length > 0 && (
+                  <CollaboratorCaretOverlay
+                    hostRefs={caretHostRefs}
+                    hostKey={`${block.id}:content`}
+                    layoutKey={isEditingH3 ? 'edit' : 'view'}
+                    text={block.content}
+                    field="content"
+                    collaborators={blockCollaborators}
+                  />
+                )}
+              </div>
+            );
+          })()}
+
+          {block.type === 'text' && (() => {
+            const isEditingText =
+              canEdit &&
+              (editingBlockId === block.id ||
+                !block.content.trim() ||
+                block.content.startsWith('/'));
+            return (
+              <div className="relative w-full">
+                {isEditingText ? (
+                  <textarea
+                    ref={(el) => {
+                      blockRefs.current[block.id] = el;
+                      setCaretHostRef(block.id, 'content', el);
+                    }}
+                    rows={Math.max(
+                      1,
+                      Math.max(
+                        block.content.split('\n').length,
+                        Math.ceil(block.content.length / (isInsideColumn ? 28 : 72))
+                      )
+                    )}
+                    value={block.content}
+                    {...getEditableBlockAttrs(block, 'content')}
+                    onChange={(e) =>
+                      void handleBlockChange(block.id, { content: e.target.value })
+                    }
+                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                    placeholder="Ketik '/' untuk perintah, atau mulai menulis..."
+                    className="w-full bg-transparent text-[15px] sm:text-base leading-[1.68] text-text-primary placeholder:text-text-secondary/35 focus:outline-none resize-none py-0.5"
+                  />
+                ) : (
+                  <div
+                    ref={(el) => setCaretHostRef(block.id, 'content', el)}
+                    onClick={() => focusPreviewBlock(block)}
+                    className={`w-full min-h-[1.75rem] text-[15px] sm:text-base leading-[1.68] text-text-primary py-0.5 whitespace-pre-wrap break-words ${
+                      canEdit ? 'cursor-text' : 'cursor-default'
+                    }`}
+                  >
+                    {renderInlineMarkdown(block.content)}
+                  </div>
+                )}
+                {blockCollaborators.length > 0 && (
+                  <CollaboratorCaretOverlay
+                    hostRefs={caretHostRefs}
+                    hostKey={`${block.id}:content`}
+                    layoutKey={isEditingText ? 'edit' : 'view'}
+                    text={block.content}
+                    field="content"
+                    collaborators={blockCollaborators}
+                  />
+                )}
+              </div>
+            );
+          })()}
+
+          {block.type === 'bullet' && (() => {
+            const isEditingBullet = canEdit && (editingBlockId === block.id || !block.content.trim());
+            return (
+              <div className="flex items-start gap-2.5 py-0.5">
+                <span className="text-text-primary font-bold select-none pt-0.5">•</span>
+                <div className="relative flex-1 min-w-0">
+                  {isEditingBullet ? (
+                    <textarea
+                      ref={(el) => {
+                        blockRefs.current[block.id] = el;
+                        setCaretHostRef(block.id, 'content', el);
+                      }}
+                      rows={Math.max(
+                        1,
+                        Math.max(
+                          block.content.split('\n').length,
+                          Math.ceil(block.content.length / (isInsideColumn ? 26 : 68))
+                        )
+                      )}
+                      value={block.content}
+                      {...getEditableBlockAttrs(block, 'content')}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, { content: e.target.value })
+                      }
+                      onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                      placeholder="List"
+                      className="w-full bg-transparent text-[15px] sm:text-base leading-[1.6] text-text-primary focus:outline-none resize-none"
+                    />
+                  ) : (
+                    <div
+                      ref={(el) => setCaretHostRef(block.id, 'content', el)}
+                      onClick={() => focusPreviewBlock(block)}
+                      className={`w-full min-h-[1.6rem] text-[15px] sm:text-base leading-[1.6] text-text-primary whitespace-pre-wrap break-words ${
+                        canEdit ? 'cursor-text' : 'cursor-default'
+                      }`}
+                    >
+                      {renderInlineMarkdown(block.content)}
+                    </div>
                   )}
-                  value={block.content}
-                  {...getEditableBlockAttrs(block, 'content')}
-                  onChange={(e) =>
-                    void handleBlockChange(block.id, { content: e.target.value })
-                  }
-                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                  placeholder="List"
-                  className="flex-1 bg-transparent text-[15px] sm:text-base leading-[1.6] text-text-primary focus:outline-none resize-none"
-                />
-              ) : (
-                <div
-                  onClick={() => focusPreviewBlock(block)}
-                  className={`flex-1 text-[15px] sm:text-base leading-[1.6] text-text-primary break-words ${
-                    canEdit ? 'cursor-text' : 'cursor-default'
-                  }`}
-                >
-                  {renderInlineMarkdown(block.content)}
-                </div>
-              )}
-            </div>
-          )}
-
-          {block.type === 'numbered' && (
-            <div className="flex items-start gap-2 py-0.5">
-              <span className="font-mono text-sm text-text-secondary select-none pt-0.5 min-w-[20px]">
-                {currentNumber}.
-              </span>
-              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                <textarea
-                  ref={(el) => {
-                    blockRefs.current[block.id] = el;
-                  }}
-                  rows={Math.max(
-                    1,
-                    Math.max(
-                      block.content.split('\n').length,
-                      Math.ceil(block.content.length / (isInsideColumn ? 26 : 68))
-                    )
+                  {blockCollaborators.length > 0 && (
+                    <CollaboratorCaretOverlay
+                      hostRefs={caretHostRefs}
+                      hostKey={`${block.id}:content`}
+                      layoutKey={isEditingBullet ? 'edit' : 'view'}
+                      text={block.content}
+                      field="content"
+                      collaborators={blockCollaborators}
+                    />
                   )}
-                  value={block.content}
-                  {...getEditableBlockAttrs(block, 'content')}
-                  onChange={(e) =>
-                    void handleBlockChange(block.id, { content: e.target.value })
-                  }
-                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                  placeholder="List"
-                  className="flex-1 bg-transparent text-[15px] sm:text-base leading-[1.6] text-text-primary focus:outline-none resize-none"
-                />
-              ) : (
-                <div
-                  onClick={() => focusPreviewBlock(block)}
-                  className={`flex-1 text-[15px] sm:text-base leading-[1.6] text-text-primary break-words ${
-                    canEdit ? 'cursor-text' : 'cursor-default'
-                  }`}
-                >
-                  {renderInlineMarkdown(block.content)}
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            );
+          })()}
 
-          {block.type === 'todo' && (
-            <div className="flex items-start gap-2.5 py-0.5">
-              <button
-                type="button"
-                disabled={!canEdit}
-                onClick={() =>
-                  void handleBlockChange(block.id, { checked: !block.checked })
-                }
-                className={`mt-1 w-4 h-4 rounded-[4px] border flex items-center justify-center shrink-0 transition ${
-                  block.checked
-                    ? 'bg-accent-strong border-accent-strong text-white dark:text-slate-950'
-                    : 'border-text-secondary/50 hover:border-accent-strong'
-                }`}
-              >
-                {block.checked && <Check className="w-3 h-3 stroke-[3]" />}
-              </button>
-              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                <textarea
-                  ref={(el) => {
-                    blockRefs.current[block.id] = el;
-                  }}
-                  rows={Math.max(1, Math.ceil(block.content.length / (isInsideColumn ? 26 : 68)))}
-                  value={block.content}
-                  {...getEditableBlockAttrs(block, 'content')}
-                  onChange={(e) =>
-                    void handleBlockChange(block.id, { content: e.target.value })
+          {block.type === 'numbered' && (() => {
+            const isEditingNum = canEdit && (editingBlockId === block.id || !block.content.trim());
+            return (
+              <div className="flex items-start gap-2 py-0.5">
+                <span className="font-mono text-sm text-text-secondary select-none pt-0.5 min-w-[20px]">
+                  {currentNumber}.
+                </span>
+                <div className="relative flex-1 min-w-0">
+                  {isEditingNum ? (
+                    <textarea
+                      ref={(el) => {
+                        blockRefs.current[block.id] = el;
+                        setCaretHostRef(block.id, 'content', el);
+                      }}
+                      rows={Math.max(
+                        1,
+                        Math.max(
+                          block.content.split('\n').length,
+                          Math.ceil(block.content.length / (isInsideColumn ? 26 : 68))
+                        )
+                      )}
+                      value={block.content}
+                      {...getEditableBlockAttrs(block, 'content')}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, { content: e.target.value })
+                      }
+                      onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                      placeholder="List"
+                      className="w-full bg-transparent text-[15px] sm:text-base leading-[1.6] text-text-primary focus:outline-none resize-none"
+                    />
+                  ) : (
+                    <div
+                      ref={(el) => setCaretHostRef(block.id, 'content', el)}
+                      onClick={() => focusPreviewBlock(block)}
+                      className={`w-full min-h-[1.6rem] text-[15px] sm:text-base leading-[1.6] text-text-primary whitespace-pre-wrap break-words ${
+                        canEdit ? 'cursor-text' : 'cursor-default'
+                      }`}
+                    >
+                      {renderInlineMarkdown(block.content)}
+                    </div>
+                  )}
+                  {blockCollaborators.length > 0 && (
+                    <CollaboratorCaretOverlay
+                      hostRefs={caretHostRefs}
+                      hostKey={`${block.id}:content`}
+                      layoutKey={isEditingNum ? 'edit' : 'view'}
+                      text={block.content}
+                      field="content"
+                      collaborators={blockCollaborators}
+                    />
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {block.type === 'todo' && (() => {
+            const isEditingTodo = canEdit && (editingBlockId === block.id || !block.content.trim());
+            return (
+              <div className="flex items-start gap-2.5 py-0.5">
+                <button
+                  type="button"
+                  disabled={!canEdit}
+                  onClick={() =>
+                    void handleBlockChange(block.id, { checked: !block.checked })
                   }
-                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                  placeholder="To-do"
-                  className={`flex-1 bg-transparent text-[15px] sm:text-base leading-[1.6] focus:outline-none resize-none ${
+                  className={`mt-1 w-4 h-4 rounded-[4px] border flex items-center justify-center shrink-0 transition ${
                     block.checked
-                      ? 'line-through text-text-secondary'
-                      : 'text-text-primary'
-                  }`}
-                />
-              ) : (
-                <div
-                  onClick={() => focusPreviewBlock(block)}
-                  className={`flex-1 text-[15px] sm:text-base leading-[1.6] break-words ${
-                    canEdit ? 'cursor-text' : 'cursor-default'
-                  } ${
-                    block.checked
-                      ? 'line-through text-text-secondary'
-                      : 'text-text-primary'
+                      ? 'bg-accent-strong border-accent-strong text-white dark:text-slate-950'
+                      : 'border-text-secondary/50 hover:border-accent-strong'
                   }`}
                 >
-                  {renderInlineMarkdown(block.content)}
+                  {block.checked && <Check className="w-3 h-3 stroke-[3]" />}
+                </button>
+                <div className="relative flex-1 min-w-0">
+                  {isEditingTodo ? (
+                    <textarea
+                      ref={(el) => {
+                        blockRefs.current[block.id] = el;
+                        setCaretHostRef(block.id, 'content', el);
+                      }}
+                      rows={Math.max(1, Math.ceil(block.content.length / (isInsideColumn ? 26 : 68)))}
+                      value={block.content}
+                      {...getEditableBlockAttrs(block, 'content')}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, { content: e.target.value })
+                      }
+                      onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                      placeholder="To-do"
+                      className={`w-full bg-transparent text-[15px] sm:text-base leading-[1.6] focus:outline-none resize-none ${
+                        block.checked
+                          ? 'line-through text-text-secondary'
+                          : 'text-text-primary'
+                      }`}
+                    />
+                  ) : (
+                    <div
+                      ref={(el) => setCaretHostRef(block.id, 'content', el)}
+                      onClick={() => focusPreviewBlock(block)}
+                      className={`w-full min-h-[1.6rem] text-[15px] sm:text-base leading-[1.6] whitespace-pre-wrap break-words ${
+                        canEdit ? 'cursor-text' : 'cursor-default'
+                      } ${
+                        block.checked
+                          ? 'line-through text-text-secondary'
+                          : 'text-text-primary'
+                      }`}
+                    >
+                      {renderInlineMarkdown(block.content)}
+                    </div>
+                  )}
+                  {blockCollaborators.length > 0 && (
+                    <CollaboratorCaretOverlay
+                      hostRefs={caretHostRefs}
+                      hostKey={`${block.id}:content`}
+                      layoutKey={isEditingTodo ? 'edit' : 'view'}
+                      text={block.content}
+                      field="content"
+                      collaborators={blockCollaborators}
+                    />
+                  )}
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            );
+          })()}
 
           {/* Slash Command Deadline Block (`/deadline` -> Auto-syncs to Calendar) */}
           {block.type === 'deadline' && (
@@ -2915,36 +3256,50 @@ export const BlockEditor: React.FC = () => {
                   {block.checked && <Check className="w-3 h-3 stroke-[3]" />}
                 </button>
 
-                {canEdit ? (
-                  <input
-                    ref={(el) => {
-                      blockRefs.current[block.id] = el;
-                    }}
-                    type="text"
-                    value={block.content}
-                    {...getEditableBlockAttrs(block, 'content')}
-                    onChange={(e) =>
-                      void handleBlockChange(block.id, { content: e.target.value })
-                    }
-                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                    placeholder="Ketik nama tugas / deadline..."
-                    className={`flex-1 min-w-0 bg-transparent text-sm font-semibold focus:outline-none ${
-                      block.checked
-                        ? 'line-through text-text-secondary'
-                        : 'text-text-primary'
-                    }`}
-                  />
-                ) : (
-                  <span
-                    className={`flex-1 min-w-0 text-sm font-semibold ${
-                      block.checked
-                        ? 'line-through text-text-secondary'
-                        : 'text-text-primary'
-                    }`}
-                  >
-                    {block.content || 'Deadline tanpa judul'}
-                  </span>
-                )}
+                <div className="relative flex-1 min-w-0">
+                  {canEdit ? (
+                    <input
+                      ref={(el) => {
+                        blockRefs.current[block.id] = el;
+                        setCaretHostRef(block.id, 'content', el);
+                      }}
+                      type="text"
+                      value={block.content}
+                      {...getEditableBlockAttrs(block, 'content')}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, { content: e.target.value })
+                      }
+                      onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                      placeholder="Ketik nama tugas / deadline..."
+                      className={`w-full min-w-0 bg-transparent text-sm font-semibold focus:outline-none ${
+                        block.checked
+                          ? 'line-through text-text-secondary'
+                          : 'text-text-primary'
+                      }`}
+                    />
+                  ) : (
+                    <span
+                      ref={(el) => setCaretHostRef(block.id, 'content', el)}
+                      className={`block w-full min-w-0 text-sm font-semibold ${
+                        block.checked
+                          ? 'line-through text-text-secondary'
+                          : 'text-text-primary'
+                      }`}
+                    >
+                      {block.content || 'Deadline tanpa judul'}
+                    </span>
+                  )}
+                  {blockCollaborators.length > 0 && (
+                    <CollaboratorCaretOverlay
+                      hostRefs={caretHostRefs}
+                      hostKey={`${block.id}:content`}
+                      layoutKey={canEdit ? 'edit' : 'view'}
+                      text={block.content}
+                      field="content"
+                      collaborators={blockCollaborators}
+                    />
+                  )}
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-1.5 shrink-0 no-print">
@@ -3026,118 +3381,178 @@ export const BlockEditor: React.FC = () => {
                       }`}
                     />
                   </button>
-                  <input
-                    ref={(el) => {
-                      blockRefs.current[block.id] = el;
-                    }}
-                    readOnly={!canEdit}
-                    value={block.content}
-                    {...getEditableBlockAttrs(block, 'content')}
-                    onChange={(e) =>
-                      void handleBlockChange(block.id, { content: e.target.value })
-                    }
-                    onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                    placeholder="Toggle"
-                    className="flex-1 bg-transparent text-[15px] sm:text-base font-medium text-text-primary focus:outline-none"
-                  />
+                  <div className="relative flex-1 min-w-0">
+                    <input
+                      ref={(el) => {
+                        blockRefs.current[block.id] = el;
+                        setCaretHostRef(block.id, 'content', el);
+                      }}
+                      readOnly={!canEdit}
+                      value={block.content}
+                      {...getEditableBlockAttrs(block, 'content')}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, { content: e.target.value })
+                      }
+                      onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                      placeholder="Toggle"
+                      className="w-full bg-transparent text-[15px] sm:text-base font-medium text-text-primary focus:outline-none"
+                    />
+                    {blockCollaborators.length > 0 && (
+                      <CollaboratorCaretOverlay
+                        hostRefs={caretHostRefs}
+                        hostKey={`${block.id}:content`}
+                        layoutKey="input"
+                        text={block.content}
+                        field="content"
+                        collaborators={blockCollaborators}
+                      />
+                    )}
+                  </div>
                 </div>
                 {isOpen && (
                   <div className="pl-6 border-l border-border-subtle ml-2">
-                    <textarea
-                      ref={(el) => {
-                        toggleBodyRefs.current[block.id] = el;
-                      }}
-                      readOnly={!canEdit}
-                      rows={Math.max(2, (block.toggleBody || '').split('\n').length)}
-                      value={block.toggleBody || ''}
-                      {...getEditableBlockAttrs(block, 'toggleBody')}
-                      onChange={(e) =>
-                        void handleBlockChange(block.id, {
-                          toggleBody: e.target.value
-                        })
-                      }
-                      placeholder={canEdit ? 'Ketik isi di dalam toggle...' : ''}
-                      className="w-full bg-transparent text-sm text-text-primary focus:outline-none resize-none"
-                    />
+                    <div className="relative w-full">
+                      <textarea
+                        ref={(el) => {
+                          toggleBodyRefs.current[block.id] = el;
+                          setCaretHostRef(block.id, 'toggleBody', el);
+                        }}
+                        readOnly={!canEdit}
+                        rows={Math.max(2, (block.toggleBody || '').split('\n').length)}
+                        value={block.toggleBody || ''}
+                        {...getEditableBlockAttrs(block, 'toggleBody')}
+                        onChange={(e) =>
+                          void handleBlockChange(block.id, {
+                            toggleBody: e.target.value
+                          })
+                        }
+                        placeholder={canEdit ? 'Ketik isi di dalam toggle...' : ''}
+                        className="w-full bg-transparent text-sm text-text-primary focus:outline-none resize-none"
+                      />
+                      {blockCollaborators.length > 0 && (
+                        <CollaboratorCaretOverlay
+                          hostRefs={caretHostRefs}
+                          hostKey={`${block.id}:toggleBody`}
+                          layoutKey="input"
+                          text={block.toggleBody || ''}
+                          field="toggleBody"
+                          collaborators={blockCollaborators}
+                        />
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
             );
           })()}
 
-          {block.type === 'callout' && (
-            <div className="flex items-start gap-3 bg-subtle/80 border border-border-subtle rounded-xl p-3.5 my-1">
-              <button
-                type="button"
-                disabled={!canEdit}
-                onClick={() => {
-                  const icons = ['💡', '⚡', '📌', '🔥', '🎓', '⚠️', '✅'];
-                  const nextIcon =
-                    icons[
-                      (icons.indexOf(block.calloutIcon || '💡') + 1) % icons.length
-                    ];
-                  void handleBlockChange(block.id, { calloutIcon: nextIcon });
-                }}
-                className="text-lg leading-none pt-0.5"
-              >
-                {block.calloutIcon || '💡'}
-              </button>
-              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                <textarea
-                  ref={(el) => {
-                    blockRefs.current[block.id] = el;
+          {block.type === 'callout' && (() => {
+            const isEditingCallout = canEdit && (editingBlockId === block.id || !block.content.trim());
+            return (
+              <div className="flex items-start gap-3 bg-subtle/80 border border-border-subtle rounded-xl p-3.5 my-1">
+                <button
+                  type="button"
+                  disabled={!canEdit}
+                  onClick={() => {
+                    const icons = ['💡', '⚡', '📌', '🔥', '🎓', '⚠️', '✅'];
+                    const nextIcon =
+                      icons[
+                        (icons.indexOf(block.calloutIcon || '💡') + 1) % icons.length
+                      ];
+                    void handleBlockChange(block.id, { calloutIcon: nextIcon });
                   }}
-                  rows={Math.max(2, Math.ceil(block.content.length / 72))}
-                  value={block.content}
-                  {...getEditableBlockAttrs(block, 'content')}
-                  onChange={(e) =>
-                    void handleBlockChange(block.id, { content: e.target.value })
-                  }
-                  placeholder="Ketik isi callout..."
-                  className="flex-1 bg-transparent text-sm leading-relaxed text-text-primary focus:outline-none resize-none"
-                />
-              ) : (
-                <div
-                  onClick={() => focusPreviewBlock(block)}
-                  className={`flex-1 text-sm leading-relaxed text-text-primary whitespace-pre-wrap break-words ${
-                    canEdit ? 'cursor-text' : 'cursor-default'
-                  }`}
+                  className="text-lg leading-none pt-0.5"
                 >
-                  {renderInlineMarkdown(block.content)}
+                  {block.calloutIcon || '💡'}
+                </button>
+                <div className="relative flex-1 min-w-0">
+                  {isEditingCallout ? (
+                    <textarea
+                      ref={(el) => {
+                        blockRefs.current[block.id] = el;
+                        setCaretHostRef(block.id, 'content', el);
+                      }}
+                      rows={Math.max(2, Math.ceil(block.content.length / 72))}
+                      value={block.content}
+                      {...getEditableBlockAttrs(block, 'content')}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, { content: e.target.value })
+                      }
+                      placeholder="Ketik isi callout..."
+                      className="w-full bg-transparent text-sm leading-relaxed text-text-primary focus:outline-none resize-none"
+                    />
+                  ) : (
+                    <div
+                      ref={(el) => setCaretHostRef(block.id, 'content', el)}
+                      onClick={() => focusPreviewBlock(block)}
+                      className={`w-full min-h-[1.5rem] text-sm leading-relaxed text-text-primary whitespace-pre-wrap break-words ${
+                        canEdit ? 'cursor-text' : 'cursor-default'
+                      }`}
+                    >
+                      {renderInlineMarkdown(block.content)}
+                    </div>
+                  )}
+                  {blockCollaborators.length > 0 && (
+                    <CollaboratorCaretOverlay
+                      hostRefs={caretHostRefs}
+                      hostKey={`${block.id}:content`}
+                      layoutKey={isEditingCallout ? 'edit' : 'view'}
+                      text={block.content}
+                      field="content"
+                      collaborators={blockCollaborators}
+                    />
+                  )}
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            );
+          })()}
 
-          {block.type === 'quote' && (
-            <blockquote className="border-l-[3px] border-text-primary/70 pl-4 py-1 my-1 italic text-text-primary/90">
-              {canEdit && (editingBlockId === block.id || !block.content.trim()) ? (
-                <textarea
-                  ref={(el) => {
-                    blockRefs.current[block.id] = el;
-                  }}
-                  rows={Math.max(1, Math.ceil(block.content.length / 75))}
-                  value={block.content}
-                  {...getEditableBlockAttrs(block, 'content')}
-                  onChange={(e) =>
-                    void handleBlockChange(block.id, { content: e.target.value })
-                  }
-                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                  placeholder="Kutipan..."
-                  className="w-full bg-transparent text-[15px] leading-relaxed focus:outline-none resize-none"
-                />
-              ) : (
-                <div
-                  onClick={() => focusPreviewBlock(block)}
-                  className={`w-full text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
-                    canEdit ? 'cursor-text' : 'cursor-default'
-                  }`}
-                >
-                  {renderInlineMarkdown(block.content)}
+          {block.type === 'quote' && (() => {
+            const isEditingQuote = canEdit && (editingBlockId === block.id || !block.content.trim());
+            return (
+              <blockquote className="border-l-[3px] border-text-primary/70 pl-4 py-1 my-1 italic text-text-primary/90">
+                <div className="relative w-full">
+                  {isEditingQuote ? (
+                    <textarea
+                      ref={(el) => {
+                        blockRefs.current[block.id] = el;
+                        setCaretHostRef(block.id, 'content', el);
+                      }}
+                      rows={Math.max(1, Math.ceil(block.content.length / 75))}
+                      value={block.content}
+                      {...getEditableBlockAttrs(block, 'content')}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, { content: e.target.value })
+                      }
+                      onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                      placeholder="Kutipan..."
+                      className="w-full bg-transparent text-[15px] leading-relaxed focus:outline-none resize-none"
+                    />
+                  ) : (
+                    <div
+                      ref={(el) => setCaretHostRef(block.id, 'content', el)}
+                      onClick={() => focusPreviewBlock(block)}
+                      className={`w-full min-h-[1.5rem] text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
+                        canEdit ? 'cursor-text' : 'cursor-default'
+                      }`}
+                    >
+                      {renderInlineMarkdown(block.content)}
+                    </div>
+                  )}
+                  {blockCollaborators.length > 0 && (
+                    <CollaboratorCaretOverlay
+                      hostRefs={caretHostRefs}
+                      hostKey={`${block.id}:content`}
+                      layoutKey={isEditingQuote ? 'edit' : 'view'}
+                      text={block.content}
+                      field="content"
+                      collaborators={blockCollaborators}
+                    />
+                  )}
                 </div>
-              )}
-            </blockquote>
-          )}
+              </blockquote>
+            );
+          })()}
 
           {block.type === 'divider' && (
             <div className="py-3">
@@ -3172,8 +3587,8 @@ export const BlockEditor: React.FC = () => {
           })()}
 
           {block.type === 'code' && (
-            <div className="rounded-xl overflow-hidden border border-border-subtle bg-slate-950 text-slate-100 my-1.5">
-              <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900 border-b border-white/10 text-[11px] font-mono">
+            <div className="rounded-xl border border-border-subtle bg-slate-950 text-slate-100 my-1.5">
+              <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900 rounded-t-[11px] border-b border-white/10 text-[11px] font-mono">
                 <select
                   disabled={!canEdit}
                   value={block.language || 'javascript'}
@@ -3209,63 +3624,107 @@ export const BlockEditor: React.FC = () => {
                   {copiedId === block.id ? 'Tersalin' : 'Salin'}
                 </button>
               </div>
-              <textarea
-                ref={(el) => {
-                  blockRefs.current[block.id] = el;
-                }}
-                readOnly={!canEdit}
-                rows={Math.max(3, block.content.split('\n').length)}
-                value={block.content}
-                {...getEditableBlockAttrs(block, 'content')}
-                onChange={(e) =>
-                  void handleBlockChange(block.id, { content: e.target.value })
-                }
-                placeholder="Ketik kode..."
-                className="w-full p-3 bg-transparent font-mono text-xs leading-relaxed text-slate-100 focus:outline-none resize-y"
-              />
-            </div>
-          )}
-
-          {block.type === 'math' && (
-            <div className="bg-subtle/60 border border-border-subtle rounded-xl p-3 my-1 space-y-2">
-              <div
-                onClick={() => {
-                  if (canEdit) {
-                    const opening = editingMathId !== block.id;
-                    setEditingMathId(opening ? block.id : null);
-                    reportBlockTarget(
-                      block,
-                      'content',
-                      block.content.length,
-                      block.content.length,
-                      'focus'
-                    );
-                    if (opening) {
-                      setPendingFocusBlockId(block.id);
-                    }
-                  }
-                }}
-                className={`${canEdit ? 'cursor-pointer' : ''} text-text-primary`}
-              >
-                <MathPreview tex={block.content} />
-              </div>
-              {canEdit && (editingMathId === block.id || !block.content) && (
-                <input
+              <div className="relative w-full">
+                <textarea
                   ref={(el) => {
                     blockRefs.current[block.id] = el;
+                    setCaretHostRef(block.id, 'content', el);
                   }}
+                  readOnly={!canEdit}
+                  rows={Math.max(3, block.content.split('\n').length)}
                   value={block.content}
                   {...getEditableBlockAttrs(block, 'content')}
                   onChange={(e) =>
                     void handleBlockChange(block.id, { content: e.target.value })
                   }
-                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                  placeholder="Rumus LaTeX (mis. E = mc^2)"
-                  className="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 font-mono text-xs text-text-primary focus:outline-none"
+                  placeholder="Ketik kode..."
+                  className="w-full p-3 bg-transparent font-mono text-xs leading-relaxed text-slate-100 focus:outline-none resize-y rounded-b-[11px]"
                 />
-              )}
+                {blockCollaborators.length > 0 && (
+                  <CollaboratorCaretOverlay
+                    hostRefs={caretHostRefs}
+                    hostKey={`${block.id}:content`}
+                    layoutKey="input"
+                    text={block.content}
+                    field="content"
+                    collaborators={blockCollaborators}
+                  />
+                )}
+              </div>
             </div>
           )}
+
+          {block.type === 'math' && (() => {
+            const isMathInputOpen = canEdit && (editingMathId === block.id || !block.content);
+            return (
+              <div className="bg-subtle/60 border border-border-subtle rounded-xl p-3 my-1 space-y-2">
+                <div
+                  ref={
+                    !isMathInputOpen
+                      ? (el) => setCaretHostRef(block.id, 'content', el)
+                      : undefined
+                  }
+                  onClick={() => {
+                    if (canEdit) {
+                      const opening = editingMathId !== block.id;
+                      setEditingMathId(opening ? block.id : null);
+                      reportBlockTarget(
+                        block,
+                        'content',
+                        block.content.length,
+                        block.content.length,
+                        'focus'
+                      );
+                      if (opening) {
+                        setPendingFocusBlockId(block.id);
+                      }
+                    }
+                  }}
+                  className={`relative ${canEdit ? 'cursor-pointer' : ''} text-text-primary`}
+                >
+                  <MathPreview tex={block.content} />
+                  {!isMathInputOpen && blockCollaborators.length > 0 && (
+                    <CollaboratorCaretOverlay
+                      hostRefs={caretHostRefs}
+                      hostKey={`${block.id}:content`}
+                      layoutKey="preview"
+                      text={block.content}
+                      field="content"
+                      collaborators={blockCollaborators}
+                    />
+                  )}
+                </div>
+                {isMathInputOpen && (
+                  <div className="relative w-full">
+                    <input
+                      ref={(el) => {
+                        blockRefs.current[block.id] = el;
+                        setCaretHostRef(block.id, 'content', el);
+                      }}
+                      value={block.content}
+                      {...getEditableBlockAttrs(block, 'content')}
+                      onChange={(e) =>
+                        void handleBlockChange(block.id, { content: e.target.value })
+                      }
+                      onKeyDown={(e) => handleBlockKeyDown(e, block)}
+                      placeholder="Rumus LaTeX (mis. E = mc^2)"
+                      className="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 font-mono text-xs text-text-primary focus:outline-none"
+                    />
+                    {blockCollaborators.length > 0 && (
+                      <CollaboratorCaretOverlay
+                        hostRefs={caretHostRefs}
+                        hostKey={`${block.id}:content`}
+                        layoutKey="input"
+                        text={block.content}
+                        field="content"
+                        collaborators={blockCollaborators}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Notion Image Block with Cloudinary Upload & Direct Ask AI */}
           {block.type === 'image' && (
@@ -4524,6 +4983,13 @@ export const BlockEditor: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-1.5 text-xs shrink-0">
+              {activeNote && (
+                <CollaboratorsHeaderStrip
+                  collaborators={remoteCollaborators}
+                  onJumpToCollaborator={handleJumpToCollaborator}
+                />
+              )}
+
               {/* Cloud Catatan Sync Status Indicator */}
               <button
                 type="button"
@@ -4951,24 +5417,121 @@ export const BlockEditor: React.FC = () => {
                   </div>
 
                   {/* Notion Page Title */}
-                  <input
-                    type="text"
-                    readOnly={!canEdit}
-                    value={activeNote.title}
-                    onChange={(e) => void updateNote({ title: e.target.value })}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && canEdit) {
-                        e.preventDefault();
-                        if (activeNote.blocks[0]) {
-                          setPendingFocusBlockId(activeNote.blocks[0].id);
-                        } else {
-                          void handleAddBlockAfter(undefined, 'text');
+                  {(() => {
+                    const titleCollaborators = collaboratorsByBlockId['__title__'] || [];
+                    const titlePointers = pointersByBlockId['__title__'] || [];
+                    const primaryTitleCollab = titleCollaborators[0];
+                    const isTitleJumpHighlighted = jumpHighlightBlockId === '__title__';
+
+                    const reportTitleCursor = (
+                      el: HTMLInputElement,
+                      isEditing: boolean,
+                      immediate = false
+                    ) => {
+                      const start =
+                        typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+                      const end =
+                        typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+                      reportLocalCursor({
+                        noteId: activeNote.id,
+                        blockId: '__title__',
+                        field: 'title',
+                        selectionStart: start,
+                        selectionEnd: end,
+                        isEditing,
+                        immediate
+                      });
+                    };
+
+                    return (
+                      <div
+                        data-miu-title-wrap="true"
+                        onMouseMove={(e) => {
+                          if (mainViewMode !== 'document') return;
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          if (rect.width <= 0 || rect.height <= 0) return;
+                          reportLocalPointer({
+                            noteId: activeNote.id,
+                            pointerBlockId: '__title__',
+                            pointerX: normalizePointerCoordinate(
+                              (e.clientX - rect.left) / rect.width
+                            ),
+                            pointerY: normalizePointerCoordinate(
+                              (e.clientY - rect.top) / rect.height
+                            )
+                          });
+                        }}
+                        onMouseLeave={() =>
+                          reportLocalPointer({
+                            noteId: activeNote.id,
+                            pointerBlockId: null,
+                            pointerX: null,
+                            pointerY: null
+                          })
                         }
-                      }
-                    }}
-                    placeholder={canEdit ? 'Tanpa Judul' : 'Tanpa Judul'}
-                    className="w-full bg-transparent text-3xl sm:text-4xl font-bold tracking-tight text-text-primary placeholder:text-text-secondary/30 focus:outline-none"
-                  />
+                        style={
+                          primaryTitleCollab
+                            ? {
+                                boxShadow: isTitleJumpHighlighted
+                                  ? `inset 4px 0 0 ${primaryTitleCollab.color}, 0 0 0 2px ${primaryTitleCollab.color}88`
+                                  : `inset 3px 0 0 ${primaryTitleCollab.color}, 0 0 0 1px ${primaryTitleCollab.color}36`,
+                                backgroundColor: `${primaryTitleCollab.color}0D`
+                              }
+                            : isTitleJumpHighlighted
+                              ? {
+                                  boxShadow: '0 0 0 2px rgba(56, 189, 248, 0.7)'
+                                }
+                              : undefined
+                        }
+                        className="relative rounded-xl px-1 -mx-1 py-0.5 transition"
+                      >
+                        {titleCollaborators.length > 0 && (
+                          <BlockCollaboratorBadges
+                            collaborators={titleCollaborators}
+                            contentText={activeNote.title}
+                          />
+                        )}
+                        {titlePointers.length > 0 && (
+                          <BlockCollaboratorPointers pointers={titlePointers} />
+                        )}
+                        <input
+                          ref={(el) => setCaretHostRef('__title__', 'title', el)}
+                          type="text"
+                          readOnly={!canEdit}
+                          value={activeNote.title}
+                          onFocus={(e) => reportTitleCursor(e.currentTarget, canEdit, true)}
+                          onInput={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
+                          onClick={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
+                          onKeyUp={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
+                          onSelect={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
+                          onBlur={(e) => reportTitleCursor(e.currentTarget, false, false)}
+                          onChange={(e) => void updateNote({ title: e.target.value })}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && canEdit) {
+                              e.preventDefault();
+                              if (activeNote.blocks[0]) {
+                                setPendingFocusBlockId(activeNote.blocks[0].id);
+                              } else {
+                                void handleAddBlockAfter(undefined, 'text');
+                              }
+                            }
+                          }}
+                          placeholder={canEdit ? 'Tanpa Judul' : 'Tanpa Judul'}
+                          className="w-full bg-transparent text-3xl sm:text-4xl font-bold tracking-tight text-text-primary placeholder:text-text-secondary/30 focus:outline-none"
+                        />
+                        {titleCollaborators.length > 0 && (
+                          <CollaboratorCaretOverlay
+                            hostRefs={caretHostRefs}
+                            hostKey="__title__:title"
+                            layoutKey="title"
+                            text={activeNote.title}
+                            field="title"
+                            collaborators={titleCollaborators}
+                          />
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Multi-Select Action Bar for Deleting Selected Blocks / Conversations */}
@@ -5019,7 +5582,17 @@ export const BlockEditor: React.FC = () => {
                 )}
 
                 {/* Notion Blocks */}
-                <div className="space-y-1 mt-4 flex-1">
+                <div
+                  className="space-y-1 mt-4 flex-1"
+                  onMouseLeave={() =>
+                    reportLocalPointer({
+                      noteId: activeNote.id,
+                      pointerBlockId: null,
+                      pointerX: null,
+                      pointerY: null
+                    })
+                  }
+                >
                   {(() => {
                     let rootNumber = 0;
                     return activeNote.blocks.map((block) => {

@@ -4,6 +4,7 @@ import { createRealtime, rawSql } from '@neon/realtime/server';
 import {
   normalizeRealtimeWsUrl,
   type LiveItemRow,
+  type NeonNotePresenceRow,
   type NeonNoteRow
 } from './realtimeShared';
 
@@ -91,4 +92,19 @@ export function liveNoteQuery(noteId: string) {
 
 export function sealLiveNoteQuery(noteId: string) {
   return getRealtime().seal({ query: liveNoteQuery(noteId) });
+}
+
+export function liveNotePresenceQuery(noteId: string) {
+  return rawSql<NeonNotePresenceRow>(
+    `SELECT id, note_id, session_id, user_id, user_name, user_email, user_picture, color,
+            block_id, field, selection_start, selection_end, is_editing,
+            pointer_block_id, pointer_x, pointer_y, updated_at
+     FROM miu_note_presence
+     WHERE note_id = $1`,
+    [noteId]
+  );
+}
+
+export function sealLiveNotePresenceQuery(noteId: string) {
+  return getRealtime().seal({ query: liveNotePresenceQuery(noteId) });
 }

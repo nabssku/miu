@@ -5,26 +5,41 @@ import type { SealedLiveQuery } from '@neon/realtime/client';
 import { useLiveQuery as useNeonLiveQuery } from '@neon/realtime-react';
 import { db } from '@/db/database';
 import { useMiu } from '@/context/MiuContext';
-import { parseNeonNoteRow, type NeonNoteRow } from '@/lib/realtimeShared';
+import { useNotePresence } from '@/context/NotePresenceContext';
+import {
+  parseNeonNoteRow,
+  parseNeonPresenceRow,
+  type NeonNotePresenceRow,
+  type NeonNoteRow
+} from '@/lib/realtimeShared';
 import { isNeonConfigured } from '@/services/cloudServices';
 import { useIsRealtimeAvailable } from './RealtimeRoot';
 
 interface SealedNoteState {
   noteId: string;
   sealedQuery?: SealedLiveQuery<NeonNoteRow>;
+  presenceSealedQuery?: SealedLiveQuery<NeonNotePresenceRow>;
 }
 
-async function fetchSealedNoteQuery(
+interface LiveQueryApiResult {
+  status: number;
+  sealedQuery?: SealedLiveQuery<NeonNoteRow>;
+  presenceSealedQuery?: SealedLiveQuery<NeonNotePresenceRow>;
+  serverTime?: number;
+}
+
+async function fetchInitialNoteAndPresenceQueries(
   noteId: string,
   userId: string,
   userEmail: string
-): Promise<SealedLiveQuery<NeonNoteRow> | null> {
+): Promise<LiveQueryApiResult> {
   const res = await fetch('/api/realtime/live-query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     cache: 'no-store',
     body: JSON.stringify({
       kind: 'note',
+      includePresence: true,
       noteId,
       userId,
       userEmail
@@ -32,15 +47,59 @@ async function fetchSealedNoteQuery(
   });
 
   if (res.status === 403 || res.status === 404 || res.status === 503) {
-    return null;
+    return { status: res.status };
   }
 
   if (!res.ok) {
     throw new Error(`Gagal mengambil live query catatan (${res.status})`);
   }
 
-  const payload = (await res.json()) as { sealedQuery?: SealedLiveQuery<NeonNoteRow> };
-  return payload.sealedQuery ?? null;
+  const payload = (await res.json()) as {
+    sealedQuery?: SealedLiveQuery<NeonNoteRow>;
+    presenceSealedQuery?: SealedLiveQuery<NeonNotePresenceRow>;
+    serverTime?: number;
+  };
+  return {
+    status: res.status,
+    sealedQuery: payload.sealedQuery,
+    presenceSealedQuery: payload.presenceSealedQuery,
+    serverTime: payload.serverTime
+  };
+}
+
+async function renewSingleSealedQuery<Row>(
+  kind: 'note' | 'presence',
+  noteId: string,
+  userId: string,
+  userEmail: string
+): Promise<{ sealedQuery: SealedLiveQuery<Row>; serverTime?: number }> {
+  const res = await fetch('/api/realtime/live-query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+    body: JSON.stringify({
+      kind,
+      noteId,
+      userId,
+      userEmail
+    })
+  });
+
+  if (!res.ok) {
+    throw new Error(`Akses live query ${kind} tidak tersedia (${res.status}).`);
+  }
+
+  const payload = (await res.json()) as {
+    sealedQuery?: SealedLiveQuery<Row>;
+    serverTime?: number;
+  };
+  if (!payload.sealedQuery) {
+    throw new Error(`Sealed query ${kind} kosong.`);
+  }
+  return {
+    sealedQuery: payload.sealedQuery,
+    serverTime: payload.serverTime
+  };
 }
 
 const NoteLiveSubscription: React.FC<{
@@ -76,9 +135,38 @@ const NoteLiveSubscription: React.FC<{
   return null;
 };
 
+const PresenceLiveSubscription: React.FC<{
+  noteId: string;
+  sealedQuery: SealedLiveQuery<NeonNotePresenceRow>;
+  refreshQuery: () => Promise<SealedLiveQuery<NeonNotePresenceRow>>;
+}> = ({ noteId, sealedQuery, refreshQuery }) => {
+  const [query] = useState(sealedQuery);
+  const { data } = useNeonLiveQuery(query, { refreshQuery });
+  const { setRawPresenceRows, clearPresenceRows } = useNotePresence();
+
+  useEffect(() => {
+    if (!data) return;
+    const parsed = data
+      .filter((r) => r.note_id === noteId)
+      .map((r) => parseNeonPresenceRow(r));
+    setRawPresenceRows(noteId, parsed);
+  }, [data, noteId, setRawPresenceRows]);
+
+  useEffect(() => {
+    return () => {
+      clearPresenceRows(noteId);
+    };
+  }, [noteId, clearPresenceRows]);
+
+  return null;
+};
+
+const RETRY_DELAYS_MS = [1200, 2600, 4800];
+
 export const NoteRealtimeSync: React.FC = () => {
   const isRealtimeAvailable = useIsRealtimeAvailable();
   const { activeNoteId, currentUser, isPublicShareAccess } = useMiu();
+  const { clearPresenceRows, updateServerClockOffset } = useNotePresence();
   const [sealedState, setSealedState] = useState<SealedNoteState | undefined>();
 
   const userId = currentUser?.id || '';
@@ -92,44 +180,109 @@ export const NoteRealtimeSync: React.FC = () => {
   useEffect(() => {
     if (!shouldSync || !activeNoteId) {
       setSealedState(undefined);
+      clearPresenceRows();
       return;
     }
 
     let cancelled = false;
-    fetchSealedNoteQuery(activeNoteId, userId, userEmail)
-      .then((sealedQuery) => {
-        if (!cancelled && sealedQuery) {
-          setSealedState({ noteId: activeNoteId, sealedQuery });
-        }
-      })
-      .catch(() => {});
+    let retryTimer: number | null = null;
+
+    const loadQueries = (attemptIdx: number) => {
+      fetchInitialNoteAndPresenceQueries(activeNoteId, userId, userEmail)
+        .then((result) => {
+          if (cancelled) return;
+          if (result.serverTime) {
+            updateServerClockOffset(result.serverTime);
+          }
+          if (result.sealedQuery) {
+            setSealedState({
+              noteId: activeNoteId,
+              sealedQuery: result.sealedQuery,
+              presenceSealedQuery: result.presenceSealedQuery
+            });
+            return;
+          }
+          if (result.status === 404 && attemptIdx < RETRY_DELAYS_MS.length) {
+            retryTimer = window.setTimeout(() => {
+              loadQueries(attemptIdx + 1);
+            }, RETRY_DELAYS_MS[attemptIdx]);
+          }
+        })
+        .catch(() => {});
+    };
+
+    loadQueries(0);
 
     return () => {
       cancelled = true;
+      if (retryTimer) {
+        window.clearTimeout(retryTimer);
+      }
     };
-  }, [shouldSync, activeNoteId, userId, userEmail]);
+  }, [
+    shouldSync,
+    activeNoteId,
+    userId,
+    userEmail,
+    clearPresenceRows,
+    updateServerClockOffset
+  ]);
 
-  const refreshQuery = useCallback(async () => {
+  const refreshNoteQuery = useCallback(async () => {
     if (!activeNoteId) {
       throw new Error('Tidak ada catatan aktif untuk diperbarui.');
     }
-    const renewed = await fetchSealedNoteQuery(activeNoteId, userId, userEmail);
-    if (!renewed) {
-      throw new Error('Akses live query catatan tidak lagi tersedia.');
+    const { sealedQuery, serverTime } = await renewSingleSealedQuery<NeonNoteRow>(
+      'note',
+      activeNoteId,
+      userId,
+      userEmail
+    );
+    if (serverTime) {
+      updateServerClockOffset(serverTime);
     }
-    return renewed;
-  }, [activeNoteId, userId, userEmail]);
+    return sealedQuery;
+  }, [activeNoteId, userId, userEmail, updateServerClockOffset]);
 
-  if (!shouldSync || !sealedState?.sealedQuery || sealedState.noteId !== activeNoteId) {
+  const refreshPresenceQuery = useCallback(async () => {
+    if (!activeNoteId) {
+      throw new Error('Tidak ada catatan aktif untuk memperbarui presence.');
+    }
+    const { sealedQuery, serverTime } =
+      await renewSingleSealedQuery<NeonNotePresenceRow>(
+        'presence',
+        activeNoteId,
+        userId,
+        userEmail
+      );
+    if (serverTime) {
+      updateServerClockOffset(serverTime);
+    }
+    return sealedQuery;
+  }, [activeNoteId, userId, userEmail, updateServerClockOffset]);
+
+  if (!shouldSync || !sealedState || sealedState.noteId !== activeNoteId) {
     return null;
   }
 
   return (
-    <NoteLiveSubscription
-      key={`${activeNoteId}:${sealedState.sealedQuery.queryFingerprint}`}
-      noteId={activeNoteId}
-      sealedQuery={sealedState.sealedQuery}
-      refreshQuery={refreshQuery}
-    />
+    <>
+      {sealedState.sealedQuery && (
+        <NoteLiveSubscription
+          key={`note:${activeNoteId}:${sealedState.sealedQuery.queryFingerprint}`}
+          noteId={activeNoteId}
+          sealedQuery={sealedState.sealedQuery}
+          refreshQuery={refreshNoteQuery}
+        />
+      )}
+      {sealedState.presenceSealedQuery && (
+        <PresenceLiveSubscription
+          key={`presence:${activeNoteId}:${sealedState.presenceSealedQuery.queryFingerprint}`}
+          noteId={activeNoteId}
+          sealedQuery={sealedState.presenceSealedQuery}
+          refreshQuery={refreshPresenceQuery}
+        />
+      )}
+    </>
   );
 };

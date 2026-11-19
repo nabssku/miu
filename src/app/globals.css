@@ -220,6 +220,16 @@ input[type='range'].miu-slider::-webkit-slider-thumb:hover {
   border-color: #211E1B;
 }
 
+@keyframes miu-remote-caret-blink {
+  0%, 55% { opacity: 1; }
+  75%, 92% { opacity: 0.35; }
+  100% { opacity: 1; }
+}
+
+.miu-remote-caret-line {
+  animation: miu-remote-caret-blink 1.15s ease-in-out infinite;
+}
+
 @media print {
   .no-print {
     display: none !important;
