@@ -17,6 +17,9 @@ import { useIsRealtimeAvailable } from './RealtimeRoot';
 
 interface SealedNoteState {
   noteId: string;
+  ownerKey: string;
+  noteGeneration: number;
+  presenceGeneration: number;
   sealedQuery?: SealedLiveQuery<NeonNoteRow>;
   presenceSealedQuery?: SealedLiveQuery<NeonNotePresenceRow>;
 }
@@ -106,9 +109,21 @@ const NoteLiveSubscription: React.FC<{
   noteId: string;
   sealedQuery: SealedLiveQuery<NeonNoteRow>;
   refreshQuery: () => Promise<SealedLiveQuery<NeonNoteRow>>;
-}> = ({ noteId, sealedQuery, refreshQuery }) => {
+  onError: () => void;
+}> = ({ noteId, sealedQuery, refreshQuery, onError }) => {
   const [query] = useState(sealedQuery);
-  const { data } = useNeonLiveQuery(query, { refreshQuery });
+  const { data, status, error } = useNeonLiveQuery(query, { refreshQuery });
+  const reportedErrorRef = React.useRef(false);
+
+  useEffect(() => {
+    if (status === 'error' && !reportedErrorRef.current) {
+      reportedErrorRef.current = true;
+      if (process.env.NODE_ENV === 'development' && error) {
+        console.warn('[Miu Realtime] Note live subscription error:', error.message);
+      }
+      onError();
+    }
+  }, [status, error, onError]);
 
   useEffect(() => {
     const row = data?.[0];
@@ -139,10 +154,22 @@ const PresenceLiveSubscription: React.FC<{
   noteId: string;
   sealedQuery: SealedLiveQuery<NeonNotePresenceRow>;
   refreshQuery: () => Promise<SealedLiveQuery<NeonNotePresenceRow>>;
-}> = ({ noteId, sealedQuery, refreshQuery }) => {
+  onError: () => void;
+}> = ({ noteId, sealedQuery, refreshQuery, onError }) => {
   const [query] = useState(sealedQuery);
-  const { data } = useNeonLiveQuery(query, { refreshQuery });
+  const { data, status, error } = useNeonLiveQuery(query, { refreshQuery });
   const { setRawPresenceRows, clearPresenceRows } = useNotePresence();
+  const reportedErrorRef = React.useRef(false);
+
+  useEffect(() => {
+    if (status === 'error' && !reportedErrorRef.current) {
+      reportedErrorRef.current = true;
+      if (process.env.NODE_ENV === 'development' && error) {
+        console.warn('[Miu Realtime] Presence live subscription error:', error.message);
+      }
+      onError();
+    }
+  }, [status, error, onError]);
 
   useEffect(() => {
     if (!data) return;
@@ -161,72 +188,245 @@ const PresenceLiveSubscription: React.FC<{
   return null;
 };
 
-const RETRY_DELAYS_MS = [1200, 2600, 4800];
+const RETRY_DELAYS_MS = [1200, 2600, 4800, 8000, 12000, 15000];
+const MAX_INITIAL_ATTEMPTS = 20;
+const ERROR_RECOVERY_DELAYS_MS = [1500, 3500, 7500, 15000];
 
 export const NoteRealtimeSync: React.FC = () => {
   const isRealtimeAvailable = useIsRealtimeAvailable();
   const { activeNoteId, currentUser, isPublicShareAccess } = useMiu();
   const { clearPresenceRows, updateServerClockOffset } = useNotePresence();
+  const [neonConfigured, setNeonConfigured] = useState<boolean>(() => isNeonConfigured());
   const [sealedState, setSealedState] = useState<SealedNoteState | undefined>();
 
   const userId = currentUser?.id || '';
   const userEmail = currentUser?.email || '';
+  const ownerKey = `${userId}|${userEmail}|${isPublicShareAccess ? 'pub' : 'auth'}`;
+
+  useEffect(() => {
+    if (neonConfigured) return;
+    if (isNeonConfigured()) {
+      setNeonConfigured(true);
+      return;
+    }
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      if (isNeonConfigured()) {
+        setNeonConfigured(true);
+        window.clearInterval(timer);
+      } else if (attempts >= 30) {
+        window.clearInterval(timer);
+      }
+    }, 400);
+    return () => window.clearInterval(timer);
+  }, [neonConfigured, activeNoteId, userId, isPublicShareAccess]);
+
   const shouldSync =
     isRealtimeAvailable &&
-    isNeonConfigured() &&
+    (neonConfigured || isNeonConfigured()) &&
     Boolean(activeNoteId) &&
     (Boolean(userId) || isPublicShareAccess);
 
+  const recoveryStateRef = React.useRef<{
+    noteTimer: number | null;
+    presenceTimer: number | null;
+    noteAttempts: number;
+    presenceAttempts: number;
+    sessionToken: number;
+  }>({
+    noteTimer: null,
+    presenceTimer: null,
+    noteAttempts: 0,
+    presenceAttempts: 0,
+    sessionToken: 0
+  });
+
   useEffect(() => {
+    const recovery = recoveryStateRef.current;
+    recovery.sessionToken += 1;
+    const currentToken = recovery.sessionToken;
+    recovery.noteAttempts = 0;
+    recovery.presenceAttempts = 0;
+    if (recovery.noteTimer) {
+      window.clearTimeout(recovery.noteTimer);
+      recovery.noteTimer = null;
+    }
+    if (recovery.presenceTimer) {
+      window.clearTimeout(recovery.presenceTimer);
+      recovery.presenceTimer = null;
+    }
+
     if (!shouldSync || !activeNoteId) {
       setSealedState(undefined);
       clearPresenceRows();
       return;
     }
 
+    setSealedState((prev) =>
+      prev && (prev.noteId !== activeNoteId || prev.ownerKey !== ownerKey)
+        ? undefined
+        : prev
+    );
+
     let cancelled = false;
+    let resolved = false;
+    let attemptCount = 0;
     let retryTimer: number | null = null;
 
-    const loadQueries = (attemptIdx: number) => {
+    const scheduleRetry = () => {
+      if (cancelled || resolved || attemptCount >= MAX_INITIAL_ATTEMPTS) return;
+      if (retryTimer) {
+        window.clearTimeout(retryTimer);
+      }
+      const delay = RETRY_DELAYS_MS[Math.min(attemptCount, RETRY_DELAYS_MS.length - 1)];
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        attemptCount += 1;
+        loadQueries();
+      }, delay);
+    };
+
+    const loadQueries = () => {
+      if (cancelled || resolved) return;
       fetchInitialNoteAndPresenceQueries(activeNoteId, userId, userEmail)
         .then((result) => {
-          if (cancelled) return;
+          if (cancelled || recoveryStateRef.current.sessionToken !== currentToken) return;
           if (result.serverTime) {
             updateServerClockOffset(result.serverTime);
           }
           if (result.sealedQuery) {
-            setSealedState({
+            resolved = true;
+            setSealedState((prev) => ({
               noteId: activeNoteId,
+              ownerKey,
+              noteGeneration: (prev?.noteGeneration || 0) + 1,
+              presenceGeneration: (prev?.presenceGeneration || 0) + 1,
               sealedQuery: result.sealedQuery,
               presenceSealedQuery: result.presenceSealedQuery
-            });
+            }));
             return;
           }
-          if (result.status === 404 && attemptIdx < RETRY_DELAYS_MS.length) {
-            retryTimer = window.setTimeout(() => {
-              loadQueries(attemptIdx + 1);
-            }, RETRY_DELAYS_MS[attemptIdx]);
+          if (result.status === 403) {
+            setSealedState(undefined);
+            return;
+          }
+          if (result.status === 404 || result.status === 503) {
+            setSealedState(undefined);
+            scheduleRetry();
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          scheduleRetry();
+        });
     };
 
-    loadQueries(0);
+    const handleWakeRetry = () => {
+      if (!cancelled && !resolved && !document.hidden) {
+        loadQueries();
+      }
+    };
+
+    window.addEventListener('focus', handleWakeRetry);
+    window.addEventListener('online', handleWakeRetry);
+    loadQueries();
 
     return () => {
       cancelled = true;
+      window.removeEventListener('focus', handleWakeRetry);
+      window.removeEventListener('online', handleWakeRetry);
       if (retryTimer) {
         window.clearTimeout(retryTimer);
+      }
+      if (recovery.noteTimer) {
+        window.clearTimeout(recovery.noteTimer);
+        recovery.noteTimer = null;
+      }
+      if (recovery.presenceTimer) {
+        window.clearTimeout(recovery.presenceTimer);
+        recovery.presenceTimer = null;
       }
     };
   }, [
     shouldSync,
     activeNoteId,
+    ownerKey,
     userId,
     userEmail,
     clearPresenceRows,
     updateServerClockOffset
   ]);
+
+  const scheduleSubscriptionRecovery = useCallback(
+    (kind: 'note' | 'presence') => {
+      if (!shouldSync || !activeNoteId) return;
+      const recovery = recoveryStateRef.current;
+      const timerKey = kind === 'note' ? 'noteTimer' : 'presenceTimer';
+      const attemptsKey = kind === 'note' ? 'noteAttempts' : 'presenceAttempts';
+      if (recovery[timerKey]) return;
+
+      const sessionToken = recovery.sessionToken;
+      const attemptIdx = recovery[attemptsKey];
+      const delay =
+        ERROR_RECOVERY_DELAYS_MS[Math.min(attemptIdx, ERROR_RECOVERY_DELAYS_MS.length - 1)];
+      recovery[attemptsKey] = attemptIdx + 1;
+
+      recovery[timerKey] = window.setTimeout(() => {
+        recovery[timerKey] = null;
+        if (recoveryStateRef.current.sessionToken !== sessionToken) return;
+
+        const targetPromise =
+          kind === 'note'
+            ? renewSingleSealedQuery<NeonNoteRow>('note', activeNoteId, userId, userEmail)
+            : renewSingleSealedQuery<NeonNotePresenceRow>(
+                'presence',
+                activeNoteId,
+                userId,
+                userEmail
+              );
+
+        targetPromise
+          .then(({ sealedQuery, serverTime }) => {
+            if (recoveryStateRef.current.sessionToken !== sessionToken) return;
+            if (serverTime) {
+              updateServerClockOffset(serverTime);
+            }
+            recovery[attemptsKey] = 0;
+            setSealedState((prev) => {
+              if (!prev || prev.noteId !== activeNoteId || prev.ownerKey !== ownerKey) {
+                return prev;
+              }
+              if (kind === 'note') {
+                return {
+                  ...prev,
+                  noteGeneration: prev.noteGeneration + 1,
+                  sealedQuery: sealedQuery as SealedLiveQuery<NeonNoteRow>
+                };
+              }
+              return {
+                ...prev,
+                presenceGeneration: prev.presenceGeneration + 1,
+                presenceSealedQuery: sealedQuery as SealedLiveQuery<NeonNotePresenceRow>
+              };
+            });
+          })
+          .catch(() => {
+            if (recoveryStateRef.current.sessionToken === sessionToken) {
+              scheduleSubscriptionRecovery(kind);
+            }
+          });
+      }, delay);
+    },
+    [activeNoteId, ownerKey, shouldSync, updateServerClockOffset, userEmail, userId]
+  );
+
+  const handleNoteSubscriptionError = useCallback(() => {
+    scheduleSubscriptionRecovery('note');
+  }, [scheduleSubscriptionRecovery]);
+
+  const handlePresenceSubscriptionError = useCallback(() => {
+    scheduleSubscriptionRecovery('presence');
+  }, [scheduleSubscriptionRecovery]);
 
   const refreshNoteQuery = useCallback(async () => {
     if (!activeNoteId) {
@@ -261,7 +461,12 @@ export const NoteRealtimeSync: React.FC = () => {
     return sealedQuery;
   }, [activeNoteId, userId, userEmail, updateServerClockOffset]);
 
-  if (!shouldSync || !sealedState || sealedState.noteId !== activeNoteId) {
+  if (
+    !shouldSync ||
+    !sealedState ||
+    sealedState.noteId !== activeNoteId ||
+    sealedState.ownerKey !== ownerKey
+  ) {
     return null;
   }
 
@@ -269,18 +474,20 @@ export const NoteRealtimeSync: React.FC = () => {
     <>
       {sealedState.sealedQuery && (
         <NoteLiveSubscription
-          key={`note:${activeNoteId}:${sealedState.sealedQuery.queryFingerprint}`}
+          key={`note:${activeNoteId}:${sealedState.noteGeneration}:${sealedState.sealedQuery.queryFingerprint}`}
           noteId={activeNoteId}
           sealedQuery={sealedState.sealedQuery}
           refreshQuery={refreshNoteQuery}
+          onError={handleNoteSubscriptionError}
         />
       )}
       {sealedState.presenceSealedQuery && (
         <PresenceLiveSubscription
-          key={`presence:${activeNoteId}:${sealedState.presenceSealedQuery.queryFingerprint}`}
+          key={`presence:${activeNoteId}:${sealedState.presenceGeneration}:${sealedState.presenceSealedQuery.queryFingerprint}`}
           noteId={activeNoteId}
           sealedQuery={sealedState.presenceSealedQuery}
           refreshQuery={refreshPresenceQuery}
+          onError={handlePresenceSubscriptionError}
         />
       )}
     </>

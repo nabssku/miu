@@ -75,6 +75,7 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const [mySessionId] = useState<string>(() => getOrCreatePresenceSessionId());
   const myColor = useMemo(() => pickCollaboratorColor(mySessionId), [mySessionId]);
 
+  const [neonConfigured, setNeonConfigured] = useState<boolean>(() => isNeonConfigured());
   const [presenceState, setPresenceState] = useState<{
     noteId: string;
     rows: readonly CollaboratorPresence[];
@@ -82,6 +83,9 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const [ttlTick, setTtlTick] = useState<number>(() => Date.now());
 
   const serverClockOffsetRef = useRef<number>(0);
+  const presenceRowCountRef = useRef<number>(0);
+  presenceRowCountRef.current = presenceState.rows.length;
+
   const localSnapshotRef = useRef<LocalPresenceSnapshot>({
     noteId: '',
     blockId: '',
@@ -97,6 +101,7 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const lastCursorWindowStartRef = useRef<number>(0);
   const cursorTimerRef = useRef<number | null>(null);
   const pointerTimerRef = useRef<number | null>(null);
+  const backoffRetryTimerRef = useRef<number | null>(null);
   const activePostedNoteIdRef = useRef<string>('');
   const backoffUntilByNoteRef = useRef<Record<string, number>>({});
 
@@ -106,15 +111,58 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
     currentUser?.name || `Tamu #${mySessionId.slice(-4).toUpperCase()}`;
   const userPicture = currentUser?.picture || '';
 
+  useEffect(() => {
+    if (neonConfigured) return;
+    if (isNeonConfigured()) {
+      setNeonConfigured(true);
+      return;
+    }
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      if (isNeonConfigured()) {
+        setNeonConfigured(true);
+        window.clearInterval(timer);
+      } else if (attempts >= 30) {
+        window.clearInterval(timer);
+      }
+    }, 400);
+    return () => window.clearInterval(timer);
+  }, [neonConfigured, activeNoteId, userId, isPublicShareAccess]);
+
   const canPublishPresence =
     isRealtimeAvailable &&
-    isNeonConfigured() &&
+    (neonConfigured || isNeonConfigured()) &&
     Boolean(activeNoteId) &&
     (Boolean(userId) || isPublicShareAccess);
 
+  const activeNoteIdRef = useRef<string>(activeNoteId || '');
+  activeNoteIdRef.current = activeNoteId || '';
+  const canPublishPresenceRef = useRef<boolean>(canPublishPresence);
+  canPublishPresenceRef.current = canPublishPresence;
+  const userIdentityRef = useRef({
+    userId,
+    userEmail,
+    userName,
+    userPicture,
+    color: myColor
+  });
+  userIdentityRef.current = {
+    userId,
+    userEmail,
+    userName,
+    userPicture,
+    color: myColor
+  };
+
   const updateServerClockOffset = useCallback((serverTime?: number) => {
     if (typeof serverTime === 'number' && Number.isFinite(serverTime) && serverTime > 1_000_000_000_000) {
-      serverClockOffsetRef.current = serverTime - Date.now();
+      const nextOffset = serverTime - Date.now();
+      const prevOffset = serverClockOffsetRef.current;
+      serverClockOffsetRef.current = nextOffset;
+      if (presenceRowCountRef.current > 0 && Math.abs(nextOffset - prevOffset) > 1_500) {
+        setTtlTick(Date.now());
+      }
     }
   }, []);
 
@@ -173,16 +221,20 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
   const flushPresenceToServer = useCallback(async () => {
     const snap = localSnapshotRef.current;
-    if (!canPublishPresence || !snap.noteId || snap.noteId !== activeNoteId) {
+    const currentActiveNoteId = activeNoteIdRef.current;
+    if (!canPublishPresenceRef.current || !snap.noteId || snap.noteId !== currentActiveNoteId) {
       return;
     }
 
+    const targetNoteId = snap.noteId;
     const now = Date.now();
-    const backoffUntil = backoffUntilByNoteRef.current[snap.noteId] || 0;
+    const backoffUntil = backoffUntilByNoteRef.current[targetNoteId] || 0;
     if (now < backoffUntil) return;
 
     lastSentAtRef.current = now;
     lastCursorWindowStartRef.current = 0;
+
+    const identity = userIdentityRef.current;
 
     try {
       const res = await fetch('/api/realtime/presence', {
@@ -191,13 +243,13 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
         cache: 'no-store',
         body: JSON.stringify({
           action: 'upsert',
-          noteId: snap.noteId,
+          noteId: targetNoteId,
           sessionId: mySessionId,
-          userId,
-          userName,
-          userEmail,
-          userPicture,
-          color: myColor,
+          userId: identity.userId,
+          userName: identity.userName,
+          userEmail: identity.userEmail,
+          userPicture: identity.userPicture,
+          color: identity.color,
           blockId: snap.blockId,
           field: snap.field,
           selectionStart: snap.selectionStart,
@@ -210,14 +262,28 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
       });
 
       if (res.status === 404 || res.status === 403) {
-        // Note not yet synced to Neon or unauthorized; back off briefly so we don't spam
-        backoffUntilByNoteRef.current[snap.noteId] = Date.now() + 6_000;
+        // Note not yet synced to Neon or unauthorized; back off briefly and retry once ready
+        const waitMs = res.status === 404 ? 3_500 : 6_000;
+        backoffUntilByNoteRef.current[targetNoteId] = Date.now() + waitMs;
+        if (
+          res.status === 404 &&
+          !backoffRetryTimerRef.current &&
+          localSnapshotRef.current.noteId === targetNoteId &&
+          canPublishPresenceRef.current
+        ) {
+          backoffRetryTimerRef.current = window.setTimeout(() => {
+            backoffRetryTimerRef.current = null;
+            void flushPresenceToServer();
+          }, waitMs + 100);
+        }
         return;
       }
 
       if (res.ok) {
-        delete backoffUntilByNoteRef.current[snap.noteId];
-        activePostedNoteIdRef.current = snap.noteId;
+        delete backoffUntilByNoteRef.current[targetNoteId];
+        if (localSnapshotRef.current.noteId === targetNoteId && canPublishPresenceRef.current) {
+          activePostedNoteIdRef.current = targetNoteId;
+        }
         const data = (await res.json().catch(() => ({}))) as {
           ok?: boolean;
           serverTime?: number;
@@ -229,21 +295,14 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
     } catch {
       // ignore transient network glitches
     }
-  }, [
-    activeNoteId,
-    canPublishPresence,
-    myColor,
-    mySessionId,
-    updateServerClockOffset,
-    userEmail,
-    userId,
-    userName,
-    userPicture
-  ]);
+  }, [mySessionId, updateServerClockOffset]);
+
+  const flushPresenceRef = useRef(flushPresenceToServer);
+  flushPresenceRef.current = flushPresenceToServer;
 
   const scheduleCursorFlush = useCallback(
     (immediate = false) => {
-      if (!canPublishPresence) return;
+      if (!canPublishPresenceRef.current) return;
 
       const now = Date.now();
       if (immediate && now - lastSentAtRef.current >= 65) {
@@ -251,7 +310,7 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
           window.clearTimeout(cursorTimerRef.current);
           cursorTimerRef.current = null;
         }
-        void flushPresenceToServer();
+        void flushPresenceRef.current();
         return;
       }
 
@@ -265,7 +324,7 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
           window.clearTimeout(cursorTimerRef.current);
           cursorTimerRef.current = null;
         }
-        void flushPresenceToServer();
+        void flushPresenceRef.current();
         return;
       }
 
@@ -274,14 +333,14 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
       }
       cursorTimerRef.current = window.setTimeout(() => {
         cursorTimerRef.current = null;
-        void flushPresenceToServer();
+        void flushPresenceRef.current();
       }, 125);
     },
-    [canPublishPresence, flushPresenceToServer]
+    []
   );
 
   const schedulePointerFlush = useCallback(() => {
-    if (!canPublishPresence) return;
+    if (!canPublishPresenceRef.current) return;
     if (pointerTimerRef.current) return;
 
     const sinceLast = Date.now() - lastSentAtRef.current;
@@ -289,22 +348,26 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
     pointerTimerRef.current = window.setTimeout(() => {
       pointerTimerRef.current = null;
       if (!cursorTimerRef.current) {
-        void flushPresenceToServer();
+        void flushPresenceRef.current();
       }
     }, waitMs);
-  }, [canPublishPresence, flushPresenceToServer]);
+  }, []);
 
   const reportLocalCursor = useCallback(
     (report: LocalCursorReport) => {
-      if (!report.noteId || report.noteId !== activeNoteId) return;
+      if (!report.noteId || report.noteId !== activeNoteIdRef.current) return;
 
       const prev = localSnapshotRef.current;
-      const start = Math.max(0, Math.floor(report.selectionStart ?? prev.selectionStart ?? 0));
+      const isSameNote = prev.noteId === report.noteId;
+      const start = Math.max(
+        0,
+        Math.floor(report.selectionStart ?? (isSameNote ? prev.selectionStart : 0))
+      );
       const end = Math.max(start, Math.floor(report.selectionEnd ?? start));
       const isEditing = Boolean(report.isEditing);
 
       const changed =
-        prev.noteId !== report.noteId ||
+        !isSameNote ||
         prev.blockId !== report.blockId ||
         prev.field !== report.field ||
         prev.selectionStart !== start ||
@@ -313,55 +376,78 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
       if (!changed) return;
 
-      const blockChanged = prev.blockId !== report.blockId || prev.noteId !== report.noteId;
+      const blockChanged = !isSameNote || prev.blockId !== report.blockId;
       localSnapshotRef.current = {
-        ...prev,
         noteId: report.noteId,
         blockId: report.blockId,
         field: report.field,
         selectionStart: start,
         selectionEnd: end,
-        isEditing
+        isEditing,
+        pointerBlockId: isSameNote ? prev.pointerBlockId : null,
+        pointerX: isSameNote ? prev.pointerX : null,
+        pointerY: isSameNote ? prev.pointerY : null
       };
 
       scheduleCursorFlush(Boolean(report.immediate || blockChanged));
     },
-    [activeNoteId, scheduleCursorFlush]
+    [scheduleCursorFlush]
   );
 
   const reportLocalPointer = useCallback(
     (report: LocalPointerReport) => {
-      if (!report.noteId || report.noteId !== activeNoteId) return;
+      if (!report.noteId || report.noteId !== activeNoteIdRef.current) return;
 
       const prev = localSnapshotRef.current;
-      const pointerChangedBlock = prev.pointerBlockId !== report.pointerBlockId;
-      const pointerCleared = report.pointerBlockId === null && prev.pointerBlockId !== null;
+      const isSameNote = prev.noteId === report.noteId;
+      const prevPointerBlockId = isSameNote ? prev.pointerBlockId : null;
+      const prevPointerX = isSameNote ? prev.pointerX : null;
+      const prevPointerY = isSameNote ? prev.pointerY : null;
+      const pointerChangedBlock = prevPointerBlockId !== report.pointerBlockId;
+      const pointerCleared = report.pointerBlockId === null && prevPointerBlockId !== null;
       const dist = Math.hypot(
-        (report.pointerX ?? 0) - (prev.pointerX ?? 0),
-        (report.pointerY ?? 0) - (prev.pointerY ?? 0)
+        (report.pointerX ?? 0) - (prevPointerX ?? 0),
+        (report.pointerY ?? 0) - (prevPointerY ?? 0)
       );
 
-      if (!pointerChangedBlock && !pointerCleared && dist < 0.03) {
+      if (isSameNote && !pointerChangedBlock && !pointerCleared && dist < 0.03) {
         return;
       }
 
+      const prevBlockId = isSameNote ? prev.blockId : '';
+      const prevIsEditing = isSameNote ? prev.isEditing : false;
+
       localSnapshotRef.current = {
-        ...prev,
         noteId: report.noteId,
+        field: isSameNote ? prev.field : 'content',
+        selectionStart: isSameNote ? prev.selectionStart : 0,
+        selectionEnd: isSameNote ? prev.selectionEnd : 0,
+        isEditing: prevIsEditing,
         pointerBlockId: report.pointerBlockId,
         pointerX: report.pointerX,
         pointerY: report.pointerY,
         // For viewers who haven't clicked any block yet, also reflect their active hovered block
         blockId:
-          !prev.isEditing && !prev.blockId && report.pointerBlockId
+          !prevIsEditing && !prevBlockId && report.pointerBlockId
             ? report.pointerBlockId
-            : prev.blockId
+            : prevBlockId
       };
 
       schedulePointerFlush();
     },
-    [activeNoteId, schedulePointerFlush]
+    [schedulePointerFlush]
   );
+
+  // Republish seamlessly when user identity details hydrate/change without dropping snapshot or sending leave
+  const identityKey = `${userId}|${userEmail}|${userName}|${userPicture}|${myColor}`;
+  const prevIdentityKeyRef = useRef<string>(identityKey);
+  useEffect(() => {
+    if (prevIdentityKeyRef.current === identityKey) return;
+    prevIdentityKeyRef.current = identityKey;
+    if (canPublishPresenceRef.current && activePostedNoteIdRef.current === activeNoteIdRef.current) {
+      void flushPresenceRef.current();
+    }
+  }, [identityKey]);
 
   // Sync note switch, announce arrival, keepalive heartbeat, and leave cleanup
   useEffect(() => {
@@ -371,26 +457,34 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
       activePostedNoteIdRef.current = '';
     }
 
-    if (cursorTimerRef.current) {
-      window.clearTimeout(cursorTimerRef.current);
-      cursorTimerRef.current = null;
-    }
-    if (pointerTimerRef.current) {
-      window.clearTimeout(pointerTimerRef.current);
-      pointerTimerRef.current = null;
+    if (backoffRetryTimerRef.current) {
+      window.clearTimeout(backoffRetryTimerRef.current);
+      backoffRetryTimerRef.current = null;
     }
 
-    localSnapshotRef.current = {
-      noteId: activeNoteId || '',
-      blockId: '',
-      field: 'content',
-      selectionStart: 0,
-      selectionEnd: 0,
-      isEditing: false,
-      pointerBlockId: null,
-      pointerX: null,
-      pointerY: null
-    };
+    const nextNoteId = activeNoteId || '';
+    if (localSnapshotRef.current.noteId !== nextNoteId) {
+      if (cursorTimerRef.current) {
+        window.clearTimeout(cursorTimerRef.current);
+        cursorTimerRef.current = null;
+      }
+      if (pointerTimerRef.current) {
+        window.clearTimeout(pointerTimerRef.current);
+        pointerTimerRef.current = null;
+      }
+
+      localSnapshotRef.current = {
+        noteId: nextNoteId,
+        blockId: '',
+        field: 'content',
+        selectionStart: 0,
+        selectionEnd: 0,
+        isEditing: false,
+        pointerBlockId: null,
+        pointerX: null,
+        pointerY: null
+      };
+    }
 
     if (!canPublishPresence || !activeNoteId) {
       return;
@@ -398,19 +492,19 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
     // Small initial announcement so collaborators immediately see this session online
     const initialTimer = window.setTimeout(() => {
-      void flushPresenceToServer();
-    }, 350);
+      void flushPresenceRef.current();
+    }, 250);
 
     const heartbeat = window.setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
       if (Date.now() - lastSentAtRef.current >= PRESENCE_HEARTBEAT_MS - 1_500) {
-        void flushPresenceToServer();
+        void flushPresenceRef.current();
       }
     }, PRESENCE_HEARTBEAT_MS);
 
     const handleVisibility = () => {
       if (!document.hidden && Date.now() - lastSentAtRef.current >= 5_000) {
-        void flushPresenceToServer();
+        void flushPresenceRef.current();
       }
     };
 
@@ -438,12 +532,16 @@ export const NotePresenceProvider: React.FC<{ children: React.ReactNode }> = ({ 
         window.clearTimeout(pointerTimerRef.current);
         pointerTimerRef.current = null;
       }
+      if (backoffRetryTimerRef.current) {
+        window.clearTimeout(backoffRetryTimerRef.current);
+        backoffRetryTimerRef.current = null;
+      }
       if (activePostedNoteIdRef.current === activeNoteId) {
         sendLeavePresence(activeNoteId, true);
         activePostedNoteIdRef.current = '';
       }
     };
-  }, [activeNoteId, canPublishPresence, flushPresenceToServer, sendLeavePresence]);
+  }, [activeNoteId, canPublishPresence, sendLeavePresence]);
 
   const remoteCollaborators = useMemo(() => {
     if (!activeNoteId || presenceState.noteId !== activeNoteId) {

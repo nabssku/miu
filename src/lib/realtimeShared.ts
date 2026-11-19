@@ -131,6 +131,25 @@ export function parseBlocksField(raw: unknown): NoteBlock[] {
   return [{ id: `blk-${Date.now()}`, type: 'text', content: '' }];
 }
 
+function parseEpochMs(value: unknown, fallback: number): number {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : fallback;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return fallback;
+    const asNum = Number(trimmed);
+    if (Number.isFinite(asNum)) return asNum;
+    const asDate = Date.parse(trimmed);
+    if (Number.isFinite(asDate)) return asDate;
+  }
+  return fallback;
+}
+
 export function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
   let parsedComments: NoteComment[] = [];
   if (r.comments) {
@@ -145,6 +164,7 @@ export function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
     }
   }
 
+  const now = Date.now();
   return {
     id: r.id,
     ownerId: r.user_id,
@@ -168,8 +188,8 @@ export function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
     blocks: parseBlocksField(r.blocks),
     shareSettings: parseShareSettingsField(r.share_settings),
     comments: parsedComments,
-    createdAt: Number(r.created_at) || Date.now(),
-    updatedAt: Number(r.updated_at) || Date.now()
+    createdAt: parseEpochMs(r.created_at, now),
+    updatedAt: parseEpochMs(r.updated_at, now)
   };
 }
 
@@ -182,6 +202,7 @@ export function parseNeonPresenceRow(r: NeonNotePresenceRow): CollaboratorPresen
     typeof r.pointer_block_id === 'string' && r.pointer_block_id.trim()
       ? r.pointer_block_id.trim()
       : null;
+  const hasValidPointer = Boolean(pointerBlockId && pointerX !== null && pointerY !== null);
 
   return {
     id: r.id,
@@ -197,10 +218,10 @@ export function parseNeonPresenceRow(r: NeonNotePresenceRow): CollaboratorPresen
     selectionStart: start,
     selectionEnd: end,
     isEditing: Boolean(r.is_editing),
-    pointerBlockId: pointerBlockId && pointerX !== null && pointerY !== null ? pointerBlockId : null,
-    pointerX: pointerBlockId ? pointerX : null,
-    pointerY: pointerBlockId ? pointerY : null,
-    updatedAt: Number(r.updated_at) || 0
+    pointerBlockId: hasValidPointer ? pointerBlockId : null,
+    pointerX: hasValidPointer ? pointerX : null,
+    pointerY: hasValidPointer ? pointerY : null,
+    updatedAt: parseEpochMs(r.updated_at, 0)
   };
 }
 
