@@ -166,6 +166,12 @@ export const BlockEditor: React.FC = () => {
     activeCourseId,
     activeNoteId,
     setActiveNoteId,
+    activeBlockTarget,
+    setActiveBlockTarget,
+    updateActiveBlockSelection,
+    lastDictationEvent,
+    activePopover,
+    isLazytypeActive,
     isAIDrawerOpen,
     setIsAIDrawerOpen,
     triggerInlineAIExplain
@@ -214,6 +220,7 @@ export const BlockEditor: React.FC = () => {
   const [linkDrafts, setLinkDrafts] = useState<Record<string, { url: string; caption: string }>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [pendingFocusBlockId, setPendingFocusBlockId] = useState<string | null>(null);
+  const [justDictatedBlockId, setJustDictatedBlockId] = useState<string | null>(null);
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedBlockIds, setSelectedBlockIds] = useState<string[]>([]);
   const [lastSelectedBlockId, setLastSelectedBlockId] = useState<string | null>(null);
@@ -231,6 +238,12 @@ export const BlockEditor: React.FC = () => {
   const [isFileDragOverEditor, setIsFileDragOverEditor] = useState(false);
 
   const blockRefs = useRef<Record<string, HTMLInputElement | HTMLTextAreaElement | null>>({});
+  const toggleBodyRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+  const activeBlockTargetRef = useRef(activeBlockTarget);
+  activeBlockTargetRef.current = activeBlockTarget;
+  const lastHandledFlashAtRef = useRef<number>(0);
+  const lastHandledCaretAtRef = useRef<number>(0);
+  const dictationFlashTimerRef = useRef<number | null>(null);
   const neonDebounceMapRef = useRef<Record<string, number>>({});
 
   const openDocumentNote = (noteId: string) => {
@@ -245,7 +258,58 @@ export const BlockEditor: React.FC = () => {
     setIsSelectMode(false);
     setEditingLinkId(null);
     setEditingVideoId(null);
-  }, [activeNoteId]);
+    if (activeBlockTargetRef.current && activeBlockTargetRef.current.noteId !== activeNoteId) {
+      setActiveBlockTarget(null);
+    }
+  }, [activeNoteId, setActiveBlockTarget]);
+
+  // Brief emerald flash highlight on the block that just received dictation
+  useEffect(() => {
+    if (!lastDictationEvent || !activeNote || lastDictationEvent.noteId !== activeNote.id) {
+      return;
+    }
+    if (lastDictationEvent.at <= lastHandledFlashAtRef.current) return;
+    lastHandledFlashAtRef.current = lastDictationEvent.at;
+
+    setJustDictatedBlockId(lastDictationEvent.blockId);
+    if (dictationFlashTimerRef.current) {
+      window.clearTimeout(dictationFlashTimerRef.current);
+    }
+    const eventBlockId = lastDictationEvent.blockId;
+    dictationFlashTimerRef.current = window.setTimeout(() => {
+      dictationFlashTimerRef.current = null;
+      setJustDictatedBlockId((prev) => (prev === eventBlockId ? null : prev));
+    }, 1600);
+  }, [lastDictationEvent, activeNote?.id]);
+
+  useEffect(() => {
+    return () => {
+      if (dictationFlashTimerRef.current) {
+        window.clearTimeout(dictationFlashTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Restore caret position after Dexie useLiveQuery renders the updated block content
+  useEffect(() => {
+    if (!lastDictationEvent || !activeNote || lastDictationEvent.noteId !== activeNote.id) {
+      return;
+    }
+    if (lastDictationEvent.at <= lastHandledCaretAtRef.current) return;
+    if ((activeNote.updatedAt || 0) < lastDictationEvent.at) return;
+
+    lastHandledCaretAtRef.current = lastDictationEvent.at;
+    const { blockId, field, caret } = lastDictationEvent;
+    const rafId = window.requestAnimationFrame(() => {
+      const el =
+        field === 'toggleBody' ? toggleBodyRefs.current[blockId] : blockRefs.current[blockId];
+      if (el && document.activeElement === el && 'setSelectionRange' in el) {
+        const pos = Math.max(0, Math.min(el.value.length, caret));
+        el.setSelectionRange(pos, pos);
+      }
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [lastDictationEvent, activeNote]);
 
   useEffect(() => {
     if (!pendingFocusBlockId) return;
@@ -263,6 +327,115 @@ export const BlockEditor: React.FC = () => {
     }, 20);
     return () => window.clearTimeout(timer);
   }, [pendingFocusBlockId, activeNote?.blocks]);
+
+  const reportBlockTarget = (
+    blk: NoteBlockBase,
+    field: 'content' | 'toggleBody' = 'content',
+    selectionStart?: number,
+    selectionEnd?: number,
+    source: 'focus' | 'selection' = 'focus'
+  ) => {
+    if (!activeNote) return;
+    const rawContent = field === 'toggleBody' ? blk.toggleBody || '' : blk.content || '';
+    const start =
+      typeof selectionStart === 'number' ? selectionStart : rawContent.length;
+    const end = typeof selectionEnd === 'number' ? selectionEnd : start;
+    setActiveBlockTarget({
+      noteId: activeNote.id,
+      blockId: blk.id,
+      field,
+      blockType: blk.type,
+      preview: rawContent,
+      selectionStart: start,
+      selectionEnd: end,
+      source,
+      updatedAt: Date.now()
+    });
+  };
+
+  const focusPreviewBlock = (blk: NoteBlockBase) => {
+    if (!canEdit) return;
+    reportBlockTarget(
+      blk,
+      'content',
+      blk.content.length,
+      blk.content.length,
+      'focus'
+    );
+    setPendingFocusBlockId(blk.id);
+  };
+
+  const getEditableBlockAttrs = (
+    blk: NoteBlockBase,
+    field: 'content' | 'toggleBody' = 'content'
+  ) => ({
+    'data-miu-note-id': activeNote?.id || '',
+    'data-miu-block-id': blk.id,
+    'data-miu-block-field': field,
+    onFocus: (e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (!canEdit) return;
+      setEditingBlockId(blk.id);
+      const el = e.currentTarget;
+      reportBlockTarget(
+        blk,
+        field,
+        typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length,
+        typeof el.selectionEnd === 'number' ? el.selectionEnd : el.value.length,
+        'focus'
+      );
+    },
+    onClick: (e: React.MouseEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (!activeNote || !canEdit) return;
+      const el = e.currentTarget;
+      updateActiveBlockSelection(
+        activeNote.id,
+        blk.id,
+        field,
+        typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length,
+        typeof el.selectionEnd === 'number' ? el.selectionEnd : el.value.length,
+        el.value
+      );
+    },
+    onKeyUp: (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (!activeNote || !canEdit) return;
+      const el = e.currentTarget;
+      updateActiveBlockSelection(
+        activeNote.id,
+        blk.id,
+        field,
+        typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length,
+        typeof el.selectionEnd === 'number' ? el.selectionEnd : el.value.length,
+        el.value
+      );
+    },
+    onSelect: (e: React.SyntheticEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (!activeNote || !canEdit) return;
+      const el = e.currentTarget;
+      updateActiveBlockSelection(
+        activeNote.id,
+        blk.id,
+        field,
+        typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length,
+        typeof el.selectionEnd === 'number' ? el.selectionEnd : el.value.length,
+        el.value
+      );
+    },
+    onBlur: (e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (activeNote && canEdit) {
+        const el = e.currentTarget;
+        updateActiveBlockSelection(
+          activeNote.id,
+          blk.id,
+          field,
+          typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length,
+          typeof el.selectionEnd === 'number' ? el.selectionEnd : el.value.length,
+          el.value,
+          true
+        );
+      }
+      setEditingBlockId((prev) => (prev === blk.id ? null : prev));
+    }
+  });
 
   // Strict per-account isolation: My Notes vs Notes Shared With Me
   const myNotes = useMemo(
@@ -374,7 +547,8 @@ export const BlockEditor: React.FC = () => {
       window.clearTimeout(prevTimer);
     }
     neonDebounceMapRef.current[noteToSave.id] = window.setTimeout(async () => {
-      const ok = await saveNoteToNeon(targetOwner, noteToSave);
+      const latestToSave = (await db.notes.get(noteToSave.id)) || noteToSave;
+      const ok = await saveNoteToNeon(targetOwner, latestToSave);
       setSyncStatus(ok ? 'synced' : 'idle');
     }, 450);
   };
@@ -1062,8 +1236,18 @@ export const BlockEditor: React.FC = () => {
             content: stripped,
             ...(trig.extra || {})
           }));
+          const updatedTargetBlk = findBlockById(next, id);
           setSlashState(null);
           await updateNoteBlocks(next);
+          if (updatedTargetBlk) {
+            reportBlockTarget(
+              updatedTargetBlk,
+              'content',
+              stripped.length,
+              stripped.length,
+              'focus'
+            );
+          }
           setPendingFocusBlockId(id);
           return;
         }
@@ -1071,16 +1255,16 @@ export const BlockEditor: React.FC = () => {
 
       if (val === '---') {
         const newTextId = createBlockId();
+        const newTextBlk: NoteBlock = { id: newTextId, type: 'text', content: '' };
         let next = mapBlockDeep(freshNote.blocks, id, (b) => ({
           ...b,
           type: 'divider',
           content: ''
         }));
-        next = insertBlocksRelativeDeep(next, id, 'after', [
-          { id: newTextId, type: 'text', content: '' }
-        ]);
+        next = insertBlocksRelativeDeep(next, id, 'after', [newTextBlk]);
         setSlashState(null);
         await updateNoteBlocks(next);
+        reportBlockTarget(newTextBlk, 'content', 0, 0, 'focus');
         setPendingFocusBlockId(newTextId);
         return;
       }
@@ -1132,15 +1316,15 @@ export const BlockEditor: React.FC = () => {
 
     if (type === 'divider') {
       const nextTextId = createBlockId();
+      const nextTextBlk: NoteBlock = { id: nextTextId, type: 'text', content: '' };
       let next = mapBlockDeep(freshNote.blocks, blockId, (b) => ({
         ...b,
         type: 'divider',
         content: ''
       }));
-      next = insertBlocksRelativeDeep(next, blockId, 'after', [
-        { id: nextTextId, type: 'text', content: '' }
-      ]);
+      next = insertBlocksRelativeDeep(next, blockId, 'after', [nextTextBlk]);
       await updateNoteBlocks(next);
+      reportBlockTarget(nextTextBlk, 'content', 0, 0, 'focus');
       setPendingFocusBlockId(nextTextId);
       return;
     }
@@ -1254,11 +1438,24 @@ export const BlockEditor: React.FC = () => {
 
     await updateNoteBlocks(next);
     if (type === 'columns' && firstColFocusId) {
+      const colFocusBlk = findBlockById(next, firstColFocusId);
+      if (colFocusBlk) reportBlockTarget(colFocusBlk, 'content', 0, 0, 'focus');
       setPendingFocusBlockId(firstColFocusId);
     } else if (type === 'video') {
+      const updatedBlock = findBlockById(next, blockId);
+      if (updatedBlock) reportBlockTarget(updatedBlock, 'content', 0, 0, 'focus');
       setEditingVideoId(blockId);
     } else if (type === 'link') {
       const updatedBlock = findBlockById(next, blockId);
+      if (updatedBlock) {
+        reportBlockTarget(
+          updatedBlock,
+          'content',
+          updatedBlock.content.length,
+          updatedBlock.content.length,
+          'focus'
+        );
+      }
       if (!updatedBlock?.content) {
         setEditingLinkId(blockId);
       }
@@ -1270,7 +1467,20 @@ export const BlockEditor: React.FC = () => {
       type !== 'form' &&
       type !== 'metric'
     ) {
+      const updatedBlock = findBlockById(next, blockId);
+      if (updatedBlock) {
+        reportBlockTarget(
+          updatedBlock,
+          'content',
+          updatedBlock.content.length,
+          updatedBlock.content.length,
+          'focus'
+        );
+      }
       setPendingFocusBlockId(blockId);
+    } else {
+      const updatedBlock = findBlockById(next, blockId);
+      if (updatedBlock) reportBlockTarget(updatedBlock, 'content', 0, 0, 'focus');
     }
   };
 
@@ -1294,6 +1504,7 @@ export const BlockEditor: React.FC = () => {
       ? insertBlocksRelativeDeep(freshNote.blocks, afterId, 'after', [newBlock])
       : [...freshNote.blocks, newBlock];
     await updateNoteBlocks(nextBlocks);
+    reportBlockTarget(newBlock, 'content', 0, 0, 'focus');
     if (type === 'link') {
       setEditingLinkId(newId);
     } else if (type === 'video') {
@@ -1307,12 +1518,19 @@ export const BlockEditor: React.FC = () => {
     if (!activeNote || !canEdit) return;
     const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
     const newId = createBlockId();
-    const nextBlocks = appendBlockToColumn(freshNote.blocks, columnsBlockId, columnId, {
+    const newColBlock: NoteBlockBase = {
       id: newId,
       type: 'text',
       content: ''
-    });
+    };
+    const nextBlocks = appendBlockToColumn(
+      freshNote.blocks,
+      columnsBlockId,
+      columnId,
+      newColBlock
+    );
     await updateNoteBlocks(nextBlocks);
+    reportBlockTarget(newColBlock, 'content', 0, 0, 'focus');
     setPendingFocusBlockId(newId);
   };
 
@@ -1345,6 +1563,13 @@ export const BlockEditor: React.FC = () => {
     );
     setMenuBlockId(null);
     await updateNoteBlocks(nextBlocks);
+    reportBlockTarget(
+      cloned,
+      'content',
+      cloned.content.length,
+      cloned.content.length,
+      'focus'
+    );
     setPendingFocusBlockId(cloned.id);
   };
 
@@ -1354,7 +1579,21 @@ export const BlockEditor: React.FC = () => {
     setMenuBlockId(null);
     const { blocks: nextBlocks, prevFocusId } = removeBlockDeep(freshNote.blocks, id);
     await updateNoteBlocks(nextBlocks);
-    if (prevFocusId) setPendingFocusBlockId(prevFocusId);
+    if (prevFocusId) {
+      const prevBlk = findBlockById(nextBlocks, prevFocusId);
+      if (prevBlk) {
+        reportBlockTarget(
+          prevBlk,
+          'content',
+          prevBlk.content.length,
+          prevBlk.content.length,
+          'focus'
+        );
+      }
+      setPendingFocusBlockId(prevFocusId);
+    } else if (activeBlockTargetRef.current?.blockId === id) {
+      setActiveBlockTarget(null);
+    }
   };
 
   const toggleSelectBlock = (blockId: string, shiftKey = false) => {
@@ -1365,16 +1604,58 @@ export const BlockEditor: React.FC = () => {
       if (startIdx !== -1 && endIdx !== -1) {
         const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
         const rangeIds = activeNote.blocks.slice(from, to + 1).map((b) => b.id);
-        setSelectedBlockIds((prev) => Array.from(new Set([...prev, ...rangeIds])));
+        const nextIds = Array.from(new Set([...selectedBlockIds, ...rangeIds]));
+        setSelectedBlockIds(nextIds);
         setLastSelectedBlockId(blockId);
+        const targetBlk = activeNote.blocks[endIdx];
+        if (targetBlk) {
+          reportBlockTarget(
+            targetBlk,
+            'content',
+            targetBlk.content.length,
+            targetBlk.content.length,
+            'selection'
+          );
+        }
         return;
       }
     }
 
-    setSelectedBlockIds((prev) =>
-      prev.includes(blockId) ? prev.filter((id) => id !== blockId) : [...prev, blockId]
-    );
+    const isRemoving = selectedBlockIds.includes(blockId);
+    const nextIds = isRemoving
+      ? selectedBlockIds.filter((id) => id !== blockId)
+      : [...selectedBlockIds, blockId];
+    setSelectedBlockIds(nextIds);
     setLastSelectedBlockId(blockId);
+
+    if (!isRemoving) {
+      const targetBlk = findBlockById(activeNote.blocks, blockId);
+      if (targetBlk) {
+        reportBlockTarget(
+          targetBlk,
+          'content',
+          targetBlk.content.length,
+          targetBlk.content.length,
+          'selection'
+        );
+      }
+    } else if (nextIds.length > 0) {
+      const fallbackBlk = findBlockById(activeNote.blocks, nextIds[nextIds.length - 1]);
+      if (fallbackBlk) {
+        reportBlockTarget(
+          fallbackBlk,
+          'content',
+          fallbackBlk.content.length,
+          fallbackBlk.content.length,
+          'selection'
+        );
+      }
+    } else if (
+      activeBlockTargetRef.current?.blockId === blockId &&
+      activeBlockTargetRef.current?.source === 'selection'
+    ) {
+      setActiveBlockTarget(null);
+    }
   };
 
   const selectBlocksFromHereToEnd = (blockId: string) => {
@@ -1386,14 +1667,38 @@ export const BlockEditor: React.FC = () => {
     setSelectedBlockIds(rangeIds);
     setLastSelectedBlockId(blockId);
     setMenuBlockId(null);
+    const targetBlk = activeNote.blocks[startIdx];
+    if (targetBlk) {
+      reportBlockTarget(
+        targetBlk,
+        'content',
+        targetBlk.content.length,
+        targetBlk.content.length,
+        'selection'
+      );
+    }
   };
 
   const handleSelectAllBlocks = () => {
     if (!activeNote || !canEdit) return;
     if (selectedBlockIds.length === activeNote.blocks.length) {
       setSelectedBlockIds([]);
+      if (activeBlockTargetRef.current?.source === 'selection') {
+        setActiveBlockTarget(null);
+      }
     } else {
-      setSelectedBlockIds(activeNote.blocks.map((b) => b.id));
+      const allIds = activeNote.blocks.map((b) => b.id);
+      setSelectedBlockIds(allIds);
+      const lastBlk = activeNote.blocks[activeNote.blocks.length - 1];
+      if (lastBlk) {
+        reportBlockTarget(
+          lastBlk,
+          'content',
+          lastBlk.content.length,
+          lastBlk.content.length,
+          'selection'
+        );
+      }
     }
   };
 
@@ -1406,6 +1711,12 @@ export const BlockEditor: React.FC = () => {
         ? remaining
         : [{ id: createBlockId(), type: 'text', content: '' }];
     await updateNoteBlocks(nextBlocks);
+    if (
+      activeBlockTargetRef.current &&
+      selectedSet.has(activeBlockTargetRef.current.blockId)
+    ) {
+      setActiveBlockTarget(null);
+    }
     setSelectedBlockIds([]);
     setLastSelectedBlockId(null);
     setIsSelectMode(false);
@@ -2020,6 +2331,10 @@ export const BlockEditor: React.FC = () => {
     const isSlashOpen = slashState?.blockId === block.id;
     const isBlockMenuOpen = menuBlockId === block.id;
     const isBlockSelected = !isInsideColumn && selectedBlockIds.includes(block.id);
+    const isDictationHighlighted = justDictatedBlockId === block.id;
+    const isLiveDictationTarget =
+      (activePopover === 'lazytype' || isLazytypeActive) &&
+      activeBlockTarget?.blockId === block.id;
     const isBeingDragged = draggedBlockId === block.id;
     const isDropBefore =
       dropTargetBlock?.blockId === block.id && dropTargetBlock.position === 'before';
@@ -2029,6 +2344,30 @@ export const BlockEditor: React.FC = () => {
     return (
       <div
         key={block.id}
+        data-miu-block-id={block.id}
+        onMouseDownCapture={(e) => {
+          if (!canEdit || !activeNote) return;
+          const targetEl = e.target as Element | null;
+          if (!targetEl || typeof targetEl.closest !== 'function') return;
+          const nearestBlockEl = targetEl.closest('[data-miu-block-id]');
+          if (nearestBlockEl?.getAttribute('data-miu-block-id') !== block.id) return;
+          if (
+            targetEl.closest('[data-miu-block-gutter]') ||
+            targetEl.closest('[data-miu-block-menu]')
+          ) {
+            return;
+          }
+          if (targetEl.closest('[data-miu-block-field]')) {
+            return;
+          }
+          reportBlockTarget(
+            block,
+            'content',
+            block.content.length,
+            block.content.length,
+            'focus'
+          );
+        }}
         onDragOver={(e) => {
           if (!canEdit || draggedNoteId || draggedBlockId === block.id) return;
           e.preventDefault();
@@ -2067,11 +2406,17 @@ export const BlockEditor: React.FC = () => {
             ? 'group/colblk relative flex items-start gap-1 py-0.5 rounded-lg transition'
             : 'group relative flex items-start gap-1.5 -ml-2 sm:-ml-16 pl-2 sm:pl-16 py-0.5 rounded-lg transition'
         } ${
-          isBlockSelected
-            ? 'bg-rose-500/10 ring-1 ring-rose-400/40'
-            : isSelectMode && !isInsideColumn
-              ? 'hover:bg-subtle/60 cursor-pointer'
-              : ''
+          isDictationHighlighted
+            ? 'bg-emerald-500/10 ring-1 ring-emerald-400/50'
+            : isBlockSelected && isLiveDictationTarget
+              ? 'bg-rose-500/10 ring-2 ring-violet-400/60'
+              : isBlockSelected
+                ? 'bg-rose-500/10 ring-1 ring-rose-400/40'
+                : isLiveDictationTarget
+                  ? 'bg-violet-500/[0.07] ring-1 ring-violet-400/45'
+                  : isSelectMode && !isInsideColumn
+                    ? 'hover:bg-subtle/60 cursor-pointer'
+                    : ''
         } ${isBeingDragged ? 'opacity-40' : ''} ${
           isDropBefore ? 'border-t-2 border-accent-strong' : ''
         } ${isDropAfter ? 'border-b-2 border-accent-strong' : ''}`}
@@ -2080,6 +2425,7 @@ export const BlockEditor: React.FC = () => {
         {canEdit &&
           (isInsideColumn ? (
             <div
+              data-miu-block-gutter="true"
               className={`absolute right-1 top-0.5 z-20 flex items-center gap-0.5 rounded-md bg-surface/95 backdrop-blur-sm border border-border-subtle shadow-sm px-0.5 py-0.5 transition no-print ${
                 isBlockMenuOpen
                   ? 'opacity-100'
@@ -2118,6 +2464,7 @@ export const BlockEditor: React.FC = () => {
             </div>
           ) : (
             <div
+              data-miu-block-gutter="true"
               className={`sm:absolute sm:left-1 top-1 flex items-center gap-0.5 transition no-print shrink-0 ${
                 isBlockMenuOpen || isSelectMode || isBlockSelected
                   ? 'opacity-100'
@@ -2174,6 +2521,7 @@ export const BlockEditor: React.FC = () => {
         {/* Block Context Menu */}
         {isBlockMenuOpen && (
           <div
+            data-miu-block-menu="true"
             className={`absolute ${
               isInsideColumn ? 'right-0 top-7' : 'left-0 top-8'
             } z-30 w-52 miu-card shadow-xl p-1.5 space-y-1 text-xs no-print`}
@@ -2313,10 +2661,7 @@ export const BlockEditor: React.FC = () => {
                   blockRefs.current[block.id] = el;
                 }}
                 value={block.content}
-                onFocus={() => setEditingBlockId(block.id)}
-                onBlur={() =>
-                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                }
+                {...getEditableBlockAttrs(block, 'content')}
                 onChange={(e) =>
                   void handleBlockChange(block.id, { content: e.target.value })
                 }
@@ -2326,9 +2671,7 @@ export const BlockEditor: React.FC = () => {
               />
             ) : (
               <div
-                onClick={() => {
-                  if (canEdit) setPendingFocusBlockId(block.id);
-                }}
+                onClick={() => focusPreviewBlock(block)}
                 className={`w-full text-2xl font-bold text-text-primary pt-3 pb-1 break-words ${
                   canEdit ? 'cursor-text' : 'cursor-default'
                 }`}
@@ -2344,10 +2687,7 @@ export const BlockEditor: React.FC = () => {
                   blockRefs.current[block.id] = el;
                 }}
                 value={block.content}
-                onFocus={() => setEditingBlockId(block.id)}
-                onBlur={() =>
-                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                }
+                {...getEditableBlockAttrs(block, 'content')}
                 onChange={(e) =>
                   void handleBlockChange(block.id, { content: e.target.value })
                 }
@@ -2357,9 +2697,7 @@ export const BlockEditor: React.FC = () => {
               />
             ) : (
               <div
-                onClick={() => {
-                  if (canEdit) setPendingFocusBlockId(block.id);
-                }}
+                onClick={() => focusPreviewBlock(block)}
                 className={`w-full text-xl font-bold text-text-primary pt-2 pb-0.5 break-words ${
                   canEdit ? 'cursor-text' : 'cursor-default'
                 }`}
@@ -2375,10 +2713,7 @@ export const BlockEditor: React.FC = () => {
                   blockRefs.current[block.id] = el;
                 }}
                 value={block.content}
-                onFocus={() => setEditingBlockId(block.id)}
-                onBlur={() =>
-                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                }
+                {...getEditableBlockAttrs(block, 'content')}
                 onChange={(e) =>
                   void handleBlockChange(block.id, { content: e.target.value })
                 }
@@ -2388,9 +2723,7 @@ export const BlockEditor: React.FC = () => {
               />
             ) : (
               <div
-                onClick={() => {
-                  if (canEdit) setPendingFocusBlockId(block.id);
-                }}
+                onClick={() => focusPreviewBlock(block)}
                 className={`w-full text-base font-bold text-text-primary pt-1.5 pb-0.5 break-words ${
                   canEdit ? 'cursor-text' : 'cursor-default'
                 }`}
@@ -2416,10 +2749,7 @@ export const BlockEditor: React.FC = () => {
                   )
                 )}
                 value={block.content}
-                onFocus={() => setEditingBlockId(block.id)}
-                onBlur={() =>
-                  setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                }
+                {...getEditableBlockAttrs(block, 'content')}
                 onChange={(e) =>
                   void handleBlockChange(block.id, { content: e.target.value })
                 }
@@ -2429,9 +2759,7 @@ export const BlockEditor: React.FC = () => {
               />
             ) : (
               <div
-                onClick={() => {
-                  if (canEdit) setPendingFocusBlockId(block.id);
-                }}
+                onClick={() => focusPreviewBlock(block)}
                 className={`w-full text-[15px] sm:text-base leading-[1.68] text-text-primary py-0.5 whitespace-pre-wrap break-words ${
                   canEdit ? 'cursor-text' : 'cursor-default'
                 }`}
@@ -2456,10 +2784,7 @@ export const BlockEditor: React.FC = () => {
                     )
                   )}
                   value={block.content}
-                  onFocus={() => setEditingBlockId(block.id)}
-                  onBlur={() =>
-                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                  }
+                  {...getEditableBlockAttrs(block, 'content')}
                   onChange={(e) =>
                     void handleBlockChange(block.id, { content: e.target.value })
                   }
@@ -2469,9 +2794,7 @@ export const BlockEditor: React.FC = () => {
                 />
               ) : (
                 <div
-                  onClick={() => {
-                    if (canEdit) setPendingFocusBlockId(block.id);
-                  }}
+                  onClick={() => focusPreviewBlock(block)}
                   className={`flex-1 text-[15px] sm:text-base leading-[1.6] text-text-primary break-words ${
                     canEdit ? 'cursor-text' : 'cursor-default'
                   }`}
@@ -2500,10 +2823,7 @@ export const BlockEditor: React.FC = () => {
                     )
                   )}
                   value={block.content}
-                  onFocus={() => setEditingBlockId(block.id)}
-                  onBlur={() =>
-                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                  }
+                  {...getEditableBlockAttrs(block, 'content')}
                   onChange={(e) =>
                     void handleBlockChange(block.id, { content: e.target.value })
                   }
@@ -2513,9 +2833,7 @@ export const BlockEditor: React.FC = () => {
                 />
               ) : (
                 <div
-                  onClick={() => {
-                    if (canEdit) setPendingFocusBlockId(block.id);
-                  }}
+                  onClick={() => focusPreviewBlock(block)}
                   className={`flex-1 text-[15px] sm:text-base leading-[1.6] text-text-primary break-words ${
                     canEdit ? 'cursor-text' : 'cursor-default'
                   }`}
@@ -2549,10 +2867,7 @@ export const BlockEditor: React.FC = () => {
                   }}
                   rows={Math.max(1, Math.ceil(block.content.length / (isInsideColumn ? 26 : 68)))}
                   value={block.content}
-                  onFocus={() => setEditingBlockId(block.id)}
-                  onBlur={() =>
-                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                  }
+                  {...getEditableBlockAttrs(block, 'content')}
                   onChange={(e) =>
                     void handleBlockChange(block.id, { content: e.target.value })
                   }
@@ -2566,9 +2881,7 @@ export const BlockEditor: React.FC = () => {
                 />
               ) : (
                 <div
-                  onClick={() => {
-                    if (canEdit) setPendingFocusBlockId(block.id);
-                  }}
+                  onClick={() => focusPreviewBlock(block)}
                   className={`flex-1 text-[15px] sm:text-base leading-[1.6] break-words ${
                     canEdit ? 'cursor-text' : 'cursor-default'
                   } ${
@@ -2609,6 +2922,7 @@ export const BlockEditor: React.FC = () => {
                     }}
                     type="text"
                     value={block.content}
+                    {...getEditableBlockAttrs(block, 'content')}
                     onChange={(e) =>
                       void handleBlockChange(block.id, { content: e.target.value })
                     }
@@ -2718,6 +3032,7 @@ export const BlockEditor: React.FC = () => {
                     }}
                     readOnly={!canEdit}
                     value={block.content}
+                    {...getEditableBlockAttrs(block, 'content')}
                     onChange={(e) =>
                       void handleBlockChange(block.id, { content: e.target.value })
                     }
@@ -2729,9 +3044,13 @@ export const BlockEditor: React.FC = () => {
                 {isOpen && (
                   <div className="pl-6 border-l border-border-subtle ml-2">
                     <textarea
+                      ref={(el) => {
+                        toggleBodyRefs.current[block.id] = el;
+                      }}
                       readOnly={!canEdit}
                       rows={Math.max(2, (block.toggleBody || '').split('\n').length)}
                       value={block.toggleBody || ''}
+                      {...getEditableBlockAttrs(block, 'toggleBody')}
                       onChange={(e) =>
                         void handleBlockChange(block.id, {
                           toggleBody: e.target.value
@@ -2770,10 +3089,7 @@ export const BlockEditor: React.FC = () => {
                   }}
                   rows={Math.max(2, Math.ceil(block.content.length / 72))}
                   value={block.content}
-                  onFocus={() => setEditingBlockId(block.id)}
-                  onBlur={() =>
-                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                  }
+                  {...getEditableBlockAttrs(block, 'content')}
                   onChange={(e) =>
                     void handleBlockChange(block.id, { content: e.target.value })
                   }
@@ -2782,9 +3098,7 @@ export const BlockEditor: React.FC = () => {
                 />
               ) : (
                 <div
-                  onClick={() => {
-                    if (canEdit) setPendingFocusBlockId(block.id);
-                  }}
+                  onClick={() => focusPreviewBlock(block)}
                   className={`flex-1 text-sm leading-relaxed text-text-primary whitespace-pre-wrap break-words ${
                     canEdit ? 'cursor-text' : 'cursor-default'
                   }`}
@@ -2804,10 +3118,7 @@ export const BlockEditor: React.FC = () => {
                   }}
                   rows={Math.max(1, Math.ceil(block.content.length / 75))}
                   value={block.content}
-                  onFocus={() => setEditingBlockId(block.id)}
-                  onBlur={() =>
-                    setEditingBlockId((prev) => (prev === block.id ? null : prev))
-                  }
+                  {...getEditableBlockAttrs(block, 'content')}
                   onChange={(e) =>
                     void handleBlockChange(block.id, { content: e.target.value })
                   }
@@ -2817,9 +3128,7 @@ export const BlockEditor: React.FC = () => {
                 />
               ) : (
                 <div
-                  onClick={() => {
-                    if (canEdit) setPendingFocusBlockId(block.id);
-                  }}
+                  onClick={() => focusPreviewBlock(block)}
                   className={`w-full text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
                     canEdit ? 'cursor-text' : 'cursor-default'
                   }`}
@@ -2907,6 +3216,7 @@ export const BlockEditor: React.FC = () => {
                 readOnly={!canEdit}
                 rows={Math.max(3, block.content.split('\n').length)}
                 value={block.content}
+                {...getEditableBlockAttrs(block, 'content')}
                 onChange={(e) =>
                   void handleBlockChange(block.id, { content: e.target.value })
                 }
@@ -2921,7 +3231,18 @@ export const BlockEditor: React.FC = () => {
               <div
                 onClick={() => {
                   if (canEdit) {
-                    setEditingMathId(editingMathId === block.id ? null : block.id);
+                    const opening = editingMathId !== block.id;
+                    setEditingMathId(opening ? block.id : null);
+                    reportBlockTarget(
+                      block,
+                      'content',
+                      block.content.length,
+                      block.content.length,
+                      'focus'
+                    );
+                    if (opening) {
+                      setPendingFocusBlockId(block.id);
+                    }
                   }
                 }}
                 className={`${canEdit ? 'cursor-pointer' : ''} text-text-primary`}
@@ -2934,6 +3255,7 @@ export const BlockEditor: React.FC = () => {
                     blockRefs.current[block.id] = el;
                   }}
                   value={block.content}
+                  {...getEditableBlockAttrs(block, 'content')}
                   onChange={(e) =>
                     void handleBlockChange(block.id, { content: e.target.value })
                   }

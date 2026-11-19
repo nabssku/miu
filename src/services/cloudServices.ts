@@ -1,4 +1,5 @@
 import type { DatabaseRow, NoteComment, NoteRecord } from '../types/miu';
+import { normalizeRealtimeWsUrl } from '../lib/realtimeShared';
 
 export interface GoogleUser {
   id: string;
@@ -11,6 +12,8 @@ export interface GoogleUser {
 
 export interface CloudStatus {
   dbReady: boolean;
+  realtimeReady: boolean;
+  realtimeUrl: string;
   mediaReady: boolean;
   aiReady: boolean;
   aiModel: string;
@@ -29,8 +32,14 @@ const STORAGE_KEYS = {
   USER: 'miu_google_user_v1'
 };
 
+const INITIAL_PUBLIC_REALTIME_URL = normalizeRealtimeWsUrl(
+  process.env.NEXT_PUBLIC_NEON_REALTIME_URL || ''
+);
+
 let cachedStatus: CloudStatus = {
   dbReady: true,
+  realtimeReady: Boolean(INITIAL_PUBLIC_REALTIME_URL),
+  realtimeUrl: INITIAL_PUBLIC_REALTIME_URL,
   mediaReady: true,
   aiReady: true,
   aiModel: 'qwen/qwen3.8-27b',
@@ -52,8 +61,12 @@ export async function syncCloudStatus(force = false): Promise<CloudStatus> {
     .then(async (res) => {
       if (!res.ok) throw new Error('Status unavailable');
       const data = (await res.json()) as Partial<CloudStatus>;
+      const resolvedRealtimeUrl =
+        normalizeRealtimeWsUrl(String(data.realtimeUrl || '')) || INITIAL_PUBLIC_REALTIME_URL;
       cachedStatus = {
         dbReady: Boolean(data.dbReady),
+        realtimeReady: Boolean(data.realtimeReady && resolvedRealtimeUrl),
+        realtimeUrl: resolvedRealtimeUrl,
         mediaReady: Boolean(data.mediaReady),
         aiReady: Boolean(data.aiReady),
         aiModel: data.aiModel || 'qwen/qwen3.8-27b',

@@ -42,11 +42,14 @@ import {
   type YouTubePlayerController
 } from '../services/spotifyService';
 import type {
+  ActiveBlockTarget,
   ActiveTrack,
   BlockType,
+  DictationInsertResult,
   HotkeyConfig,
   IslandAnchorPosition,
   IslandPopoverType,
+  LastDictationEvent,
   LyricLine,
   MascotMood,
   NoiseChannelId,
@@ -55,6 +58,11 @@ import type {
   SpotifySourceMode,
   ThemeMode
 } from '../types/miu';
+import { findBlockLocation } from '../utils/blockTreeHelper';
+import {
+  applyDictationToBlocks,
+  resolveNoteEffectivePermission
+} from '../utils/dictationHelper';
 
 export type PomodoroPhase = 'focus' | 'short-break' | 'long-break';
 
@@ -91,9 +99,21 @@ interface MiuContextValue {
   setActiveCourseId: (id: string) => void;
   activeNoteId: string;
   setActiveNoteId: (id: string) => void;
+  activeBlockTarget: ActiveBlockTarget | null;
+  setActiveBlockTarget: (target: ActiveBlockTarget | null) => void;
+  updateActiveBlockSelection: (
+    noteId: string,
+    blockId: string,
+    field: 'content' | 'toggleBody',
+    selectionStart?: number,
+    selectionEnd?: number,
+    preview?: string,
+    onlyIfCurrent?: boolean
+  ) => void;
+  lastDictationEvent: LastDictationEvent | null;
   insertBlockIntoActiveNote: (block: Omit<NoteBlock, 'id'>) => Promise<void>;
   insertBlocksIntoActiveNote: (blocks: Array<Omit<NoteBlock, 'id'>>) => Promise<void>;
-  appendDictationToActiveNote: (text: string) => Promise<void>;
+  appendDictationToActiveNote: (text: string) => Promise<DictationInsertResult>;
 
   // Right Drawer & Overlays
   isAIDrawerOpen: boolean;
@@ -220,6 +240,11 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeSemesterId, setActiveSemesterId] = useState('sem-1');
   const [activeCourseId, setActiveCourseId] = useState('course-default');
   const [activeNoteId, setActiveNoteId] = useState('note-default');
+  const activeNoteIdRef = useRef(activeNoteId);
+  activeNoteIdRef.current = activeNoteId;
+  const [activeBlockTarget, setActiveBlockTargetState] = useState<ActiveBlockTarget | null>(null);
+  const activeBlockTargetRef = useRef<ActiveBlockTarget | null>(null);
+  const [lastDictationEvent, setLastDictationEvent] = useState<LastDictationEvent | null>(null);
 
   // Drawer & overlays
   const [isAIDrawerOpen, setIsAIDrawerOpen] = useState(false);
@@ -464,21 +489,141 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
+  const setActiveBlockTarget = useCallback((target: ActiveBlockTarget | null) => {
+    activeBlockTargetRef.current = target;
+    setActiveBlockTargetState((prev) => {
+      if (!target && !prev) return prev;
+      if (
+        prev &&
+        target &&
+        prev.noteId === target.noteId &&
+        prev.blockId === target.blockId &&
+        prev.field === target.field &&
+        prev.blockType === target.blockType &&
+        prev.source === target.source &&
+        prev.preview === target.preview
+      ) {
+        return prev;
+      }
+      return target;
+    });
+  }, []);
+
+  const updateActiveBlockSelection = useCallback(
+    (
+      noteId: string,
+      blockId: string,
+      field: 'content' | 'toggleBody',
+      selectionStart?: number,
+      selectionEnd?: number,
+      preview?: string,
+      onlyIfCurrent?: boolean
+    ) => {
+      const prev = activeBlockTargetRef.current;
+      if (
+        prev &&
+        prev.noteId === noteId &&
+        prev.blockId === blockId &&
+        (prev.field || 'content') === field
+      ) {
+        activeBlockTargetRef.current = {
+          ...prev,
+          selectionStart,
+          selectionEnd,
+          ...(preview !== undefined ? { preview } : {}),
+          updatedAt: Date.now()
+        };
+      } else if (!onlyIfCurrent) {
+        setActiveBlockTarget({
+          noteId,
+          blockId,
+          field,
+          preview,
+          selectionStart,
+          selectionEnd,
+          source: 'focus',
+          updatedAt: Date.now()
+        });
+      }
+    },
+    [setActiveBlockTarget]
+  );
+
+  const readFocusedBlockTargetFromDom = useCallback((): ActiveBlockTarget | null => {
+    if (typeof document === 'undefined') return null;
+    const el = document.activeElement;
+    if (
+      el &&
+      (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) &&
+      el.dataset.miuBlockId
+    ) {
+      const blockId = el.dataset.miuBlockId;
+      const field =
+        el.dataset.miuBlockField === 'toggleBody' ? 'toggleBody' : 'content';
+      const prevTarget = activeBlockTargetRef.current;
+      return {
+        noteId: el.dataset.miuNoteId || prevTarget?.noteId || activeNoteIdRef.current,
+        blockId,
+        field,
+        blockType: prevTarget?.blockId === blockId ? prevTarget.blockType : undefined,
+        preview: el.value,
+        selectionStart:
+          typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length,
+        selectionEnd:
+          typeof el.selectionEnd === 'number' ? el.selectionEnd : el.value.length,
+        source: 'focus',
+        updatedAt: Date.now()
+      };
+    }
+    return null;
+  }, []);
+
+  // Clear stale block target when active note changes
+  useEffect(() => {
+    if (activeBlockTargetRef.current && activeBlockTargetRef.current.noteId !== activeNoteId) {
+      setActiveBlockTarget(null);
+    }
+  }, [activeNoteId, setActiveBlockTarget]);
+
+  const isLazytypeActiveRef = useRef(isLazytypeActive);
+  isLazytypeActiveRef.current = isLazytypeActive;
+  const lazytypeHotkeyModeRef = useRef<'alt-space' | 'ctrl-shift-v' | null>(null);
+  useEffect(() => {
+    if (!isLazytypeActive) {
+      lazytypeHotkeyModeRef.current = null;
+    }
+  }, [isLazytypeActive]);
+
   // Global Hotkeys: Cmd/Ctrl+K, Alt+Space (Lazytype Push-to-Talk), Alt+S (Lazyshot)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setActivePopover((prev) => (prev === 'dock' ? 'none' : 'dock'));
-      } else if ((e.altKey && e.code === 'Space') || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'v')) {
+      } else if (e.altKey && e.code === 'Space') {
         e.preventDefault();
         if (!e.repeat) {
+          const domTarget = readFocusedBlockTargetFromDom();
+          if (domTarget) setActiveBlockTarget(domTarget);
+          lazytypeHotkeyModeRef.current = 'alt-space';
           setIsLazytypeActive(true);
+        }
+      } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'v') {
+        e.preventDefault();
+        if (!e.repeat) {
+          const domTarget = readFocusedBlockTargetFromDom();
+          if (domTarget) setActiveBlockTarget(domTarget);
+          setIsLazytypeActive((prev) => {
+            const next = !prev;
+            lazytypeHotkeyModeRef.current = next ? 'ctrl-shift-v' : null;
+            return next;
+          });
         }
       } else if (e.altKey && e.key.toLowerCase() === 's') {
         e.preventDefault();
         setIsLazyshotOpen((prev) => !prev);
       } else if (e.key === 'Escape') {
+        lazytypeHotkeyModeRef.current = null;
         setActivePopover('none');
         setIsLazyshotOpen(false);
         setIsLazytypeActive(false);
@@ -486,7 +631,13 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && isLazytypeActive) {
+      if (
+        lazytypeHotkeyModeRef.current === 'alt-space' &&
+        (e.code === 'Space' || e.key === 'Alt') &&
+        isLazytypeActiveRef.current
+      ) {
+        e.preventDefault();
+        lazytypeHotkeyModeRef.current = null;
         setIsLazytypeActive(false);
       }
     };
@@ -497,7 +648,7 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [isLazytypeActive]);
+  }, [readFocusedBlockTargetFromDom, setActiveBlockTarget]);
 
   // Pomodoro Web Worker lifecycle
   useEffect(() => {
@@ -1431,6 +1582,7 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         await saveNoteToNeon(user.id, freshNote);
         setActiveNoteId(freshNote.id);
       } else {
+        let migratedFirstId = '';
         for (const n of localNotes) {
           const noteToSave = {
             ...n,
@@ -1439,8 +1591,12 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ownerEmail: user.email,
             ownerName: user.name
           };
+          if (!migratedFirstId) migratedFirstId = noteToSave.id;
           await db.notes.put(noteToSave);
           await saveNoteToNeon(user.id, noteToSave);
+        }
+        if (migratedFirstId && !sharedIdFromUrl) {
+          setActiveNoteId(migratedFirstId);
         }
       }
 
@@ -1481,21 +1637,14 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const insertBlocksIntoActiveNote = useCallback(
     async (blocksData: Array<Omit<NoteBlock, 'id'>>) => {
       if (blocksData.length === 0) return;
-      const note = await db.notes.get(activeNoteId);
+      const allNotes = await db.notes.toArray();
+      allNotes.sort((a, b) => a.createdAt - b.createdAt);
+      const note = allNotes.find((n) => n.id === activeNoteId) || allNotes[0];
       if (!note) return;
 
-      // Enforce edit permission when note belongs to another owner
-      if (note.ownerId && (!currentUser || note.ownerId !== currentUser.id)) {
-        const collabRole = currentUser
-          ? note.shareSettings?.collaborators?.find(
-              (c) => c.email.toLowerCase() === currentUser.email.toLowerCase()
-            )?.role
-          : undefined;
-        const effective =
-          collabRole || (note.shareSettings?.isPublicLink ? note.shareSettings.publicRole : 'view');
-        if (effective !== 'edit') {
-          return;
-        }
+      const perm = resolveNoteEffectivePermission(note, allNotes, currentUser);
+      if (perm !== 'owner' && perm !== 'edit') {
+        return;
       }
 
       const now = Date.now();
@@ -1513,7 +1662,7 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           : note.blocks;
 
       const updatedBlocks = [...baseBlocks, ...newBlocks];
-      await db.notes.update(activeNoteId, {
+      await db.notes.update(note.id, {
         blocks: updatedBlocks,
         updatedAt: now
       });
@@ -1538,10 +1687,93 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 
   const appendDictationToActiveNote = useCallback(
-    async (text: string) => {
-      await insertBlockIntoActiveNote({ type: 'text', content: text });
+    async (text: string): Promise<DictationInsertResult> => {
+      const clean = text.trim();
+      if (!clean) {
+        return { ok: false, error: 'Teks dikte kosong.' };
+      }
+
+      const domTarget = readFocusedBlockTargetFromDom();
+      const candidateTarget = domTarget || activeBlockTargetRef.current;
+
+      const allNotes = await db.notes.toArray();
+      allNotes.sort((a, b) => a.createdAt - b.createdAt);
+
+      let note =
+        (candidateTarget?.noteId
+          ? allNotes.find((n) => n.id === candidateTarget.noteId)
+          : undefined) ||
+        allNotes.find((n) => n.id === activeNoteIdRef.current) ||
+        allNotes[0];
+
+      if (!note) {
+        return { ok: false, error: 'Catatan aktif tidak ditemukan.' };
+      }
+
+      const perm = resolveNoteEffectivePermission(note, allNotes, currentUser);
+      if (perm !== 'owner' && perm !== 'edit') {
+        return {
+          ok: false,
+          error: 'Catatan ini hanya dapat dilihat/dikomentari dan tidak bisa menerima dikte.'
+        };
+      }
+
+      const applicableTarget =
+        candidateTarget && candidateTarget.noteId === note.id ? candidateTarget : null;
+
+      const applied = applyDictationToBlocks(note.blocks, clean, applicableTarget);
+      const now = Date.now();
+
+      await db.notes.update(note.id, {
+        blocks: applied.blocks,
+        updatedAt: now
+      });
+
+      const updatedLoc = findBlockLocation(applied.blocks, applied.targetBlockId);
+      const updatedPreview =
+        applied.field === 'toggleBody'
+          ? updatedLoc?.block.toggleBody || ''
+          : updatedLoc?.block.content || '';
+
+      setActiveBlockTarget({
+        noteId: note.id,
+        blockId: applied.targetBlockId,
+        field: applied.field,
+        blockType: updatedLoc?.block.type,
+        preview: updatedPreview,
+        selectionStart: applied.caret,
+        selectionEnd: applied.caret,
+        source: applicableTarget?.source || 'focus',
+        updatedAt: now
+      });
+
+      setLastDictationEvent({
+        noteId: note.id,
+        blockId: applied.targetBlockId,
+        field: applied.field,
+        caret: applied.caret,
+        at: now
+      });
+
+      const targetOwnerId = note.ownerId || currentUser?.id;
+      if (targetOwnerId) {
+        void saveNoteToNeon(targetOwnerId, {
+          ...note,
+          blocks: applied.blocks,
+          updatedAt: now
+        });
+      }
+
+      return {
+        ok: true,
+        noteId: note.id,
+        targetBlockId: applied.targetBlockId,
+        field: applied.field,
+        caret: applied.caret,
+        mode: applied.mode
+      };
     },
-    [insertBlockIntoActiveNote]
+    [currentUser, readFocusedBlockTargetFromDom, setActiveBlockTarget]
   );
 
   const triggerInlineAIExplain = useCallback(
@@ -1651,6 +1883,10 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveCourseId,
     activeNoteId,
     setActiveNoteId,
+    activeBlockTarget,
+    setActiveBlockTarget,
+    updateActiveBlockSelection,
+    lastDictationEvent,
     insertBlockIntoActiveNote,
     insertBlocksIntoActiveNote,
     appendDictationToActiveNote,

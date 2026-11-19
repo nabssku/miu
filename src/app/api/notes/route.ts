@@ -104,7 +104,7 @@ export async function POST(req: NextRequest) {
         body.userEmail || ''
       );
       return NextResponse.json(
-        { ok: res.ok, error: res.error },
+        { ok: res.ok, txid: res.txid, error: res.error },
         { status: res.ok ? 200 : res.status }
       );
     }
@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
 
     const res = await saveServerNote(body.userId, body.userEmail || '', body.note);
     return NextResponse.json(
-      { ok: res.ok, error: res.error },
+      { ok: res.ok, txid: res.txid, error: res.error },
       { status: res.ok ? 200 : res.status }
     );
   } catch (err) {

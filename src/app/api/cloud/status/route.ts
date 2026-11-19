@@ -6,12 +6,16 @@ import {
   isServerNeonConfigured
 } from '@/lib/serverCloud';
 
+import { getPublicRealtimeUrl, isServerRealtimeConfigured } from '@/lib/realtime';
+
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
   const env = getServerCloudEnv();
   return NextResponse.json({
     dbReady: isServerNeonConfigured(),
+    realtimeReady: isServerRealtimeConfigured(),
+    realtimeUrl: getPublicRealtimeUrl(),
     mediaReady: isServerCloudinaryConfigured(),
     aiReady: Boolean(env.groqApiKey),
     aiModel: env.groqModel,

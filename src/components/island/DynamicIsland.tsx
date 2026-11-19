@@ -157,6 +157,14 @@ export const DynamicIsland: React.FC = () => {
     const handlePointerDown = (e: MouseEvent | TouchEvent) => {
       const target = e.target as Node | null;
       if (containerRef.current && target && !containerRef.current.contains(target)) {
+        const targetEl = target as Element | null;
+        if (
+          (activePopover === 'lazytype' || isLazytypeActive) &&
+          typeof targetEl?.closest === 'function' &&
+          targetEl.closest('[data-miu-block-id]')
+        ) {
+          return;
+        }
         setActivePopover('none');
         if (isLazytypeActive) setIsLazytypeActive(false);
         setIsHovered(false);

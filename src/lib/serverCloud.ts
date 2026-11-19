@@ -9,6 +9,13 @@ import type {
 } from '../types/miu';
 import { findBlockById, mapBlockDeep } from '../utils/blockTreeHelper';
 import { sanitizeFormSubmission } from '../utils/databaseHelper';
+import {
+  parseBlocksField,
+  parseNeonNoteRow,
+  parseShareSettingsField as parseShareSettings,
+  type LiveItemRow,
+  type NeonNoteRow
+} from './realtimeShared';
 
 export interface ServerGoogleUser {
   id: string;
@@ -38,6 +45,7 @@ export function getServerCloudEnv(): ServerCloudEnv {
   return {
     neonDatabaseUrl: (
       process.env.NEON_DATABASE_URL ||
+      process.env.DATABASE_URL ||
       process.env.VITE_NEON_DATABASE_URL ||
       ''
     ).trim(),
@@ -240,6 +248,18 @@ export async function ensureServerNeonSchema(): Promise<boolean> {
     await executeServerNeonQuery(`
       CREATE INDEX IF NOT EXISTS idx_miu_notes_user_id ON miu_notes(user_id);
     `);
+    await executeServerNeonQuery(`
+      CREATE TABLE IF NOT EXISTS miu_live_items (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL DEFAULT 'default',
+        content TEXT NOT NULL,
+        author TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await executeServerNeonQuery(`
+      CREATE INDEX IF NOT EXISTS idx_miu_live_items_channel_created ON miu_live_items(channel, created_at DESC, id DESC);
+    `);
 
     schemaInitializedForUrl = neonDatabaseUrl;
     return true;
@@ -247,6 +267,60 @@ export async function ensureServerNeonSchema(): Promise<boolean> {
     console.warn('[Server Cloud] Gagal inisialisasi skema:', err);
     return false;
   }
+}
+
+export async function listServerLiveItems(channel = 'default'): Promise<LiveItemRow[] | null> {
+  if (!isServerNeonConfigured()) return null;
+  await ensureServerNeonSchema();
+  const { rows } = await executeServerNeonQuery<LiveItemRow>(
+    `SELECT id, channel, content, author, created_at
+     FROM miu_live_items
+     WHERE channel = $1
+     ORDER BY created_at DESC, id DESC
+     LIMIT 50`,
+    [channel]
+  );
+  return rows;
+}
+
+export async function insertServerLiveItem(params: {
+  id: string;
+  channel: string;
+  content: string;
+  author: string;
+}): Promise<{
+  ok: boolean;
+  status: number;
+  kind?: 'committed' | 'unchanged';
+  txid?: string;
+  item?: LiveItemRow;
+  error?: string;
+}> {
+  if (!isServerNeonConfigured()) {
+    return { ok: false, status: 503, error: 'Database Postgres belum dikonfigurasi pada server.' };
+  }
+  await ensureServerNeonSchema();
+
+  const { rows } = await executeServerNeonQuery<LiveItemRow & { txid: string }>(
+    `INSERT INTO miu_live_items (id, channel, content, author)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (id) DO NOTHING
+     RETURNING id, channel, content, author, created_at, pg_current_xact_id()::text AS txid`,
+    [params.id, params.channel, params.content, params.author]
+  );
+
+  if (rows.length === 0) {
+    return { ok: true, status: 200, kind: 'unchanged' };
+  }
+
+  const { txid, ...item } = rows[0];
+  return {
+    ok: true,
+    status: 200,
+    kind: 'committed',
+    txid,
+    item
+  };
 }
 
 export async function upsertServerUser(user: ServerGoogleUser): Promise<boolean> {
@@ -261,105 +335,6 @@ export async function upsertServerUser(user: ServerGoogleUser): Promise<boolean>
     [user.id, user.email, user.name, user.picture || '', Number(user.loginAt) || Date.now()]
   );
   return true;
-}
-
-interface NeonNoteRow {
-  id: string;
-  user_id: string;
-  owner_email: string | null;
-  owner_name: string | null;
-  parent_id: string | null;
-  semester_id: string;
-  course_id: string;
-  title: string;
-  icon: string | null;
-  cover: string | null;
-  is_favorite: boolean | null;
-  is_full_width?: boolean | null;
-  kanban_status?: string | null;
-  due_date?: string | null;
-  due_time?: string | null;
-  google_event_id?: string | null;
-  blocks: unknown;
-  share_settings: unknown;
-  comments: unknown;
-  created_at: string | number;
-  updated_at: string | number;
-}
-
-function parseShareSettings(raw: unknown): NoteShareSettings {
-  const defaultShare: NoteShareSettings = {
-    isPublicLink: false,
-    publicRole: 'view',
-    collaborators: []
-  };
-  if (!raw) return defaultShare;
-  if (typeof raw === 'string') {
-    try {
-      return { ...defaultShare, ...JSON.parse(raw) };
-    } catch {
-      return defaultShare;
-    }
-  }
-  if (typeof raw === 'object') {
-    return { ...defaultShare, ...(raw as Partial<NoteShareSettings>) };
-  }
-  return defaultShare;
-}
-
-function parseBlocksField(raw: unknown): NoteBlock[] {
-  if (Array.isArray(raw)) return raw as NoteBlock[];
-  if (typeof raw === 'string') {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed as NoteBlock[];
-    } catch {
-      // ignore
-    }
-  }
-  return [{ id: `blk-${Date.now()}`, type: 'text', content: '' }];
-}
-
-function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
-  let parsedComments: NoteComment[] = [];
-  if (r.comments) {
-    if (Array.isArray(r.comments)) {
-      parsedComments = r.comments as NoteComment[];
-    } else if (typeof r.comments === 'string') {
-      try {
-        parsedComments = JSON.parse(r.comments) as NoteComment[];
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  return {
-    id: r.id,
-    ownerId: r.user_id,
-    ownerEmail: r.owner_email || '',
-    ownerName: r.owner_name || '',
-    parentId: r.parent_id || null,
-    semesterId: r.semester_id || 'sem-1',
-    courseId: r.course_id || 'course-default',
-    title: r.title || '',
-    icon: r.icon || '📄',
-    cover: r.cover || '',
-    isFavorite: Boolean(r.is_favorite),
-    isFullWidth: Boolean(r.is_full_width),
-    kanbanStatus:
-      r.kanban_status === 'in_progress' || r.kanban_status === 'done'
-        ? r.kanban_status
-        : 'todo',
-    dueDate: r.due_date || '',
-    dueTime: r.due_time || '',
-    googleEventId: r.google_event_id || '',
-    blocks: parseBlocksField(r.blocks),
-    shareSettings: parseShareSettings(r.share_settings),
-    comments: parsedComments,
-    createdAt: Number(r.created_at) || Date.now(),
-    updatedAt: Number(r.updated_at) || Date.now()
-  };
 }
 
 export type EffectiveRole = 'owner' | SharePermission | null;
@@ -521,7 +496,7 @@ export async function saveServerNote(
   actorUserId: string,
   actorEmail: string,
   note: NoteRecord
-): Promise<{ ok: boolean; status: number; error?: string }> {
+): Promise<{ ok: boolean; status: number; txid?: string; error?: string }> {
   if (!isServerNeonConfigured()) {
     return { ok: false, status: 503, error: 'Cloud Catatan tidak aktif.' };
   }
@@ -555,7 +530,7 @@ export async function saveServerNote(
     ? existing.existingOwnerId || actorUserId
     : note.ownerId || actorUserId;
 
-  await executeServerNeonQuery(
+  const { rows } = await executeServerNeonQuery<{ txid: string }>(
     `INSERT INTO miu_notes (
        id, user_id, owner_email, owner_name, parent_id, semester_id, course_id,
        title, icon, cover, is_favorite, is_full_width, kanban_status, due_date, due_time, google_event_id, blocks, share_settings, comments, created_at, updated_at
@@ -575,7 +550,8 @@ export async function saveServerNote(
        blocks = EXCLUDED.blocks,
        share_settings = EXCLUDED.share_settings,
        comments = EXCLUDED.comments,
-       updated_at = EXCLUDED.updated_at`,
+       updated_at = EXCLUDED.updated_at
+     RETURNING pg_current_xact_id()::text AS txid`,
     [
       note.id,
       ownerIdToPersist,
@@ -601,7 +577,7 @@ export async function saveServerNote(
     ]
   );
 
-  return { ok: true, status: 200 };
+  return { ok: true, status: 200, txid: rows[0]?.txid };
 }
 
 export async function submitServerFormResponse(params: {
@@ -760,7 +736,7 @@ export async function saveServerNoteComments(
   comments: NoteComment[],
   actorUserId = '',
   actorEmail = ''
-): Promise<{ ok: boolean; status: number; error?: string }> {
+): Promise<{ ok: boolean; status: number; txid?: string; error?: string }> {
   if (!isServerNeonConfigured()) {
     return { ok: false, status: 503, error: 'Cloud Catatan tidak aktif.' };
   }
@@ -778,12 +754,15 @@ export async function saveServerNoteComments(
     return { ok: false, status: 403, error: 'Tidak memiliki izin memberi komentar pada catatan ini.' };
   }
 
-  await executeServerNeonQuery(
-    `UPDATE miu_notes SET comments = $2::jsonb, updated_at = $3 WHERE id = $1`,
+  const { rows } = await executeServerNeonQuery<{ txid: string }>(
+    `UPDATE miu_notes
+     SET comments = $2::jsonb, updated_at = $3
+     WHERE id = $1
+     RETURNING pg_current_xact_id()::text AS txid`,
     [noteId, JSON.stringify(comments || []), Date.now()]
   );
 
-  return { ok: true, status: 200 };
+  return { ok: true, status: 200, txid: rows[0]?.txid };
 }
 
 export async function deleteServerNote(

@@ -349,3 +349,34 @@ export interface HotkeyConfig {
   lazytype: string;
   lazyshot: string;
 }
+
+export interface ActiveBlockTarget {
+  noteId: string;
+  blockId: string;
+  field?: 'content' | 'toggleBody';
+  blockType?: BlockType;
+  preview?: string;
+  selectionStart?: number;
+  selectionEnd?: number;
+  source?: 'focus' | 'selection';
+  updatedAt?: number;
+}
+
+export interface LastDictationEvent {
+  noteId: string;
+  blockId: string;
+  field: 'content' | 'toggleBody';
+  caret: number;
+  at: number;
+}
+
+export interface DictationInsertResult {
+  ok: boolean;
+  error?: string;
+  noteId?: string;
+  targetBlockId?: string;
+  field?: 'content' | 'toggleBody';
+  caret?: number;
+  mode?: 'updated' | 'inserted_after' | 'appended';
+}
+

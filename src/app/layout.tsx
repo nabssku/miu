@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import React from 'react';
 import { MiuProvider } from '@/context/MiuContext';
 import { MiuShell } from '@/components/shell/MiuShell';
+import { RealtimeRoot } from '@/components/realtime/RealtimeRoot';
 import {
   SITE_DESCRIPTION_DEFAULT,
   SITE_KEYWORDS,
@@ -96,9 +97,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body>
-        <MiuProvider>
-          <MiuShell>{children}</MiuShell>
-        </MiuProvider>
+        <RealtimeRoot>
+          <MiuProvider>
+            <MiuShell>{children}</MiuShell>
+          </MiuProvider>
+        </RealtimeRoot>
       </body>
     </html>
   );
