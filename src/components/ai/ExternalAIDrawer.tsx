@@ -1,36 +1,42 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
+  AlignLeft,
   ArrowRightToLine,
+  ArrowUp,
   AudioLines,
-  BrainCircuit,
   Check,
   CheckCircle2,
   CheckSquare,
   ChevronDown,
+  ChevronsRight,
   ChevronUp,
   Copy,
   Eye,
   EyeOff,
   FileText,
   ImagePlus,
+  Languages,
   ListTodo,
   Loader2,
   Maximize2,
-  MessageSquare,
   Minimize2,
+  MoreHorizontal,
+  Plus,
   RefreshCw,
-  Send,
+  Search,
   Settings2,
+  ShieldCheck,
   Sparkles,
+  Square,
+  SquarePen,
   Trash2,
-  Wrench,
-  X,
-  Zap
+  X
 } from 'lucide-react';
 import { ConversationalVoicePanel } from './ConversationalVoicePanel';
+import { MiuAIFaceIcon } from './MiuAIFaceIcon';
 import { db } from '../../db/database';
 import { useMiu } from '../../context/MiuContext';
 import { flattenBlocks } from '../../utils/blockTreeHelper';
@@ -45,7 +51,7 @@ import {
   saveAIConfig,
   type AIConfig
 } from '../../services/externalApis';
-import type { AIProviderId } from '../../types/miu';
+import type { AIChatMessage, AIProviderId } from '../../types/miu';
 import {
   cleanThinkingTags,
   MarkdownView,
@@ -53,6 +59,22 @@ import {
   stripInlineMarkdown
 } from '../../utils/markdown';
 import { extractTextFromPdfSource, processAndUploadPdf } from '../../utils/pdfHelper';
+import {
+  normalizeStoredAIChatThreads,
+  type AIChatThread,
+  type AIChatThreadMessage
+} from '../../utils/aiChatHistory';
+
+type PromptMode =
+  | 'summarize'
+  | 'translate'
+  | 'insights'
+  | 'breakdown'
+  | 'quiz'
+  | 'explain'
+  | 'custom';
+
+type OpenMenuType = 'none' | 'history' | 'more' | 'attach' | 'context' | 'model';
 
 const CUSTOM_PROVIDER_PRESETS: Array<{
   id: AIProviderId;
@@ -73,7 +95,9 @@ export const ExternalAIDrawer: React.FC = () => {
     activeCourseId,
     isAIDrawerOpen,
     setIsAIDrawerOpen,
+    islandPosition,
     aiExplainDraft,
+    setAiExplainDraft,
     aiImageAttachment,
     setAiImageAttachment,
     aiPdfAttachment,
@@ -87,7 +111,9 @@ export const ExternalAIDrawer: React.FC = () => {
 
   const [aiTab, setAiTab] = useState<'groq' | 'custom'>('groq');
   const [interactionMode, setInteractionMode] = useState<'text' | 'voice'>('text');
-  const [defaultGroqConfig, setDefaultGroqConfig] = useState<AIConfig>(() => loadDefaultGroqConfig());
+  const [defaultGroqConfig, setDefaultGroqConfig] = useState<AIConfig>(() =>
+    loadDefaultGroqConfig()
+  );
   const [customConfig, setCustomConfig] = useState<AIConfig>({
     provider: 'custom',
     apiKey: '',
@@ -95,13 +121,39 @@ export const ExternalAIDrawer: React.FC = () => {
     baseUrl: 'https://api.openai.com/v1/chat/completions',
     ollamaUrl: 'http://localhost:11434'
   });
-  const [showCustomSettings, setShowCustomSettings] = useState<boolean>(true);
   const [configHydrated, setConfigHydrated] = useState(false);
+  const [showProviderSheet, setShowProviderSheet] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+  const [isExpandedWidth, setIsExpandedWidth] = useState(false);
+  const [includeNoteContext, setIncludeNoteContext] = useState(true);
+
+  const [openMenu, setOpenMenu] = useState<OpenMenuType>('none');
+  const [customPrompt, setCustomPrompt] = useState('');
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<AIChatThreadMessage[]>([]);
+  const [chatThreads, setChatThreads] = useState<AIChatThread[]>([]);
+  const [selectedChatIds, setSelectedChatIds] = useState<string[]>([]);
+  const [isChatSelectMode, setIsChatSelectMode] = useState(false);
+
+  const [loading, setLoading] = useState(false);
+  const [uploadingRef, setUploadingRef] = useState(false);
+  const [pdfProgressMsg, setPdfProgressMsg] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
+  const [insertedMsgId, setInsertedMsgId] = useState<string | null>(null);
+  const [todosMsgId, setTodosMsgId] = useState<string | null>(null);
+  const [flashcardFlipped, setFlashcardFlipped] = useState(false);
+  const [showQuizCards, setShowQuizCards] = useState(false);
+
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const pdfInputRef = useRef<HTMLInputElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const saved = loadAIConfig();
     setCustomConfig(saved);
-    setShowCustomSettings(saved.provider !== 'ollama' && !saved.apiKey.trim());
     setConfigHydrated(true);
     void syncCloudStatus().then((status) => {
       if (status.aiModel) {
@@ -109,87 +161,133 @@ export const ExternalAIDrawer: React.FC = () => {
       }
     });
   }, []);
-  const [showKey, setShowKey] = useState(false);
-  const [isExpandedWidth, setIsExpandedWidth] = useState(false);
-
-  const [customPrompt, setCustomPrompt] = useState('');
-  const [responseText, setResponseText] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [uploadingRef, setUploadingRef] = useState(false);
-  const [pdfProgressMsg, setPdfProgressMsg] = useState('');
-  const [errorMsg, setErrorMsg] = useState('');
-  const [insertedSuccess, setInsertedSuccess] = useState(false);
-  const [copiedResponse, setCopiedResponse] = useState(false);
-  const [todosAddedSuccess, setTodosAddedSuccess] = useState(false);
-  const [flashcardFlipped, setFlashcardFlipped] = useState(false);
-  const [showQuizCards, setShowQuizCards] = useState(false);
-  const [contextJustUpdated, setContextJustUpdated] = useState(false);
-
-  useEffect(() => {
-    if (!activeNote?.updatedAt) return;
-    setContextJustUpdated(true);
-    const t = window.setTimeout(() => setContextJustUpdated(false), 1400);
-    return () => window.clearTimeout(t);
-  }, [activeNote?.updatedAt, activeNote?.title, activeNote?.blocks]);
-
-  // Per-note AI Conversation History + Multi-select to delete
-  const [chatHistory, setChatHistory] = useState<
-    Array<{ id: string; title: string; response: string; model: string; createdAt: number }>
-  >([]);
-  const [selectedChatIds, setSelectedChatIds] = useState<string[]>([]);
-  const [isChatSelectMode, setIsChatSelectMode] = useState(false);
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(`miu_ai_chats_${activeNoteId}`);
-      const parsed = raw ? JSON.parse(raw) : [];
-      setChatHistory(Array.isArray(parsed) ? parsed : []);
-    } catch {
-      setChatHistory([]);
-    }
-    setSelectedChatIds([]);
-    setIsChatSelectMode(false);
-  }, [activeNoteId]);
-
-  const persistChatHistory = (
-    next: Array<{ id: string; title: string; response: string; model: string; createdAt: number }>
-  ) => {
-    setChatHistory(next);
-    try {
-      localStorage.setItem(`miu_ai_chats_${activeNoteId}`, JSON.stringify(next));
-    } catch {
-      // ignore
-    }
-  };
 
   useEffect(() => {
     if (!configHydrated) return;
     saveAIConfig(customConfig);
   }, [customConfig, configHydrated]);
 
-  // Automatically widen drawer when a PDF is attached so long PDF analyses are comfortable to read
   useEffect(() => {
     if (aiPdfAttachment) {
       setIsExpandedWidth(true);
     }
   }, [aiPdfAttachment]);
 
+  // Load saved threads per note and restore active thread if reopened
   useEffect(() => {
-    if (aiExplainDraft) {
-      if (
-        aiExplainDraft.startsWith('http://') ||
-        aiExplainDraft.startsWith('https://') ||
-        aiExplainDraft.startsWith('data:image/')
-      ) {
-        setAiImageAttachment({ url: aiExplainDraft, caption: 'Gambar Catatan' });
-        setCustomPrompt('');
+    try {
+      const raw = localStorage.getItem(`miu_ai_chats_${activeNoteId}`);
+      const normalized = normalizeStoredAIChatThreads(raw ? JSON.parse(raw) : []);
+      setChatThreads(normalized);
+
+      const savedActiveId = sessionStorage.getItem(`miu_ai_active_thread_${activeNoteId}`);
+      const matched = savedActiveId ? normalized.find((t) => t.id === savedActiveId) : undefined;
+      if (matched) {
+        setActiveThreadId(matched.id);
+        setMessages(matched.messages);
       } else {
-        setCustomPrompt(
-          `Jelaskan konsep ini dengan bahasa mahasiswa yang mudah dipahami:\n"${aiExplainDraft}"`
-        );
+        setActiveThreadId(null);
+        setMessages([]);
       }
+    } catch {
+      setChatThreads([]);
+      setActiveThreadId(null);
+      setMessages([]);
     }
-  }, [aiExplainDraft, setAiImageAttachment]);
+    setSelectedChatIds([]);
+    setIsChatSelectMode(false);
+    setErrorMsg('');
+    setShowQuizCards(false);
+  }, [activeNoteId]);
+
+  const persistChatThreads = (next: AIChatThread[], nextActiveId: string | null) => {
+    const trimmed = next.slice(0, 25);
+    setChatThreads(trimmed);
+    try {
+      localStorage.setItem(`miu_ai_chats_${activeNoteId}`, JSON.stringify(trimmed));
+      if (nextActiveId) {
+        sessionStorage.setItem(`miu_ai_active_thread_${activeNoteId}`, nextActiveId);
+      } else {
+        sessionStorage.removeItem(`miu_ai_active_thread_${activeNoteId}`);
+      }
+    } catch {
+      // ignore storage quota errors
+    }
+  };
+
+  // Close popovers on outside click or Escape
+  useEffect(() => {
+    if (openMenu === 'none') return;
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('[data-ai-popover]')) return;
+      setOpenMenu('none');
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpenMenu('none');
+      }
+    };
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [openMenu]);
+
+  // Handle inline "Tanya AI" triggers from document blocks
+  useEffect(() => {
+    if (!aiExplainDraft) return;
+    const draft = aiExplainDraft;
+    setAiExplainDraft('');
+
+    setInteractionMode('text');
+    if (
+      draft.startsWith('http://') ||
+      draft.startsWith('https://') ||
+      draft.startsWith('data:image/')
+    ) {
+      setAiImageAttachment({ url: draft, caption: 'Gambar Catatan' });
+      setCustomPrompt('');
+    } else {
+      setActiveThreadId(null);
+      setMessages([]);
+      try {
+        sessionStorage.removeItem(`miu_ai_active_thread_${activeNoteId}`);
+      } catch {
+        // ignore
+      }
+      const isAlreadyStructuredPrompt =
+        draft.startsWith('Analisis ') ||
+        draft.startsWith('Jelaskan ') ||
+        draft.startsWith('Rangkum ');
+      setCustomPrompt(
+        isAlreadyStructuredPrompt
+          ? draft
+          : `Jelaskan konsep ini dengan bahasa mahasiswa yang mudah dipahami:\n"${draft}"`
+      );
+    }
+
+    window.setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 60);
+  }, [aiExplainDraft, activeNoteId, setAiExplainDraft, setAiImageAttachment]);
+
+  // Auto-size prompt textarea cleanly up to ~5 lines
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 136)}px`;
+  }, [customPrompt]);
+
+  // Smooth auto-scroll on new messages / streaming chunks
+  useEffect(() => {
+    if (messages.length > 0 || loading) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+  }, [messages, loading]);
 
   if (!isAIDrawerOpen) return null;
 
@@ -200,15 +298,37 @@ export const ExternalAIDrawer: React.FC = () => {
       : Boolean(customConfig.apiKey.trim() && customConfig.model.trim());
 
   const flatBlocks = flattenBlocks(activeNote?.blocks);
-  const noteImages = flatBlocks.filter(
-    (b) => b.type === 'image' && Boolean(b.content)
-  );
-  const notePdfs = flatBlocks.filter(
-    (b) => b.type === 'pdf' && Boolean(b.content)
-  );
+  const noteImages = flatBlocks.filter((b) => b.type === 'image' && Boolean(b.content));
+  const notePdfs = flatBlocks.filter((b) => b.type === 'pdf' && Boolean(b.content));
+
+  const activePresetMeta =
+    CUSTOM_PROVIDER_PRESETS.find((p) => p.id === customConfig.provider) ||
+    CUSTOM_PROVIDER_PRESETS[0];
+
+  const activeThread = activeThreadId
+    ? chatThreads.find((t) => t.id === activeThreadId)
+    : undefined;
+
+  const startNewChat = () => {
+    abortControllerRef.current?.abort();
+    setLoading(false);
+    setActiveThreadId(null);
+    setMessages([]);
+    setErrorMsg('');
+    setShowQuizCards(false);
+    setFlashcardFlipped(false);
+    setOpenMenu('none');
+    try {
+      sessionStorage.removeItem(`miu_ai_active_thread_${activeNoteId}`);
+    } catch {
+      // ignore
+    }
+    window.setTimeout(() => textareaRef.current?.focus(), 40);
+  };
 
   const handleUploadReferenceImage = async (file: File) => {
     setUploadingRef(true);
+    setErrorMsg('');
     try {
       const { url } = await uploadImageToCloudinary(file);
       setAiImageAttachment({
@@ -216,8 +336,11 @@ export const ExternalAIDrawer: React.FC = () => {
         caption: file.name.replace(/\.[^/.]+$/, '') || 'Referensi Gambar'
       });
       setAiPdfAttachment(null);
-    } catch {
-      // ignore
+      setOpenMenu('none');
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Gagal mengunggah referensi gambar.'
+      );
     } finally {
       setUploadingRef(false);
     }
@@ -227,6 +350,7 @@ export const ExternalAIDrawer: React.FC = () => {
     setUploadingRef(true);
     setErrorMsg('');
     setPdfProgressMsg('Membaca file PDF...');
+    setOpenMenu('none');
     try {
       const { url, fileName, text, pages } = await processAndUploadPdf(file, (msg) =>
         setPdfProgressMsg(msg)
@@ -255,6 +379,7 @@ export const ExternalAIDrawer: React.FC = () => {
       rawText.startsWith('Dokumen PDF "') ||
       rawText.startsWith('Tidak ada teks');
 
+    setOpenMenu('none');
     setAiImageAttachment(null);
     if (!isFallbackOrEmpty || !pdfBlk.content) {
       setAiPdfAttachment({
@@ -315,43 +440,133 @@ export const ExternalAIDrawer: React.FC = () => {
     }
   };
 
-  const executePrompt = async (mode: 'summarize' | 'quiz' | 'breakdown' | 'explain' | 'custom') => {
-    if (!activeNote) return;
-    if (mode === 'custom' && !customPrompt.trim() && !aiPdfAttachment && !aiImageAttachment) {
+  const executePrompt = async (
+    mode: PromptMode,
+    overrideCustomText?: string,
+    baseHistoryOverride?: AIChatThreadMessage[]
+  ) => {
+    if (!activeNote || loading) return;
+    const rawQuery = (overrideCustomText ?? customPrompt).trim();
+    if (
+      mode === 'custom' &&
+      !rawQuery &&
+      !aiPdfAttachment &&
+      !aiImageAttachment
+    ) {
       return;
     }
-    // Collapse custom provider settings automatically so the response area has full height
-    if (aiTab === 'custom') {
-      setShowCustomSettings(false);
-    }
-    setLoading(true);
+
+    setOpenMenu('none');
+    setShowProviderSheet(false);
     setErrorMsg('');
-    setResponseText('');
-    setInsertedSuccess(false);
     setShowQuizCards(mode === 'quiz');
     setFlashcardFlipped(false);
 
-    const rawQuery = customPrompt.trim();
-    const liveContext = await buildLiveNoteContext(
-      activeNoteId || activeNote.id,
-      activeNote,
-      aiPdfAttachment,
-      34000,
-      mode === 'custom' || mode === 'explain' ? rawQuery : ''
-    );
-    const noteContent = liveContext.contextText;
-    const attachedImageUrl = aiImageAttachment?.url || liveContext.noteImages[0]?.content;
+    const priorMessages = baseHistoryOverride ?? messages;
+    const historyForApi: AIChatMessage[] = priorMessages
+      .filter((m) => m.content.trim().length > 0)
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    const displayUserText =
+      mode === 'summarize'
+        ? 'Ringkas halaman ini'
+        : mode === 'translate'
+          ? 'Terjemahkan halaman ini'
+          : mode === 'insights'
+            ? 'Analisis untuk mendapatkan wawasan'
+            : mode === 'breakdown'
+              ? 'Buat pelacak tugas'
+              : mode === 'quiz'
+                ? 'Buat kuis & flashcard dari catatan ini'
+                : mode === 'explain' && !rawQuery
+                  ? aiPdfAttachment
+                    ? `Jelaskan dokumen PDF "${aiPdfAttachment.fileName}"`
+                    : aiImageAttachment
+                      ? `Jelaskan gambar "${aiImageAttachment.caption || 'referensi'}"`
+                      : 'Jelaskan materi catatan ini dengan analogi sederhana'
+                  : rawQuery ||
+                    (aiPdfAttachment
+                      ? `Rangkum isi dokumen "${aiPdfAttachment.fileName}"`
+                      : `Jelaskan gambar "${aiImageAttachment?.caption || 'ini'}"`);
+
+    const attachmentLabel = aiPdfAttachment
+      ? `PDF: ${aiPdfAttachment.fileName}`
+      : aiImageAttachment
+        ? `Gambar: ${aiImageAttachment.caption || 'Catatan'}`
+        : undefined;
+
+    if (mode === 'custom' && overrideCustomText === undefined) {
+      setCustomPrompt('');
+    }
+
+    const now = Date.now();
+    const userMsgId = `msg-u-${now}`;
+    const assistantMsgId = `msg-a-${now + 1}`;
+    const userMessage: AIChatThreadMessage = {
+      id: userMsgId,
+      role: 'user',
+      content: displayUserText,
+      attachmentLabel,
+      createdAt: now
+    };
+    const placeholderAssistant: AIChatThreadMessage = {
+      id: assistantMsgId,
+      role: 'assistant',
+      content: '',
+      model: activeConfig.model,
+      createdAt: now + 1
+    };
+
+    const threadId = activeThreadId || `chat-${now}`;
+    const threadTitle =
+      activeThread?.title ||
+      displayUserText.replace(/\s+/g, ' ').slice(0, 64) ||
+      'Obrolan AI';
+
+    const optimisticMessages = [...priorMessages, userMessage, placeholderAssistant];
+    setActiveThreadId(threadId);
+    setMessages(optimisticMessages);
+    setLoading(true);
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    let noteContent = '';
+    let attachedImageUrl = aiImageAttachment?.url;
+
+    if (includeNoteContext || mode !== 'custom' || aiPdfAttachment) {
+      const liveContext = await buildLiveNoteContext(
+        activeNoteId || activeNote.id,
+        activeNote,
+        aiPdfAttachment,
+        34000,
+        mode === 'custom' || mode === 'explain' ? rawQuery : ''
+      );
+      if (includeNoteContext || mode !== 'custom') {
+        noteContent = liveContext.contextText;
+      }
+      if (!attachedImageUrl && includeNoteContext) {
+        attachedImageUrl = liveContext.noteImages[0]?.content;
+      }
+    }
+
     let userPrompt = rawQuery;
     let contextInUserPrompt = false;
 
     if (mode === 'summarize') {
-      userPrompt = `Ringkas materi berikut menjadi poin-poin inti terstruktur (gunakan Heading ##, Bullet -, dan Bold **kata kunci**) dalam Bahasa Indonesia:\n\n${noteContent}`;
+      userPrompt = `Ringkas materi halaman catatan berikut menjadi poin-poin inti terstruktur (gunakan Heading ##, Bullet -, dan Bold **kata kunci**) dalam Bahasa Indonesia:\n\n${noteContent}`;
+      contextInUserPrompt = true;
+    } else if (mode === 'translate') {
+      userPrompt = `Terjemahkan seluruh isi materi halaman catatan berikut secara akurat dengan mempertahankan struktur Heading, Bullet, dan Tabel Markdown. Jika konten dominan berbahasa Indonesia, terjemahkan ke Bahasa Inggris yang natural; jika dominan berbahasa Inggris/asing, terjemahkan ke Bahasa Indonesia yang natural:\n\n${noteContent}`;
+      contextInUserPrompt = true;
+    } else if (mode === 'insights') {
+      userPrompt = `Analisis halaman catatan berikut untuk mendapatkan wawasan mendalam: soroti konsep kunci, hubungan antar bagian, potensi celah pemahaman/risiko yang perlu diperhatikan, serta rekomendasi langkah belajar berikutnya:\n\n${noteContent}`;
       contextInUserPrompt = true;
     } else if (mode === 'quiz') {
       userPrompt = `Buatkan 3 soal pilihan ganda latihan beserta kunci jawaban dan penjelasan singkat dari materi berikut:\n\n${noteContent}`;
       contextInUserPrompt = true;
     } else if (mode === 'breakdown') {
-      userPrompt = `Pecah materi/tugas berikut menjadi langkah-langkah To-do actionable beserta estimasi sesi Pomodoro (🍅):\n\n${noteContent}`;
+      userPrompt = `Buatkan pelacak tugas terstruktur dalam bentuk checklist To-do actionable (- [ ] ...) beserta prioritas dan estimasi sesi Pomodoro (🍅) berdasarkan isi halaman berikut:\n\n${noteContent}`;
       contextInUserPrompt = true;
     } else if (mode === 'explain') {
       if (aiPdfAttachment) {
@@ -380,75 +595,118 @@ export const ExternalAIDrawer: React.FC = () => {
     }
 
     const baseSystemPrompt =
-      'Kamu adalah Miu AI, asisten belajar mahasiswa yang ringkas, akurat, ramah, dan suportif dalam Bahasa Indonesia. Gunakan struktur Markdown yang bersih (## Subjudul, - Poin Bullet, 1. Poin Nomor, **Tebal** untuk istilah penting, dan $...$ atau $$...$$ untuk rumus LaTeX). Jangan tampilkan tag <think>. Jawablah secara akurat berdasarkan teks catatan dan isi dokumen PDF yang tersedia; jika bagian atau halaman tertentu tidak tercantum dalam teks yang diberikan, sampaikan dengan jujur tanpa mengarang.';
+      'Kamu adalah Miu AI, asisten workspace & belajar mahasiswa yang ringkas, akurat, ramah, dan suportif. Gunakan struktur Markdown yang bersih (## Subjudul, - Poin Bullet, 1. Poin Nomor, - [ ] Pelacak Tugas, **Tebal** untuk istilah penting, dan $...$ atau $$...$$ untuk rumus LaTeX). Jangan tampilkan tag <think>. Jawablah secara akurat berdasarkan teks catatan dan dokumen PDF aktif; jika bagian tertentu tidak ada di konteks, sampaikan secara jujur tanpa mengarang.';
 
     const finalSystemPrompt =
       !contextInUserPrompt && noteContent.trim()
         ? `${baseSystemPrompt}\n\n=== KONTEKS CATATAN & DOKUMEN PDF AKTIF ===\n${noteContent}`
         : baseSystemPrompt;
 
+    let finalOutput = '';
     try {
-      let finalOutput = '';
       await runExternalAIStream(
         activeConfig,
         finalSystemPrompt,
         userPrompt,
         (chunk) => {
           finalOutput = chunk;
-          setResponseText(chunk);
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantMsgId ? { ...m, content: chunk } : m))
+          );
         },
-        attachedImageUrl
+        attachedImageUrl,
+        historyForApi,
+        controller.signal
       );
 
       if (finalOutput.trim()) {
-        const promptTitle =
-          mode === 'summarize'
-            ? 'Ringkasan Catatan'
-            : mode === 'quiz'
-              ? 'Kuis & Flashcard'
-              : mode === 'breakdown'
-                ? 'Breakdown Pomodoro'
-                : mode === 'explain'
-                  ? aiPdfAttachment
-                    ? `Penjelasan PDF: ${aiPdfAttachment.fileName}`
-                    : 'Penjelasan Materi'
-                  : customPrompt.trim() ||
-                    (aiPdfAttachment ? `Analisis PDF: ${aiPdfAttachment.fileName}` : 'Tanya AI');
+        const finalizedMessages = optimisticMessages.map((m) =>
+          m.id === assistantMsgId ? { ...m, content: finalOutput } : m
+        );
+        setMessages(finalizedMessages);
 
-        const newItem = {
-          id: `chat-${Date.now()}`,
-          title: promptTitle.slice(0, 70),
-          response: finalOutput,
+        const nextThread: AIChatThread = {
+          id: threadId,
+          title: threadTitle,
+          messages: finalizedMessages,
           model: activeConfig.model,
-          createdAt: Date.now()
+          createdAt: activeThread?.createdAt || now,
+          updatedAt: Date.now()
         };
-        persistChatHistory([newItem, ...chatHistory].slice(0, 20));
+        const others = chatThreads.filter((t) => t.id !== threadId);
+        persistChatThreads([nextThread, ...others], threadId);
+      } else {
+        setMessages(priorMessages);
       }
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Gagal menghubungi AI Provider.');
+      const isAborted =
+        controller.signal.aborted ||
+        (err instanceof Error && err.name === 'AbortError');
+      if (isAborted) {
+        if (finalOutput.trim()) {
+          const partialMessages = optimisticMessages.map((m) =>
+            m.id === assistantMsgId ? { ...m, content: finalOutput } : m
+          );
+          setMessages(partialMessages);
+          const nextThread: AIChatThread = {
+            id: threadId,
+            title: threadTitle,
+            messages: partialMessages,
+            model: activeConfig.model,
+            createdAt: activeThread?.createdAt || now,
+            updatedAt: Date.now()
+          };
+          const others = chatThreads.filter((t) => t.id !== threadId);
+          persistChatThreads([nextThread, ...others], threadId);
+        } else {
+          setMessages(priorMessages);
+        }
+      } else {
+        setMessages(priorMessages);
+        setErrorMsg(
+          err instanceof Error ? err.message : 'Gagal menghubungi AI Provider.'
+        );
+      }
     } finally {
+      abortControllerRef.current = null;
       setLoading(false);
     }
   };
 
-  const handleInsertStructuredBlocks = async () => {
-    const parsedBlocks = parseMarkdownToNotionBlocks(responseText);
+  const handleStopStreaming = () => {
+    abortControllerRef.current?.abort();
+  };
+
+  const handleRegenerateLast = () => {
+    if (loading || messages.length === 0) return;
+    const lastUserIdx = [...messages]
+      .reverse()
+      .findIndex((m) => m.role === 'user');
+    if (lastUserIdx === -1) return;
+    const actualIdx = messages.length - 1 - lastUserIdx;
+    const targetUserMsg = messages[actualIdx];
+    const baseBeforeUser = messages.slice(0, actualIdx);
+    void executePrompt('custom', targetUserMsg.content, baseBeforeUser);
+  };
+
+  const handleInsertStructuredBlocks = async (msgId: string, content: string) => {
+    const parsedBlocks = parseMarkdownToNotionBlocks(content);
     if (parsedBlocks.length === 0) return;
     await insertBlocksIntoActiveNote(parsedBlocks);
-    setInsertedSuccess(true);
-    window.setTimeout(() => setInsertedSuccess(false), 2600);
+    setInsertedMsgId(msgId);
+    window.setTimeout(() => setInsertedMsgId((prev) => (prev === msgId ? null : prev)), 2500);
   };
 
-  const handleCopyResponse = async () => {
-    const cleaned = cleanThinkingTags(responseText);
+  const handleCopyResponse = async (msgId: string, content: string) => {
+    const cleaned = cleanThinkingTags(content);
     if (!cleaned) return;
     await navigator.clipboard.writeText(cleaned);
-    setCopiedResponse(true);
-    window.setTimeout(() => setCopiedResponse(false), 2000);
+    setCopiedMsgId(msgId);
+    window.setTimeout(() => setCopiedMsgId((prev) => (prev === msgId ? null : prev)), 2000);
   };
 
-  const handleAddBreakdownTodos = async () => {
-    const cleaned = cleanThinkingTags(responseText);
+  const handleAddBreakdownTodos = async (msgId: string, content: string) => {
+    const cleaned = cleanThinkingTags(content);
     const lines = cleaned
       .split('\n')
       .map((l) => stripInlineMarkdown(l.replace(/^[-*•\d.)\[\]xX#\s]+/, '')))
@@ -467,599 +725,811 @@ export const ExternalAIDrawer: React.FC = () => {
         createdAt: Date.now()
       });
     }
-    setTodosAddedSuccess(true);
-    window.setTimeout(() => setTodosAddedSuccess(false), 2400);
+    setTodosMsgId(msgId);
+    window.setTimeout(() => setTodosMsgId((prev) => (prev === msgId ? null : prev)), 2400);
+  };
+
+  const handleLoadThread = (thread: AIChatThread) => {
+    abortControllerRef.current?.abort();
+    setLoading(false);
+    setActiveThreadId(thread.id);
+    setMessages(thread.messages);
+    setErrorMsg('');
+    setShowQuizCards(false);
+    setOpenMenu('none');
+    try {
+      sessionStorage.setItem(`miu_ai_active_thread_${activeNoteId}`, thread.id);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDeleteThread = (threadId: string) => {
+    const remaining = chatThreads.filter((t) => t.id !== threadId);
+    const nextActiveId = activeThreadId === threadId ? null : activeThreadId;
+    if (activeThreadId === threadId) {
+      setActiveThreadId(null);
+      setMessages([]);
+    }
+    setSelectedChatIds((prev) => prev.filter((id) => id !== threadId));
+    persistChatThreads(remaining, nextActiveId);
   };
 
   const drawerWidthClass = isExpandedWidth
-    ? 'w-full sm:w-[500px] lg:w-[580px]'
-    : 'w-full sm:w-[400px]';
+    ? 'w-full sm:w-[480px] lg:w-[560px]'
+    : 'w-full sm:w-[340px] lg:w-[380px]';
 
-  const activePresetMeta =
-    CUSTOM_PROVIDER_PRESETS.find((p) => p.id === customConfig.provider) ||
-    CUSTOM_PROVIDER_PRESETS[0];
+  const hasSendableInput = Boolean(
+    customPrompt.trim() || aiPdfAttachment || aiImageAttachment
+  );
+
+  const lastAssistantMsgId =
+    [...messages].reverse().find((m) => m.role === 'assistant')?.id || null;
 
   return (
     <aside
-      className={`${drawerWidthClass} shrink-0 h-screen sticky top-0 overflow-y-auto border-l border-border-subtle bg-subtle/45 p-4 flex flex-col gap-3 no-print transition-all duration-200`}
+      className={`${drawerWidthClass} fixed inset-0 z-50 sm:static sm:z-auto shrink-0 h-screen sm:sticky sm:top-0 border-l border-border-subtle bg-surface text-text-primary flex flex-col no-print transition-all duration-200`}
     >
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-sky-400 text-white flex items-center justify-center shadow-sm shrink-0">
-            <Sparkles className="w-4 h-4" />
-          </div>
-          <div className="min-w-0">
-            <h3 className="text-sm font-bold text-text-primary leading-tight truncate">
-              Asisten AI Miu
-            </h3>
-            <p className="text-[10px] font-mono text-text-secondary flex items-center gap-1 mt-0.5 truncate">
-              {aiTab === 'groq' ? (
-                <>
-                  <Zap className="w-3 h-3 text-amber-500 shrink-0" />
-                  <span className="truncate">{defaultGroqConfig.model}</span>
-                </>
-              ) : (
-                <>
-                  <Wrench className="w-3 h-3 text-sky-400 shrink-0" />
-                  <span className="truncate">
-                    {activePresetMeta.label} • {customConfig.model}
-                  </span>
-                </>
-              )}
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1 shrink-0">
+      {/* Top Minimal Notion-style Header */}
+      <header
+        className={`shrink-0 px-3 ${
+          islandPosition === 'top-right' ? 'pt-[52px]' : 'pt-2.5'
+        } pb-2 flex items-center justify-between gap-2 relative`}
+      >
+        {/* Left: Chat History Switcher Dropdown */}
+        <div className="relative min-w-0" data-ai-popover>
           <button
             type="button"
-            onClick={() => setIsExpandedWidth((v) => !v)}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-surface border border-border-subtle hover:border-accent-strong text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
-            title={isExpandedWidth ? 'Ukuran Normal' : 'Perlebar Panel Baca AI'}
+            onClick={() => setOpenMenu((m) => (m === 'history' ? 'none' : 'history'))}
+            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-subtle text-text-primary transition max-w-[205px]"
+            title="Buka atau ganti obrolan AI"
           >
-            {isExpandedWidth ? (
-              <>
-                <Minimize2 className="w-3 h-3" />
-                <span>Normal</span>
-              </>
-            ) : (
-              <>
-                <Maximize2 className="w-3 h-3" />
-                <span>Perlebar</span>
-              </>
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={() => setIsAIDrawerOpen(false)}
-            className="p-1.5 rounded-lg hover:bg-subtle text-text-secondary hover:text-text-primary transition"
-            aria-label="Tutup panel AI"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-
-      {/* Mode Switcher: Default Groq AI vs AI Provider Custom */}
-      <div className="flex items-center gap-1 bg-surface border border-border-subtle p-1 rounded-xl shrink-0">
-        <button
-          type="button"
-          onClick={() => setAiTab('groq')}
-          className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition ${
-            aiTab === 'groq'
-              ? 'bg-accent-strong text-white dark:text-slate-950 shadow-sm'
-              : 'text-text-secondary hover:text-text-primary'
-          }`}
-        >
-          ⚡ Groq AI
-        </button>
-        <button
-          type="button"
-          onClick={() => setAiTab('custom')}
-          className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition ${
-            aiTab === 'custom'
-              ? 'bg-accent-strong text-white dark:text-slate-950 shadow-sm'
-              : 'text-text-secondary hover:text-text-primary'
-          }`}
-        >
-          🔧 AI Provider Custom
-        </button>
-      </div>
-
-      {/* Interaction Mode: Text Chat vs ElevenLabs Voice Conversational AI */}
-      <div className="flex items-center gap-1 bg-subtle/80 border border-border-subtle p-1 rounded-xl shrink-0">
-        <button
-          type="button"
-          onClick={() => setInteractionMode('text')}
-          className={`flex-1 py-1 rounded-lg text-[11px] font-semibold inline-flex items-center justify-center gap-1.5 transition ${
-            interactionMode === 'text'
-              ? 'bg-surface text-text-primary shadow-sm border border-border-subtle'
-              : 'text-text-secondary hover:text-text-primary'
-          }`}
-        >
-          <MessageSquare className="w-3 h-3" />
-          <span>Chat &amp; Ringkas</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setInteractionMode('voice')}
-          className={`flex-1 py-1 rounded-lg text-[11px] font-semibold inline-flex items-center justify-center gap-1.5 transition ${
-            interactionMode === 'voice'
-              ? 'bg-gradient-to-r from-indigo-500/20 to-sky-500/20 text-accent-strong border border-accent-strong/40 shadow-sm'
-              : 'text-text-secondary hover:text-text-primary'
-          }`}
-        >
-          <AudioLines className="w-3 h-3" />
-          <span>Conversational AI (ElevenLabs)</span>
-        </button>
-      </div>
-
-      {/* Live Note Context Sync Indicator */}
-      {activeNote && (
-        <div
-          className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl border text-[10px] transition shrink-0 ${
-            contextJustUpdated
-              ? 'bg-emerald-500/10 border-emerald-500/35 text-emerald-600 dark:text-emerald-300'
-              : 'bg-surface/70 border-border-subtle text-text-secondary'
-          }`}
-        >
-          <div className="flex items-center gap-1.5 min-w-0">
-            <RefreshCw
-              className={`w-3 h-3 shrink-0 ${
-                contextJustUpdated ? 'animate-spin text-emerald-500' : 'text-emerald-500'
-              }`}
-            />
-            <span className="truncate font-medium">
-              Konteks Live:{' '}
-              <strong className="text-text-primary">
-                {activeNote.title || 'Tanpa Judul'}
-              </strong>{' '}
-              ({activeNote.blocks.length} blok)
+            <MiuAIFaceIcon className="w-4 h-4 shrink-0 text-text-primary" />
+            <span className="text-[13px] font-semibold truncate">
+              {activeThread?.title || 'Obrolan AI baru'}
             </span>
-          </div>
-          <span className="font-mono opacity-80 shrink-0">
-            {contextJustUpdated
-              ? 'Tersinkron'
-              : new Date(activeNote.updatedAt).toLocaleTimeString('id-ID', {
-                  hour: '2-digit',
-                  minute: '2-digit'
-                })}
-          </span>
-        </div>
-      )}
-
-      {/* Neat Collapsible Custom AI Provider Bar & Settings Card */}
-      {aiTab === 'custom' && (
-        <div className="bg-surface border border-border-subtle rounded-2xl overflow-hidden shrink-0 shadow-sm">
-          {/* Compact Summary Bar (Always visible on Custom tab) */}
-          <button
-            type="button"
-            onClick={() => setShowCustomSettings((v) => !v)}
-            className="w-full px-3 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-subtle/50 transition"
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <span
-                className={`w-2 h-2 rounded-full shrink-0 ${
-                  isCustomReady ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'
-                }`}
-              />
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs font-bold text-text-primary truncate">
-                    {activePresetMeta.label}
-                  </span>
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-subtle text-accent-strong truncate max-w-[160px]">
-                    {customConfig.model || 'Pilih model'}
-                  </span>
-                </div>
-                <p className="text-[10px] text-text-secondary truncate">
-                  {isCustomReady
-                    ? 'Provider aktif & siap digunakan'
-                    : 'Klik untuk memasukkan API Key & Model'}
-                </p>
-              </div>
-            </div>
-
-            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-subtle text-[10px] font-semibold text-text-secondary shrink-0">
-              <Settings2 className="w-3 h-3" />
-              <span>{showCustomSettings ? 'Tutup' : 'Atur'}</span>
-              {showCustomSettings ? (
-                <ChevronUp className="w-3 h-3" />
-              ) : (
-                <ChevronDown className="w-3 h-3" />
-              )}
-            </span>
+            <ChevronDown className="w-3.5 h-3.5 text-text-secondary shrink-0" />
           </button>
 
-          {/* Collapsible Configuration Form */}
-          {showCustomSettings && (
-            <div className="p-3 pt-2 border-t border-border-subtle space-y-2.5 bg-subtle/20">
-              <div className="grid grid-cols-3 gap-1.5">
-                {CUSTOM_PROVIDER_PRESETS.map((p) => {
-                  const active = customConfig.provider === p.id;
-                  return (
+          {openMenu === 'history' && (
+            <div className="absolute left-0 top-full mt-1 w-72 max-w-[calc(100vw-2rem)] rounded-xl bg-surface border border-border-subtle shadow-2xl p-1.5 z-50 space-y-1">
+              <button
+                type="button"
+                onClick={startNewChat}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-xs font-medium text-text-primary transition"
+              >
+                <SquarePen className="w-3.5 h-3.5 text-text-secondary" />
+                <span>Obrolan AI baru</span>
+              </button>
+
+              {chatThreads.length > 0 && (
+                <>
+                  <div className="h-px bg-border-subtle my-1" />
+                  <div className="flex items-center justify-between px-2 py-1">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
+                      Riwayat Catatan Ini ({chatThreads.length})
+                    </span>
                     <button
-                      key={p.id}
                       type="button"
-                      onClick={() =>
-                        setCustomConfig((prev) => ({
-                          ...prev,
-                          provider: p.id,
-                          model: DEFAULT_MODELS[p.id],
-                          baseUrl: DEFAULT_BASE_URLS[p.id]
-                        }))
-                      }
-                      className={`p-2 rounded-xl text-left border transition ${
-                        active
-                          ? 'bg-accent-strong/15 border-accent-strong text-accent-strong shadow-sm'
-                          : 'bg-surface border-border-subtle text-text-secondary hover:text-text-primary'
-                      }`}
+                      onClick={() => {
+                        const next = !isChatSelectMode;
+                        setIsChatSelectMode(next);
+                        if (!next) setSelectedChatIds([]);
+                      }}
+                      className="text-[10px] font-medium text-text-secondary hover:text-text-primary"
                     >
-                      <div className="text-[11px] font-bold truncate">{p.label}</div>
-                      <div className="text-[9px] opacity-75 truncate">{p.shortDesc}</div>
+                      {isChatSelectMode ? 'Selesai' : 'Kelola'}
                     </button>
-                  );
-                })}
-              </div>
+                  </div>
 
-              {customConfig.provider === 'ollama' ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <label className="block text-[10px] font-semibold text-text-secondary">
-                      Ollama Local URL
-                    </label>
-                    <input
-                      type="text"
-                      value={customConfig.ollamaUrl}
-                      onChange={(e) =>
-                        setCustomConfig((prev) => ({ ...prev, ollamaUrl: e.target.value }))
-                      }
-                      placeholder="http://localhost:11434"
-                      className="w-full bg-surface border border-border-subtle rounded-xl px-2.5 py-1.5 font-mono text-[11px] text-text-primary focus:outline-none focus:border-accent-strong"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="block text-[10px] font-semibold text-text-secondary">
-                      Nama Model Ollama
-                    </label>
-                    <input
-                      type="text"
-                      value={customConfig.model}
-                      onChange={(e) =>
-                        setCustomConfig((prev) => ({ ...prev, model: e.target.value }))
-                      }
-                      placeholder="llama3.2"
-                      className="w-full bg-surface border border-border-subtle rounded-xl px-2.5 py-1.5 font-mono text-[11px] text-text-primary focus:outline-none focus:border-accent-strong"
-                    />
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {(customConfig.provider === 'custom' ||
-                    customConfig.provider === 'openrouter' ||
-                    customConfig.provider === 'openai') && (
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-semibold text-text-secondary">
-                        Base URL / Endpoint (OpenAI-Compatible)
-                      </label>
-                      <input
-                        type="text"
-                        value={customConfig.baseUrl || ''}
-                        onChange={(e) =>
-                          setCustomConfig((prev) => ({ ...prev, baseUrl: e.target.value }))
-                        }
-                        placeholder="https://api.openai.com/v1/chat/completions"
-                        className="w-full bg-surface border border-border-subtle rounded-xl px-2.5 py-1.5 font-mono text-[11px] text-text-primary focus:outline-none focus:border-accent-strong"
-                      />
+                  {(isChatSelectMode || selectedChatIds.length > 0) && (
+                    <div className="flex items-center justify-between gap-1.5 px-2 py-1.5 rounded-lg bg-rose-500/10 border border-rose-400/25">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (selectedChatIds.length === chatThreads.length) {
+                            setSelectedChatIds([]);
+                          } else {
+                            setSelectedChatIds(chatThreads.map((t) => t.id));
+                          }
+                        }}
+                        className="text-[10px] font-semibold text-text-primary hover:underline"
+                      >
+                        {selectedChatIds.length === chatThreads.length
+                          ? 'Batal semua'
+                          : 'Pilih semua'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={selectedChatIds.length === 0}
+                        onClick={() => {
+                          const selectedSet = new Set(selectedChatIds);
+                          const remaining = chatThreads.filter((t) => !selectedSet.has(t.id));
+                          const resetActive = activeThreadId && selectedSet.has(activeThreadId);
+                          if (resetActive) {
+                            setActiveThreadId(null);
+                            setMessages([]);
+                          }
+                          setSelectedChatIds([]);
+                          setIsChatSelectMode(false);
+                          persistChatThreads(remaining, resetActive ? null : activeThreadId);
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500 text-white disabled:opacity-40 text-[10px] font-semibold"
+                      >
+                        <Trash2 className="w-2.5 h-2.5" />
+                        <span>Hapus ({selectedChatIds.length})</span>
+                      </button>
                     </div>
                   )}
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-semibold text-text-secondary">
-                        API Key ({activePresetMeta.label})
-                      </label>
-                      <div className="relative flex items-center">
-                        <input
-                          type={showKey ? 'text' : 'password'}
-                          value={customConfig.apiKey}
-                          onChange={(e) =>
-                            setCustomConfig((prev) => ({ ...prev, apiKey: e.target.value }))
-                          }
-                          placeholder="sk-... / AIzaSy..."
-                          className="w-full bg-surface border border-border-subtle rounded-xl pl-2.5 pr-7 py-1.5 font-mono text-[11px] text-text-primary focus:outline-none focus:border-accent-strong"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowKey((v) => !v)}
-                          className="absolute right-2 text-text-secondary hover:text-text-primary"
-                          aria-label="Tampilkan API Key"
+                  <div className="max-h-60 overflow-y-auto space-y-0.5 pr-0.5">
+                    {chatThreads.map((thread) => {
+                      const isCurrent = activeThreadId === thread.id;
+                      const isChecked = selectedChatIds.includes(thread.id);
+                      return (
+                        <div
+                          key={thread.id}
+                          onClick={() => {
+                            if (isChatSelectMode) {
+                              setSelectedChatIds((prev) =>
+                                prev.includes(thread.id)
+                                  ? prev.filter((id) => id !== thread.id)
+                                  : [...prev, thread.id]
+                              );
+                            } else {
+                              handleLoadThread(thread);
+                            }
+                          }}
+                          className={`group flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-xs cursor-pointer transition ${
+                            isCurrent
+                              ? 'bg-subtle text-text-primary font-semibold'
+                              : 'text-text-secondary hover:bg-subtle/60 hover:text-text-primary'
+                          }`}
                         >
-                          {showKey ? (
-                            <EyeOff className="w-3.5 h-3.5" />
-                          ) : (
-                            <Eye className="w-3.5 h-3.5" />
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            {isChatSelectMode && (
+                              <span
+                                className={`w-3.5 h-3.5 rounded-[4px] border flex items-center justify-center shrink-0 ${
+                                  isChecked
+                                    ? 'bg-rose-500 border-rose-500 text-white'
+                                    : 'border-text-secondary/40 bg-surface'
+                                }`}
+                              >
+                                {isChecked && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                              </span>
+                            )}
+                            <span className="truncate">{thread.title}</span>
+                          </div>
+                          {!isChatSelectMode && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteThread(thread.id);
+                              }}
+                              className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-rose-500/15 text-text-secondary hover:text-rose-500 transition shrink-0"
+                              title="Hapus obrolan"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
                           )}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-semibold text-text-secondary">
-                        Nama Model
-                      </label>
-                      <input
-                        type="text"
-                        value={customConfig.model}
-                        onChange={(e) =>
-                          setCustomConfig((prev) => ({ ...prev, model: e.target.value }))
-                        }
-                        placeholder="gpt-4o-mini / gemini-2.5-flash"
-                        className="w-full bg-surface border border-border-subtle rounded-xl px-2.5 py-1.5 font-mono text-[11px] text-text-primary focus:outline-none focus:border-accent-strong"
-                      />
-                    </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                </div>
+                </>
               )}
-
-              <div className="flex justify-end pt-0.5">
-                <button
-                  type="button"
-                  onClick={() => setShowCustomSettings(false)}
-                  className="px-3 py-1 rounded-lg bg-accent-strong text-white dark:text-slate-950 text-[11px] font-semibold hover:opacity-90 transition"
-                >
-                  Simpan &amp; Sembunyikan
-                </button>
-              </div>
             </div>
           )}
         </div>
-      )}
 
-      {/* 4 Academic Quick Action Chips (Text mode only) */}
-      {interactionMode === 'text' && (
-      <div className="grid grid-cols-2 gap-1.5 shrink-0">
-        <button
-          type="button"
-          onClick={() => void executePrompt('summarize')}
-          disabled={loading}
-          className="px-2.5 py-2 rounded-xl bg-surface hover:border-accent-strong border border-border-subtle text-[11px] font-medium text-text-primary text-left transition"
-        >
-          ✨ Ringkas Catatan
-        </button>
-        <button
-          type="button"
-          onClick={() => void executePrompt('quiz')}
-          disabled={loading}
-          className="px-2.5 py-2 rounded-xl bg-surface hover:border-accent-strong border border-border-subtle text-[11px] font-medium text-text-primary text-left transition"
-        >
-          🎴 Buat Kuis &amp; Flashcard
-        </button>
-        <button
-          type="button"
-          onClick={() => void executePrompt('breakdown')}
-          disabled={loading}
-          className="px-2.5 py-2 rounded-xl bg-surface hover:border-accent-strong border border-border-subtle text-[11px] font-medium text-text-primary text-left transition"
-        >
-          🍅 Pecah ke Pomodoro
-        </button>
-        <button
-          type="button"
-          onClick={() => void executePrompt('explain')}
-          disabled={loading}
-          className="px-2.5 py-2 rounded-xl bg-surface hover:border-accent-strong border border-border-subtle text-[11px] font-medium text-text-primary text-left transition"
-        >
-          💡{' '}
-          {aiPdfAttachment
-            ? 'Jelaskan PDF'
-            : aiImageAttachment
-              ? 'Jelaskan Gambar'
-              : 'Jelaskan Materi'}
-        </button>
-      </div>
-      )}
+        {/* Right Header Controls */}
+        <div className="flex items-center gap-0.5 shrink-0 text-text-secondary">
+          <button
+            type="button"
+            onClick={startNewChat}
+            className="p-1.5 rounded-lg hover:bg-subtle hover:text-text-primary transition"
+            title="Obrolan AI baru"
+            aria-label="Obrolan AI baru"
+          >
+            <SquarePen className="w-4 h-4" />
+          </button>
 
-      {/* Quick Picker for PDFs from the Active Note */}
-      {notePdfs.length > 0 && !aiPdfAttachment && (
-        <div className="space-y-1 shrink-0">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
-            Pilih PDF dari Catatan:
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {notePdfs.map((pdfBlk, i) => (
-              <button
-                key={pdfBlk.id}
-                type="button"
-                disabled={uploadingRef}
-                onClick={() => void handleAttachNotePdf(pdfBlk, i)}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-surface border border-border-subtle hover:border-accent-strong disabled:opacity-60 text-xs font-medium text-text-primary transition"
-              >
-                <FileText className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                <span className="truncate max-w-[180px]">
-                  {pdfBlk.fileName || pdfBlk.caption || `PDF ${i + 1}`}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+          <button
+            type="button"
+            onClick={() =>
+              setInteractionMode((prev) => (prev === 'text' ? 'voice' : 'text'))
+            }
+            className={`p-1.5 rounded-lg transition ${
+              interactionMode === 'voice'
+                ? 'bg-indigo-500/15 text-indigo-600 dark:text-indigo-300'
+                : 'hover:bg-subtle hover:text-text-primary'
+            }`}
+            title={
+              interactionMode === 'voice'
+                ? 'Kembali ke Chat Teks'
+                : 'Mode Suara Interaktif (ElevenLabs)'
+            }
+            aria-label="Beralih mode suara AI"
+          >
+            <AudioLines className="w-4 h-4" />
+          </button>
 
-      {/* Compact PDF Reference Card */}
-      {aiPdfAttachment && (
-        <div className="flex items-center gap-2.5 px-3 py-2 rounded-2xl bg-rose-500/10 border border-rose-400/35 shrink-0">
-          <div className="w-8 h-8 rounded-xl bg-rose-500/20 text-rose-500 flex items-center justify-center shrink-0">
-            <FileText className="w-4 h-4" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-600 dark:text-rose-300 font-semibold">
-                PDF • {aiPdfAttachment.pages} hal
-              </span>
-              <p className="text-xs font-semibold text-text-primary truncate">
-                {aiPdfAttachment.fileName}
-              </p>
-            </div>
-          </div>
-          {aiPdfAttachment.url && (
+          <div className="relative" data-ai-popover>
             <button
               type="button"
-              disabled={uploadingRef}
-              onClick={() => void handleReExtractAttachedPdf()}
-              className="p-1 rounded-full hover:bg-subtle text-text-secondary hover:text-text-primary disabled:opacity-50 shrink-0"
-              title="Baca ulang isi teks PDF (layout & OCR)"
+              onClick={() => setOpenMenu((m) => (m === 'more' ? 'none' : 'more'))}
+              className="p-1.5 rounded-lg hover:bg-subtle hover:text-text-primary transition"
+              title="Menu opsi AI"
+              aria-label="Menu opsi AI"
             >
-              <RefreshCw
-                className={`w-3.5 h-3.5 ${uploadingRef && pdfProgressMsg ? 'animate-spin' : ''}`}
-              />
+              <MoreHorizontal className="w-4 h-4" />
             </button>
-          )}
+
+            {openMenu === 'more' && (
+              <div className="absolute right-0 top-full mt-1 w-60 rounded-xl bg-surface border border-border-subtle shadow-2xl p-1.5 z-50 space-y-0.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsExpandedWidth((v) => !v);
+                    setOpenMenu('none');
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                >
+                  {isExpandedWidth ? (
+                    <>
+                      <Minimize2 className="w-3.5 h-3.5 text-text-secondary" />
+                      <span>Ukuran panel normal</span>
+                    </>
+                  ) : (
+                    <>
+                      <Maximize2 className="w-3.5 h-3.5 text-text-secondary" />
+                      <span>Perlebar panel baca</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowProviderSheet(true);
+                    setOpenMenu('none');
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                >
+                  <Settings2 className="w-3.5 h-3.5 text-text-secondary" />
+                  <span>Pengaturan Provider &amp; API Key</span>
+                </button>
+                {interactionMode === 'text' && (
+                  <button
+                    type="button"
+                    onClick={() => void executePrompt('quiz')}
+                    disabled={loading}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-text-secondary" />
+                    <span>Buat Kuis &amp; Flashcard</span>
+                  </button>
+                )}
+                {messages.length > 0 && (
+                  <>
+                    <div className="h-px bg-border-subtle my-1" />
+                    <button
+                      type="button"
+                      onClick={startNewChat}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-rose-500/10 text-rose-500 transition"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Bersihkan tampilan chat</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
           <button
             type="button"
-            onClick={() => setAiPdfAttachment(null)}
-            className="p-1 rounded-full hover:bg-subtle text-text-secondary hover:text-text-primary shrink-0"
-            title="Hapus referensi PDF"
+            onClick={() => setIsAIDrawerOpen(false)}
+            className="p-1.5 rounded-lg hover:bg-subtle hover:text-text-primary transition"
+            title="Sembunyikan panel AI"
+            aria-label="Sembunyikan panel AI"
           >
-            <X className="w-3.5 h-3.5" />
+            <ChevronsRight className="w-4 h-4" />
           </button>
         </div>
-      )}
+      </header>
 
-      {/* Quick Picker for Images from the Active Note */}
-      {noteImages.length > 0 && !aiImageAttachment && (
-        <div className="space-y-1 shrink-0">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
-            Pilih Gambar dari Catatan:
-          </div>
-          <div className="flex items-center gap-2 overflow-x-auto pb-1">
-            {noteImages.map((imgBlk, i) => (
-              <button
-                key={imgBlk.id}
-                type="button"
-                onClick={() =>
-                  setAiImageAttachment({
-                    url: imgBlk.content,
-                    caption: imgBlk.caption || `Gambar ${i + 1}`
-                  })
-                }
-                className="group relative w-12 h-12 rounded-xl overflow-hidden border border-border-subtle hover:border-accent-strong shrink-0 transition"
-                title="Klik untuk jadikan referensi gambar AI"
-              >
-                <img
-                  src={imgBlk.content}
-                  alt={imgBlk.caption || 'Gambar Catatan'}
-                  className="w-full h-full object-cover"
-                />
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Visual Image Reference Card */}
-      {aiImageAttachment && (
-        <div className="flex items-center gap-2.5 px-3 py-2 rounded-2xl bg-indigo-500/10 border border-indigo-400/35 shrink-0">
-          <img
-            src={aiImageAttachment.url}
-            alt={aiImageAttachment.caption || 'Referensi Gambar'}
-            className="w-10 h-10 rounded-xl object-cover border border-white/15 shrink-0 bg-slate-950"
-          />
-          <div className="min-w-0 flex-1">
-            <span className="inline-block text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-600 dark:text-indigo-300 font-semibold">
-              Referensi Gambar
-            </span>
-            <p className="text-xs font-semibold text-text-primary truncate mt-0.5">
-              {aiImageAttachment.caption || 'Gambar Catatan'}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setAiImageAttachment(null)}
-            className="p-1 rounded-full hover:bg-subtle text-text-secondary hover:text-text-primary shrink-0"
-            title="Hapus referensi gambar"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      )}
-
+      {/* Main Content Area */}
       {interactionMode === 'voice' ? (
-        <ConversationalVoicePanel
-          activeNote={activeNote}
-          aiTab={aiTab}
-          activeConfig={activeConfig}
-          activeProviderLabel={activePresetMeta.label}
-          aiPdfAttachment={aiPdfAttachment}
-          aiImageAttachment={aiImageAttachment}
-          onInsertBlocks={insertBlocksIntoActiveNote}
-        />
+        <div className="flex-1 overflow-y-auto px-3 pb-3 flex flex-col gap-3">
+          <ConversationalVoicePanel
+            activeNote={activeNote}
+            aiTab={aiTab}
+            activeConfig={activeConfig}
+            activeProviderLabel={activePresetMeta.label}
+            aiPdfAttachment={aiPdfAttachment}
+            aiImageAttachment={aiImageAttachment}
+            onInsertBlocks={insertBlocksIntoActiveNote}
+          />
+        </div>
       ) : (
         <>
-      {/* Interactive Study Flashcard Preview when Note-to-Quiz is triggered */}
-      {showQuizCards && (
-        <button
-          type="button"
-          onClick={() => setFlashcardFlipped((v) => !v)}
-          className="w-full text-left p-3 rounded-2xl bg-gradient-to-br from-indigo-500/10 to-sky-500/10 border border-indigo-400/30 transition shrink-0"
-        >
-          <div className="flex items-center justify-between text-[10px] font-mono uppercase text-indigo-500 dark:text-indigo-300 mb-1">
-            <span>Flashcard Interaktif</span>
-            <span>Klik untuk balik</span>
+          <div className="flex-1 overflow-y-auto px-4">
+            {messages.length === 0 && !loading && !errorMsg ? (
+              /* Clean Bottom-Anchored Welcome State matching Notion AI */
+              <div className="min-h-full flex flex-col justify-end pb-3 pt-8">
+                <div className="w-10 h-10 rounded-full bg-subtle border border-border-subtle flex items-center justify-center text-text-primary mb-3">
+                  <MiuAIFaceIcon className="w-5 h-5" />
+                </div>
+
+                <h2 className="text-[15px] font-semibold text-text-primary tracking-tight mb-2.5">
+                  Apa yang dapat saya bantu hari ini?
+                </h2>
+
+                <div className="space-y-0.5 -mx-2">
+                  <button
+                    type="button"
+                    onClick={() => void executePrompt('summarize')}
+                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] text-text-primary hover:bg-subtle transition text-left"
+                  >
+                    <AlignLeft className="w-4 h-4 text-text-secondary shrink-0" />
+                    <span>Ringkas halaman ini</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void executePrompt('translate')}
+                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] text-text-primary hover:bg-subtle transition text-left"
+                  >
+                    <Languages className="w-4 h-4 text-text-secondary shrink-0" />
+                    <span>Terjemahkan halaman ini</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void executePrompt('insights')}
+                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] text-text-primary hover:bg-subtle transition text-left"
+                  >
+                    <Search className="w-4 h-4 text-text-secondary shrink-0" />
+                    <span>Analisis untuk mendapatkan wawasan</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void executePrompt('breakdown')}
+                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] text-text-primary hover:bg-subtle transition text-left"
+                  >
+                    <CheckCircle2 className="w-4 h-4 text-text-secondary shrink-0" />
+                    <span>Buat pelacak tugas</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* Multi-Turn Conversational Thread */
+              <div className="py-3 space-y-4">
+                {showQuizCards && (
+                  <button
+                    type="button"
+                    onClick={() => setFlashcardFlipped((v) => !v)}
+                    className="w-full text-left p-3 rounded-xl bg-subtle/70 border border-border-subtle transition"
+                  >
+                    <div className="flex items-center justify-between text-[10px] font-mono uppercase text-text-secondary mb-1">
+                      <span>Flashcard Interaktif</span>
+                      <span>Klik untuk balik</span>
+                    </div>
+                    <p className="text-xs font-semibold text-text-primary">
+                      {flashcardFlipped
+                        ? 'Jawaban tersedia di respons AI di bawah!'
+                        : `Apa poin utama dari catatan "${activeNote?.title || 'Tanpa Judul'}"?`}
+                    </p>
+                  </button>
+                )}
+
+                {messages.map((msg) => {
+                  if (msg.role === 'user') {
+                    return (
+                      <div key={msg.id} className="flex flex-col items-end gap-1">
+                        {msg.attachmentLabel && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-subtle border border-border-subtle text-[10px] text-text-secondary max-w-[85%] truncate">
+                            <FileText className="w-2.5 h-2.5 shrink-0" />
+                            <span className="truncate">{msg.attachmentLabel}</span>
+                          </span>
+                        )}
+                        <div className="max-w-[88%] rounded-2xl rounded-tr-md bg-subtle border border-border-subtle/70 px-3.5 py-2 text-[13px] text-text-primary whitespace-pre-wrap leading-relaxed">
+                          {msg.content}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const isStreamingThis =
+                    loading && msg.id === lastAssistantMsgId;
+
+                  return (
+                    <div key={msg.id} className="space-y-2">
+                      {msg.content ? (
+                        <div className="text-[13px] text-text-primary leading-relaxed">
+                          <MarkdownView content={msg.content} />
+                        </div>
+                      ) : (
+                        <div className="inline-flex items-center gap-2 text-xs text-text-secondary py-1">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Miu AI sedang mengetik...</span>
+                        </div>
+                      )}
+
+                      {msg.content && !isStreamingThis && (
+                        <div className="flex flex-wrap items-center gap-1 pt-0.5 text-[11px] text-text-secondary">
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyResponse(msg.id, msg.content)}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-subtle hover:text-text-primary transition"
+                            title="Salin jawaban"
+                          >
+                            {copiedMsgId === msg.id ? (
+                              <>
+                                <Check className="w-3 h-3 text-emerald-500" />
+                                <span className="text-emerald-500">Tersalin</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3 h-3" />
+                                <span>Salin</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleInsertStructuredBlocks(msg.id, msg.content)
+                            }
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-subtle hover:text-text-primary transition"
+                            title="Sisipkan jawaban ke catatan"
+                          >
+                            {insertedMsgId === msg.id ? (
+                              <>
+                                <Check className="w-3 h-3 text-emerald-500" />
+                                <span className="text-emerald-500">Tersisip!</span>
+                              </>
+                            ) : (
+                              <>
+                                <ArrowRightToLine className="w-3 h-3" />
+                                <span>Sisip ke Catatan</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleAddBreakdownTodos(msg.id, msg.content)
+                            }
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-subtle hover:text-text-primary transition"
+                            title="Tambahkan poin ke daftar To-do Pomodoro"
+                          >
+                            {todosMsgId === msg.id ? (
+                              <>
+                                <Check className="w-3 h-3 text-emerald-500" />
+                                <span className="text-emerald-500">Masuk To-do!</span>
+                              </>
+                            ) : (
+                              <>
+                                <ListTodo className="w-3 h-3" />
+                                <span>To-do</span>
+                              </>
+                            )}
+                          </button>
+
+                          {msg.id === lastAssistantMsgId && (
+                            <button
+                              type="button"
+                              onClick={handleRegenerateLast}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-subtle hover:text-text-primary transition"
+                              title="Buat ulang respons terakhir"
+                            >
+                              <RefreshCw className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {errorMsg && (
+                  <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 p-3 text-xs text-rose-500 flex items-start justify-between gap-2">
+                    <div className="space-y-1.5">
+                      <p className="leading-relaxed">{errorMsg}</p>
+                      <button
+                        type="button"
+                        onClick={() => setShowProviderSheet(true)}
+                        className="text-[11px] font-semibold underline hover:opacity-80"
+                      >
+                        Atur Provider / API Key
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setErrorMsg('')}
+                      className="p-0.5 rounded hover:bg-rose-500/20 shrink-0"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                <div ref={messagesEndRef} />
+              </div>
+            )}
           </div>
-          <p className="text-xs font-semibold text-text-primary">
-            {flashcardFlipped
-              ? 'Jawaban telah disiapkan di respons AI di bawah!'
-              : `Apa poin utama dari catatan "${activeNote?.title || 'Tanpa Judul'}"?`}
-          </p>
-        </button>
-      )}
 
-      {uploadingRef && pdfProgressMsg && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-400/30 text-[11px] text-rose-600 dark:text-rose-300 shrink-0">
-          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-          <span className="truncate font-medium">{pdfProgressMsg}</span>
-        </div>
-      )}
+          {/* Bottom Composer Area */}
+          <div className="shrink-0 px-3 pb-3 pt-1.5 space-y-2">
+            {/* Collapsible BYOK Provider Configuration Sheet */}
+            {showProviderSheet && (
+              <div className="rounded-2xl bg-subtle/60 border border-border-subtle p-3 space-y-2.5 text-xs shadow-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-text-primary">
+                      Provider &amp; Model AI
+                    </span>
+                    <div className="inline-flex rounded-lg bg-surface border border-border-subtle p-0.5 text-[10px]">
+                      <button
+                        type="button"
+                        onClick={() => setAiTab('groq')}
+                        className={`px-2 py-0.5 rounded-md font-semibold transition ${
+                          aiTab === 'groq'
+                            ? 'bg-text-primary text-surface'
+                            : 'text-text-secondary hover:text-text-primary'
+                        }`}
+                      >
+                        Otomatis
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAiTab('custom')}
+                        className={`px-2 py-0.5 rounded-md font-semibold transition ${
+                          aiTab === 'custom'
+                            ? 'bg-text-primary text-surface'
+                            : 'text-text-secondary hover:text-text-primary'
+                        }`}
+                      >
+                        Custom BYOK
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowProviderSheet(false)}
+                    className="p-1 rounded-lg hover:bg-surface text-text-secondary hover:text-text-primary"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
 
-      {/* Custom Prompt Input + Direct Image & PDF Attachment Buttons */}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void executePrompt('custom');
-        }}
-        className="flex gap-1.5 items-stretch shrink-0"
-      >
-        <div className="flex-1 relative flex items-center bg-surface border border-border-subtle rounded-xl focus-within:border-accent-strong">
-          <textarea
-            rows={2}
-            value={customPrompt}
-            onChange={(e) => setCustomPrompt(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+                {aiTab === 'groq' ? (
+                  <div className="text-[11px] text-text-secondary bg-surface border border-border-subtle rounded-xl p-2.5 flex items-center justify-between gap-2">
+                    <span>
+                      Menggunakan model server default:{' '}
+                      <strong className="font-mono text-text-primary">
+                        {defaultGroqConfig.model}
+                      </strong>
+                    </span>
+                    <span className="inline-flex items-center gap-1 text-[10px] text-emerald-500 font-semibold shrink-0">
+                      <CheckCircle2 className="w-3 h-3" />
+                      Siap
+                    </span>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-3 gap-1">
+                      {CUSTOM_PROVIDER_PRESETS.map((p) => {
+                        const active = customConfig.provider === p.id;
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() =>
+                              setCustomConfig((prev) => ({
+                                ...prev,
+                                provider: p.id,
+                                model: DEFAULT_MODELS[p.id],
+                                baseUrl: DEFAULT_BASE_URLS[p.id]
+                              }))
+                            }
+                            className={`p-1.5 rounded-lg text-left border transition ${
+                              active
+                                ? 'bg-surface border-text-primary text-text-primary font-semibold'
+                                : 'bg-surface/50 border-border-subtle text-text-secondary hover:text-text-primary'
+                            }`}
+                          >
+                            <div className="text-[10px] truncate">{p.label}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {customConfig.provider === 'ollama' ? (
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <input
+                          type="text"
+                          value={customConfig.ollamaUrl}
+                          onChange={(e) =>
+                            setCustomConfig((prev) => ({
+                              ...prev,
+                              ollamaUrl: e.target.value
+                            }))
+                          }
+                          placeholder="http://localhost:11434"
+                          className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[11px] text-text-primary focus:outline-none focus:border-accent-strong"
+                        />
+                        <input
+                          type="text"
+                          value={customConfig.model}
+                          onChange={(e) =>
+                            setCustomConfig((prev) => ({
+                              ...prev,
+                              model: e.target.value
+                            }))
+                          }
+                          placeholder="llama3.2"
+                          className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[11px] text-text-primary focus:outline-none focus:border-accent-strong"
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {(customConfig.provider === 'custom' ||
+                          customConfig.provider === 'openrouter' ||
+                          customConfig.provider === 'openai') && (
+                          <input
+                            type="text"
+                            value={customConfig.baseUrl || ''}
+                            onChange={(e) =>
+                              setCustomConfig((prev) => ({
+                                ...prev,
+                                baseUrl: e.target.value
+                              }))
+                            }
+                            placeholder="https://api.openai.com/v1/chat/completions"
+                            className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[11px] text-text-primary focus:outline-none focus:border-accent-strong"
+                          />
+                        )}
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <div className="relative flex items-center">
+                            <input
+                              type={showKey ? 'text' : 'password'}
+                              value={customConfig.apiKey}
+                              onChange={(e) =>
+                                setCustomConfig((prev) => ({
+                                  ...prev,
+                                  apiKey: e.target.value
+                                }))
+                              }
+                              placeholder="API Key..."
+                              className="w-full bg-surface border border-border-subtle rounded-lg pl-2 pr-6 py-1 font-mono text-[11px] text-text-primary focus:outline-none focus:border-accent-strong"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowKey((v) => !v)}
+                              className="absolute right-1.5 text-text-secondary hover:text-text-primary"
+                            >
+                              {showKey ? (
+                                <EyeOff className="w-3 h-3" />
+                              ) : (
+                                <Eye className="w-3 h-3" />
+                              )}
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            value={customConfig.model}
+                            onChange={(e) =>
+                              setCustomConfig((prev) => ({
+                                ...prev,
+                                model: e.target.value
+                              }))
+                            }
+                            placeholder="Model name..."
+                            className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[11px] text-text-primary focus:outline-none focus:border-accent-strong"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between text-[10px] text-text-secondary">
+                      <span>
+                        {isCustomReady
+                          ? `${activePresetMeta.label} siap dipakai`
+                          : 'Isi API Key & Model terlebih dahulu'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowProviderSheet(false)}
+                        className="px-2.5 py-1 rounded-lg bg-text-primary text-surface font-semibold"
+                      >
+                        Simpan
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Attachment & Extraction Pills above Composer */}
+            {uploadingRef && pdfProgressMsg && (
+              <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-subtle border border-border-subtle text-[11px] text-text-secondary">
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                <span className="truncate font-medium">{pdfProgressMsg}</span>
+              </div>
+            )}
+
+            {aiPdfAttachment && (
+              <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-rose-500/10 border border-rose-400/30">
+                <FileText className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] font-semibold text-text-primary truncate">
+                    {aiPdfAttachment.fileName}{' '}
+                    <span className="font-normal text-text-secondary">
+                      ({aiPdfAttachment.pages} hal)
+                    </span>
+                  </p>
+                </div>
+                {aiPdfAttachment.url && (
+                  <button
+                    type="button"
+                    disabled={uploadingRef}
+                    onClick={() => void handleReExtractAttachedPdf()}
+                    className="p-1 rounded-md hover:bg-surface text-text-secondary hover:text-text-primary disabled:opacity-50"
+                    title="Baca ulang isi PDF"
+                  >
+                    <RefreshCw
+                      className={`w-3 h-3 ${
+                        uploadingRef && pdfProgressMsg ? 'animate-spin' : ''
+                      }`}
+                    />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setAiPdfAttachment(null)}
+                  className="p-1 rounded-md hover:bg-surface text-text-secondary hover:text-text-primary"
+                  title="Hapus lampiran PDF"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+
+            {aiImageAttachment && (
+              <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-indigo-500/10 border border-indigo-400/30">
+                <img
+                  src={aiImageAttachment.url}
+                  alt={aiImageAttachment.caption || 'Referensi Gambar'}
+                  className="w-7 h-7 rounded-lg object-cover border border-border-subtle shrink-0"
+                />
+                <p className="text-[11px] font-semibold text-text-primary truncate flex-1">
+                  {aiImageAttachment.caption || 'Gambar Catatan'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setAiImageAttachment(null)}
+                  className="p-1 rounded-md hover:bg-surface text-text-secondary hover:text-text-primary"
+                  title="Hapus lampiran gambar"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+
+            {/* Rounded Prompt Input Card (Matching Notion AI Composer) */}
+            <form
+              onSubmit={(e) => {
                 e.preventDefault();
                 void executePrompt('custom');
-              }
-            }}
-            placeholder={
-              aiPdfAttachment
-                ? `Tanyakan tentang isi "${aiPdfAttachment.fileName}"...`
-                : aiImageAttachment
-                  ? 'Tanyakan sesuatu tentang gambar di atas...'
-                  : 'Tanya ke AI atau lampirkan Gambar/PDF...'
-            }
-            className="w-full bg-transparent pl-3 pr-14 py-2 text-xs text-text-primary focus:outline-none resize-none"
-          />
-          <div className="absolute right-1.5 bottom-1.5 flex items-center gap-0.5">
-            <label
-              className="p-1 rounded-lg hover:bg-subtle text-text-secondary hover:text-rose-500 cursor-pointer transition"
-              title="Unggah & baca file PDF dengan AI"
+              }}
+              className="rounded-2xl border border-border-subtle bg-subtle/35 dark:bg-subtle/45 focus-within:bg-surface focus-within:border-text-secondary/45 shadow-sm transition px-3 pt-2.5 pb-2 relative"
             >
-              {uploadingRef && pdfProgressMsg ? (
-                <Loader2 className="w-4 h-4 animate-spin text-rose-500" />
-              ) : (
-                <FileText className="w-4 h-4" />
-              )}
+              {/* Hidden upload inputs triggered via + menu */}
               <input
+                ref={pdfInputRef}
                 type="file"
                 accept=".pdf,application/pdf"
                 className="hidden"
@@ -1069,17 +1539,8 @@ export const ExternalAIDrawer: React.FC = () => {
                   if (f) void handleUploadReferencePdf(f);
                 }}
               />
-            </label>
-            <label
-              className="p-1 rounded-lg hover:bg-subtle text-text-secondary hover:text-accent-strong cursor-pointer transition"
-              title="Lampirkan gambar untuk ditanyakan ke AI"
-            >
-              {uploadingRef && !pdfProgressMsg ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <ImagePlus className="w-4 h-4" />
-              )}
               <input
+                ref={imageInputRef}
                 type="file"
                 accept="image/*"
                 className="hidden"
@@ -1089,275 +1550,331 @@ export const ExternalAIDrawer: React.FC = () => {
                   if (f) void handleUploadReferenceImage(f);
                 }}
               />
-            </label>
-          </div>
-        </div>
 
-        <button
-          type="submit"
-          disabled={loading}
-          className="px-3.5 rounded-xl bg-gradient-to-br from-indigo-500 to-sky-500 text-white flex items-center justify-center hover:opacity-90 disabled:opacity-60"
-          aria-label="Kirim ke AI"
-        >
-          {loading ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <Send className="w-4 h-4" />
-          )}
-        </button>
-      </form>
-
-      {/* Spacious Streaming Response Area (Never squished!) */}
-      {(responseText || errorMsg || loading) && (
-        <div className="bg-surface border border-border-subtle rounded-2xl p-4 space-y-3 flex-1 flex flex-col min-h-[380px] shadow-sm">
-          <div className="flex items-center justify-between gap-2 pb-2 border-b border-border-subtle shrink-0">
-            <span className="inline-flex items-center gap-1.5 text-xs font-bold text-text-primary truncate">
-              <BrainCircuit className="w-4 h-4 text-indigo-500 shrink-0" />
-              <span className="truncate">Respons AI ({activeConfig.model})</span>
-            </span>
-            {loading ? (
-              <span className="inline-flex items-center gap-1 font-mono text-[10px] text-sky-500 shrink-0">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Streaming...
-              </span>
-            ) : (
-              responseText && (
-                <div className="flex items-center gap-1 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => void handleCopyResponse()}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary transition"
-                  >
-                    {copiedResponse ? (
-                      <>
-                        <Check className="w-3 h-3 text-emerald-500" />
-                        <span className="text-emerald-500">Tersalin</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3 h-3" />
-                        <span>Salin</span>
-                      </>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setResponseText('');
-                      setErrorMsg('');
-                    }}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-500/10 text-[10px] font-medium text-rose-500 hover:bg-rose-500/20 transition"
-                    title="Bersihkan / tutup respons ini"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                    <span>Bersihkan</span>
-                  </button>
-                </div>
-              )
-            )}
-          </div>
-
-          {errorMsg ? (
-            <p className="text-xs text-rose-500 leading-relaxed">{errorMsg}</p>
-          ) : (
-            <div className="overflow-y-auto flex-1 pr-1">
-              <MarkdownView content={responseText} />
-            </div>
-          )}
-
-          {responseText && !loading && (
-            <div className="flex flex-wrap items-center gap-2 pt-2.5 border-t border-border-subtle shrink-0">
-              <button
-                type="button"
-                onClick={() => void handleInsertStructuredBlocks()}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
-                  insertedSuccess
-                    ? 'bg-emerald-500 text-white shadow-sm'
-                    : 'bg-accent-strong text-white dark:text-slate-950 hover:opacity-95 shadow-sm'
-                }`}
-              >
-                {insertedSuccess ? (
-                  <>
-                    <Check className="w-3.5 h-3.5" />
-                    <span>Tersisip Rapi di Catatan!</span>
-                  </>
-                ) : (
-                  <>
-                    <ArrowRightToLine className="w-3.5 h-3.5" />
-                    <span>Sisip ke Catatan</span>
-                  </>
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => void handleAddBreakdownTodos()}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-subtle border border-border-subtle text-xs font-medium text-text-primary hover:border-accent-strong transition"
-              >
-                {todosAddedSuccess ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-500" />
-                    <span className="text-emerald-500">Masuk ke To-do!</span>
-                  </>
-                ) : (
-                  <>
-                    <ListTodo className="w-3.5 h-3.5" />
-                    <span>Jadikan To-do</span>
-                  </>
-                )}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Saved AI Conversations on This Note (Select & Delete) */}
-      {chatHistory.length > 0 && (
-        <div className="bg-surface border border-border-subtle rounded-2xl p-3 space-y-2 shrink-0">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] font-bold text-text-primary">
-              Riwayat Percakapan ({chatHistory.length})
-            </span>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => {
-                  const next = !isChatSelectMode;
-                  setIsChatSelectMode(next);
-                  if (!next) setSelectedChatIds([]);
-                }}
-                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold transition ${
-                  isChatSelectMode || selectedChatIds.length > 0
-                    ? 'bg-rose-500/15 text-rose-500'
-                    : 'bg-subtle text-text-secondary hover:text-text-primary'
-                }`}
-              >
-                <CheckSquare className="w-3 h-3" />
-                <span>{isChatSelectMode ? 'Batal Pilih' : 'Pilih & Hapus'}</span>
-              </button>
-            </div>
-          </div>
-
-          {(isChatSelectMode || selectedChatIds.length > 0) && (
-            <div className="flex items-center justify-between gap-1.5 p-2 rounded-xl bg-rose-500/10 border border-rose-400/30">
-              <button
-                type="button"
-                onClick={() => {
-                  if (selectedChatIds.length === chatHistory.length) {
-                    setSelectedChatIds([]);
-                  } else {
-                    setSelectedChatIds(chatHistory.map((c) => c.id));
+              <textarea
+                ref={textareaRef}
+                rows={1}
+                value={customPrompt}
+                onChange={(e) => setCustomPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    void executePrompt('custom');
                   }
                 }}
-                className="text-[10px] font-semibold text-text-primary hover:underline"
-              >
-                {selectedChatIds.length === chatHistory.length
-                  ? 'Batal Pilih Semua'
-                  : 'Pilih Semua'}
-              </button>
-              <button
-                type="button"
-                disabled={selectedChatIds.length === 0}
-                onClick={() => {
-                  const selectedSet = new Set(selectedChatIds);
-                  const remaining = chatHistory.filter((c) => !selectedSet.has(c.id));
-                  persistChatHistory(remaining);
-                  setSelectedChatIds([]);
-                  setIsChatSelectMode(false);
-                  if (remaining.length === 0) {
-                    setResponseText('');
-                  }
-                }}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-500 hover:bg-rose-600 disabled:opacity-40 text-white text-[10px] font-semibold transition"
-              >
-                <Trash2 className="w-3 h-3" />
-                <span>Hapus Terpilih ({selectedChatIds.length})</span>
-              </button>
-            </div>
-          )}
+                placeholder={
+                  aiPdfAttachment
+                    ? `Tanyakan tentang "${aiPdfAttachment.fileName}"...`
+                    : aiImageAttachment
+                      ? 'Tanyakan tentang gambar di atas...'
+                      : 'Tanya Miu AI...'
+                }
+                className="w-full bg-transparent text-[13px] text-text-primary placeholder:text-text-secondary/70 focus:outline-none resize-none leading-relaxed max-h-36 overflow-y-auto"
+              />
 
-          <div className="max-h-40 overflow-y-auto space-y-1 pr-0.5">
-            {chatHistory.map((item) => {
-              const isChecked = selectedChatIds.includes(item.id);
-              const isActive = responseText === item.response;
-              return (
-                <div
-                  key={item.id}
-                  onClick={() => {
-                    if (isChatSelectMode) {
-                      setSelectedChatIds((prev) =>
-                        prev.includes(item.id)
-                          ? prev.filter((id) => id !== item.id)
-                          : [...prev, item.id]
-                      );
-                    } else {
-                      setResponseText(item.response);
-                    }
-                  }}
-                  className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl border text-xs cursor-pointer transition ${
-                    isChecked
-                      ? 'bg-rose-500/15 border-rose-400/40'
-                      : isActive
-                        ? 'bg-accent-strong/10 border-accent-strong/40 font-semibold'
-                        : 'bg-subtle/40 border-border-subtle hover:bg-subtle'
-                  }`}
-                >
-                  <div className="flex items-center gap-2 min-w-0 flex-1">
-                    {(isChatSelectMode || selectedChatIds.length > 0) && (
-                      <span
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedChatIds((prev) =>
-                            prev.includes(item.id)
-                              ? prev.filter((id) => id !== item.id)
-                              : [...prev, item.id]
-                          );
-                        }}
-                        className={`w-4 h-4 rounded-[4px] border flex items-center justify-center shrink-0 ${
-                          isChecked
-                            ? 'bg-rose-500 border-rose-500 text-white'
-                            : 'border-text-secondary/40 bg-surface'
-                        }`}
-                      >
-                        {isChecked && <Check className="w-3 h-3 stroke-[3]" />}
-                      </span>
+              <div className="flex items-center justify-between gap-2 mt-1.5">
+                {/* Bottom-left controls: + (Attachments & study modes) + Shield (Page context scope) */}
+                <div className="flex items-center gap-0.5 relative">
+                  <div className="relative" data-ai-popover>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenMenu((m) => (m === 'attach' ? 'none' : 'attach'))
+                      }
+                      className="w-7 h-7 rounded-full hover:bg-subtle text-text-secondary hover:text-text-primary flex items-center justify-center transition"
+                      title="Lampirkan file, konteks catatan, atau template"
+                      aria-label="Lampirkan atau tambah konteks"
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
+
+                    {openMenu === 'attach' && (
+                      <div className="absolute left-0 bottom-full mb-2 w-64 rounded-xl bg-surface border border-border-subtle shadow-2xl p-1.5 z-50 space-y-1 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => pdfInputRef.current?.click()}
+                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                        >
+                          <FileText className="w-3.5 h-3.5 text-rose-500" />
+                          <span>Unggah dokumen PDF</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => imageInputRef.current?.click()}
+                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                        >
+                          <ImagePlus className="w-3.5 h-3.5 text-indigo-500" />
+                          <span>Unggah gambar referensi</span>
+                        </button>
+
+                        {notePdfs.length > 0 && (
+                          <>
+                            <div className="h-px bg-border-subtle my-1" />
+                            <div className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
+                              PDF di Halaman Ini
+                            </div>
+                            <div className="max-h-28 overflow-y-auto space-y-0.5">
+                              {notePdfs.map((pdfBlk, i) => (
+                                <button
+                                  key={pdfBlk.id}
+                                  type="button"
+                                  onClick={() => void handleAttachNotePdf(pdfBlk, i)}
+                                  className="w-full flex items-center gap-2 px-2.5 py-1 rounded-lg hover:bg-subtle text-text-primary transition text-left"
+                                >
+                                  <FileText className="w-3 h-3 text-rose-500 shrink-0" />
+                                  <span className="truncate">
+                                    {pdfBlk.fileName || pdfBlk.caption || `PDF ${i + 1}`}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
+
+                        {noteImages.length > 0 && (
+                          <>
+                            <div className="h-px bg-border-subtle my-1" />
+                            <div className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
+                              Gambar di Halaman Ini
+                            </div>
+                            <div className="flex items-center gap-1.5 px-2 py-1 overflow-x-auto">
+                              {noteImages.map((imgBlk, i) => (
+                                <button
+                                  key={imgBlk.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setAiImageAttachment({
+                                      url: imgBlk.content,
+                                      caption: imgBlk.caption || `Gambar ${i + 1}`
+                                    });
+                                    setAiPdfAttachment(null);
+                                    setOpenMenu('none');
+                                  }}
+                                  className="w-9 h-9 rounded-lg overflow-hidden border border-border-subtle hover:border-text-primary shrink-0"
+                                >
+                                  <img
+                                    src={imgBlk.content}
+                                    alt={imgBlk.caption || `Gambar ${i + 1}`}
+                                    className="w-full h-full object-cover"
+                                  />
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
+
+                        <div className="h-px bg-border-subtle my-1" />
+                        <button
+                          type="button"
+                          onClick={() => void executePrompt('quiz')}
+                          disabled={loading}
+                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-text-secondary" />
+                          <span>Buat kuis &amp; flashcard</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void executePrompt('explain')}
+                          disabled={loading}
+                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                        >
+                          <CheckSquare className="w-3.5 h-3.5 text-text-secondary" />
+                          <span>Jelaskan materi / analogi</span>
+                        </button>
+                      </div>
                     )}
-                    <span className="truncate text-text-primary">{item.title}</span>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      const remaining = chatHistory.filter((c) => c.id !== item.id);
-                      persistChatHistory(remaining);
-                      setSelectedChatIds((prev) => prev.filter((id) => id !== item.id));
-                      if (responseText === item.response) {
-                        setResponseText(remaining[0]?.response || '');
+                  <div className="relative" data-ai-popover>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenMenu((m) => (m === 'context' ? 'none' : 'context'))
                       }
-                    }}
-                    className="p-1 rounded hover:bg-rose-500/15 text-text-secondary hover:text-rose-500 shrink-0"
-                    title="Hapus percakapan ini"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+                      className={`w-7 h-7 rounded-full hover:bg-subtle flex items-center justify-center transition relative ${
+                        includeNoteContext
+                          ? 'text-text-secondary hover:text-text-primary'
+                          : 'text-text-secondary/45'
+                      }`}
+                      title={
+                        includeNoteContext
+                          ? `Konteks halaman aktif (${activeNote?.blocks.length || 0} blok)`
+                          : 'Konteks halaman dinonaktifkan'
+                      }
+                      aria-label="Konteks halaman catatan"
+                    >
+                      <ShieldCheck className="w-4 h-4" />
+                      {includeNoteContext && activeNote && (
+                        <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                      )}
+                    </button>
 
-      {!responseText && !errorMsg && !loading && chatHistory.length === 0 && (
-        <div className="text-[11px] text-text-secondary bg-surface/60 border border-dashed border-border-subtle rounded-2xl p-3 flex items-start gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-          <span>
-            Gunakan <strong>⚡ Groq AI</strong> bawaan atau pindah ke tab{' '}
-            <strong>🔧 AI Provider Custom</strong> untuk memasukkan Endpoint, API Key, dan Model
-            pilihanmu sendiri.
-          </span>
-        </div>
-      )}
+                    {openMenu === 'context' && (
+                      <div className="absolute left-0 bottom-full mb-2 w-64 rounded-xl bg-surface border border-border-subtle shadow-2xl p-2.5 z-50 space-y-2 text-xs">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="font-semibold text-text-primary">
+                              Konteks Halaman Aktif
+                            </p>
+                            <p className="text-[11px] text-text-secondary truncate">
+                              {activeNote?.title || 'Tanpa Judul'} (
+                              {activeNote?.blocks.length || 0} blok)
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIncludeNoteContext((v) => !v)}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold transition shrink-0 ${
+                              includeNoteContext
+                                ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300'
+                                : 'bg-subtle text-text-secondary'
+                            }`}
+                          >
+                            {includeNoteContext ? 'Aktif' : 'Nonaktif'}
+                          </button>
+                        </div>
+                        <p className="text-[10px] text-text-secondary leading-relaxed">
+                          Saat aktif, AI otomatis membaca isi blok, tabel, subhalaman, dan transkrip voice note terbaru pada halaman ini.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Bottom-right controls: Model selector ("Otomatis ⌄") + Send/Stop circle button */}
+                <div className="flex items-center gap-1.5 relative">
+                  <div className="relative" data-ai-popover>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenMenu((m) => (m === 'model' ? 'none' : 'model'))
+                      }
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-full hover:bg-subtle text-[12px] font-medium text-text-secondary hover:text-text-primary transition max-w-[140px]"
+                      title="Pilih model atau provider AI"
+                    >
+                      <span className="truncate">
+                        {aiTab === 'groq' ? 'Otomatis' : activePresetMeta.label}
+                      </span>
+                      {openMenu === 'model' ? (
+                        <ChevronUp className="w-3 h-3 shrink-0" />
+                      ) : (
+                        <ChevronDown className="w-3 h-3 shrink-0" />
+                      )}
+                    </button>
+
+                    {openMenu === 'model' && (
+                      <div className="absolute right-0 bottom-full mb-2 w-60 rounded-xl bg-surface border border-border-subtle shadow-2xl p-1.5 z-50 space-y-0.5 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAiTab('groq');
+                            setOpenMenu('none');
+                          }}
+                          className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg transition ${
+                            aiTab === 'groq'
+                              ? 'bg-subtle text-text-primary font-semibold'
+                              : 'text-text-secondary hover:bg-subtle/60 hover:text-text-primary'
+                          }`}
+                        >
+                          <div className="text-left min-w-0">
+                            <div>Otomatis</div>
+                            <div className="text-[10px] font-mono text-text-secondary truncate">
+                              {defaultGroqConfig.model}
+                            </div>
+                          </div>
+                          {aiTab === 'groq' && (
+                            <Check className="w-3.5 h-3.5 text-text-primary shrink-0" />
+                          )}
+                        </button>
+
+                        <div className="h-px bg-border-subtle my-1" />
+                        <div className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
+                          Provider Custom (BYOK)
+                        </div>
+                        {CUSTOM_PROVIDER_PRESETS.map((p) => {
+                          const isSelected =
+                            aiTab === 'custom' && customConfig.provider === p.id;
+                          return (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => {
+                                setAiTab('custom');
+                                setCustomConfig((prev) => ({
+                                  ...prev,
+                                  provider: p.id,
+                                  model:
+                                    prev.provider === p.id
+                                      ? prev.model
+                                      : DEFAULT_MODELS[p.id],
+                                  baseUrl:
+                                    prev.provider === p.id
+                                      ? prev.baseUrl
+                                      : DEFAULT_BASE_URLS[p.id]
+                                }));
+                                if (p.id !== 'ollama' && !customConfig.apiKey.trim()) {
+                                  setShowProviderSheet(true);
+                                }
+                                setOpenMenu('none');
+                              }}
+                              className={`w-full flex items-center justify-between gap-2 px-2.5 py-1 rounded-lg transition ${
+                                isSelected
+                                  ? 'bg-subtle text-text-primary font-semibold'
+                                  : 'text-text-secondary hover:bg-subtle/60 hover:text-text-primary'
+                              }`}
+                            >
+                              <span>{p.label}</span>
+                              {isSelected && <Check className="w-3.5 h-3.5 shrink-0" />}
+                            </button>
+                          );
+                        })}
+
+                        <div className="h-px bg-border-subtle my-1" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowProviderSheet(true);
+                            setOpenMenu('none');
+                          }}
+                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                        >
+                          <Settings2 className="w-3.5 h-3.5 text-text-secondary" />
+                          <span>Atur API Key &amp; Model...</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {loading ? (
+                    <button
+                      type="button"
+                      onClick={handleStopStreaming}
+                      className="w-7 h-7 rounded-full bg-text-primary text-surface flex items-center justify-center hover:opacity-90 transition shrink-0"
+                      title="Hentikan respons"
+                      aria-label="Hentikan respons"
+                    >
+                      <Square className="w-2.5 h-2.5 fill-current" />
+                    </button>
+                  ) : (
+                    <button
+                      type="submit"
+                      disabled={!hasSendableInput}
+                      className={`w-7 h-7 rounded-full flex items-center justify-center transition shrink-0 ${
+                        hasSendableInput
+                          ? 'bg-text-primary text-surface hover:opacity-90'
+                          : 'bg-text-secondary/15 text-text-secondary/50 cursor-default'
+                      }`}
+                      title="Kirim pesan"
+                      aria-label="Kirim ke Miu AI"
+                    >
+                      <ArrowUp className="w-4 h-4 stroke-[2.25]" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </form>
+          </div>
         </>
       )}
     </aside>

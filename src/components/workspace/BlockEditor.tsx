@@ -224,6 +224,11 @@ export const BlockEditor: React.FC = () => {
       setShowTocOutline(true);
     }
   }, []);
+  useEffect(() => {
+    if (isAIDrawerOpen && window.innerWidth < 1536) {
+      setShowTocOutline(false);
+    }
+  }, [isAIDrawerOpen]);
   const tocHeadings = useMemo(
     () => extractTocHeadings(activeNote?.blocks),
     [activeNote?.blocks]

@@ -745,7 +745,8 @@ export async function runExternalAIStream(
   userPrompt: string,
   onChunk: (fullText: string) => void,
   imageUrl?: string,
-  history: AIChatMessage[] = []
+  history: AIChatMessage[] = [],
+  signal?: AbortSignal
 ): Promise<string> {
   const cleanHistory = history
     .filter((m) => m.content.trim().length > 0)
@@ -755,6 +756,7 @@ export async function runExternalAIStream(
     const resp = await fetch('/api/ai/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal,
       body: JSON.stringify({
         systemPrompt,
         userPrompt,
@@ -769,6 +771,7 @@ export async function runExternalAIStream(
       let current = '';
       const words = simulated.split(' ');
       for (let i = 0; i < words.length; i++) {
+        if (signal?.aborted) break;
         current += (i === 0 ? '' : ' ') + words[i];
         onChunk(current);
         await new Promise((r) => setTimeout(r, 18));
@@ -789,6 +792,7 @@ export async function runExternalAIStream(
     let current = '';
     const words = simulated.split(' ');
     for (let i = 0; i < words.length; i++) {
+      if (signal?.aborted) break;
       current += (i === 0 ? '' : ' ') + words[i];
       onChunk(current);
       await new Promise((r) => setTimeout(r, 18));
@@ -812,6 +816,7 @@ export async function runExternalAIStream(
     const resp = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal,
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: systemPrompt }] },
         contents
@@ -857,6 +862,7 @@ export async function runExternalAIStream(
     const resp = await fetch(`${base}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal,
       body: JSON.stringify({
         model: config.model || 'llama3.2',
         stream: true,
@@ -906,6 +912,7 @@ export async function runExternalAIStream(
         'anthropic-version': '2023-06-01',
         'anthropic-dangerous-direct-browser-access': 'true'
       },
+      signal,
       body: JSON.stringify({
         model: config.model || DEFAULT_MODELS.claude,
         max_tokens: 2048,
@@ -966,6 +973,7 @@ export async function runExternalAIStream(
           ? { 'HTTP-Referer': window.location.origin, 'X-Title': 'Miu Workspace' }
           : {})
       },
+      signal,
       body: JSON.stringify({
         model: modelName,
         stream: true,

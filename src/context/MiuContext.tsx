@@ -119,6 +119,7 @@ interface MiuContextValue {
   isAIDrawerOpen: boolean;
   setIsAIDrawerOpen: (v: boolean) => void;
   aiExplainDraft: string;
+  setAiExplainDraft: (draft: string) => void;
   aiImageAttachment: { url: string; caption?: string } | null;
   setAiImageAttachment: (img: { url: string; caption?: string } | null) => void;
   aiPdfAttachment: { fileName: string; text: string; pages: number; url?: string } | null;
@@ -1893,6 +1894,7 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     isAIDrawerOpen,
     setIsAIDrawerOpen,
     aiExplainDraft,
+    setAiExplainDraft,
     aiImageAttachment,
     setAiImageAttachment,
     aiPdfAttachment,
