@@ -45,18 +45,18 @@ export const OFFICIAL_SKILL_LIBRARY: SkillLibraryItem[] = [
     icon: '🔬',
     category: 'Riset & Web',
     summary:
-      'Mencari referensi jurnal, artikel ilmiah, dan fakta terkini via Tavily & Serper lalu menyusunnya ke catatan lengkap dengan sitasi.',
+      'Mencari referensi jurnal, artikel ilmiah, dan fakta terkini via Web Tool lalu menyusunnya ke catatan lengkap dengan sitasi.',
     functionDescription:
-      'Skill ini berfungsi sebagai asisten riset ilmiah dan literatur. Saat diaktifkan, AI otomatis menggunakan pencarian ganda Tavily + Google Serper untuk memverifikasi fakta, mengumpulkan kutipan/tautan sumber yang kredibel, merangkum temuan dalam struktur akademik (Pendahuluan, Temuan Utama, Analisis, dan Daftar Referensi), serta dapat langsung membuat atau memperbarui halaman catatan risetmu.',
+      'Skill ini berfungsi sebagai asisten riset ilmiah dan literatur. Saat diaktifkan, AI otomatis menggunakan Web Tool untuk memverifikasi fakta, mengumpulkan kutipan/tautan sumber yang kredibel, merangkum temuan dalam struktur akademik (Pendahuluan, Temuan Utama, Analisis, dan Daftar Referensi), serta dapat langsung membuat atau memperbarui halaman catatan risetmu.',
     useCases: [
       'Mencari referensi paper atau artikel teknis terbaru beserta tautan sumbernya',
       'Membandingkan beberapa metode/teknologi dari hasil pencarian web ke dalam tabel catatan',
       'Menyusun tinjauan pustaka (literature review) langsung menjadi halaman catatan baru'
     ],
-    tags: ['Tavily', 'Serper', 'Riset Ilmiah', 'Sitasi', 'Catatan CRUD'],
+    tags: ['Web Tool', 'Riset Ilmiah', 'Sitasi', 'Catatan CRUD'],
     instructionsMarkdown: [
       '## Peran & Fungsi Utama',
-      '- Kamu adalah **Asisten Riset Akademik & Literatur**. Selalu utamakan keakuratan data dengan memanggil tool `web_search` (mode `auto`: Tavily + Serper) ketika pengguna menanyakan topik ilmiah, berita terbaru, atau referensi teknis.',
+      '- Kamu adalah **Asisten Riset Akademik & Literatur**. Selalu utamakan keakuratan data dengan memanggil tool `web_search` (Web Tool) ketika pengguna menanyakan topik ilmiah, berita terbaru, atau referensi teknis.',
       '- Setiap kali mengutip fakta dari hasil pencarian web, cantumkan nama sumber dan URL aslinya dalam format Markdown `[Nama Sumber](https://...)`.',
       '- Susun hasil riset dengan struktur rapi: **## Ringkasan Eksekutif**, **## Poin Temuan Utama**, **## Tabel Perbandingan** (jika relevan), dan **## Daftar Referensi**.',
       '- Jika pengguna meminta hasil riset disimpan, gunakan tool `create_note` atau `update_note` agar langsung tersimpan rapi di workspace catatan.'
@@ -370,7 +370,7 @@ export function extractSkillMetadataFromNote(note: NoteRecord): {
 
   const instructionsMarkdown =
     blocksToSkillMarkdown(note.blocks || []) ||
-    '## Instruksi Skill\n- Ikuti arahan pengguna dan gunakan tool pencarian web (Tavily & Serper) serta akses catatan sesuai kebutuhan.';
+    '## Instruksi Skill\n- Ikuti arahan pengguna dan gunakan Web Tool serta akses catatan sesuai kebutuhan.';
 
   const summary =
     yamlDescription ||
@@ -397,9 +397,9 @@ export function extractSkillMetadataFromNote(note: NoteRecord): {
         : [
             `Menjalankan alur kerja ${displayName} secara otomatis`,
             'Mengakses dan memperbarui halaman catatan di workspace',
-            'Mencari referensi pendukung dengan Tavily & Serper'
+            'Mencari referensi pendukung dengan Web Tool'
           ],
-    tags: ['Skill Komunitas', 'Catatan CRUD', 'Tavily & Serper'],
+    tags: ['Skill Komunitas', 'Catatan CRUD', 'Web Tool'],
     connectionUrl,
     instructionsMarkdown
   };

@@ -382,8 +382,8 @@ export const SidebarInboxSlideDrawer: React.FC<SidebarInboxSlideDrawerProps> = (
 
   return (
     <div
-      style={{ left: `${sidebarWidth}px`, width: `${sidebarWidth}px` }}
-      className={`fixed top-0 bottom-0 z-30 overflow-hidden no-print transition-all duration-300 ease-in-out ${
+      style={{ left: `${sidebarWidth}px`, width: isOpen ? `${sidebarWidth}px` : '0px' }}
+      className={`fixed top-0 bottom-0 z-30 overflow-hidden no-print transition-[width] duration-300 ease-in-out ${
         isOpen ? 'pointer-events-auto' : 'pointer-events-none'
       }`}
     >
@@ -391,8 +391,10 @@ export const SidebarInboxSlideDrawer: React.FC<SidebarInboxSlideDrawerProps> = (
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
         style={{ width: `${sidebarWidth}px` }}
-        className={`h-screen bg-[#F7F7F5] dark:bg-subtle/95 backdrop-blur-md border-r border-border-subtle shadow-[14px_0_36px_-12px_rgba(15,23,42,0.18)] dark:shadow-[16px_0_40px_-10px_rgba(0,0,0,0.7)] flex flex-col justify-between select-none transform transition-transform duration-300 ease-in-out ${
-          isOpen ? 'translate-x-0' : '-translate-x-full'
+        className={`h-screen bg-[#F7F7F5] dark:bg-subtle/95 backdrop-blur-md flex flex-col justify-between select-none transform transition-all duration-300 ease-in-out ${
+          isOpen
+            ? 'translate-x-0 opacity-100 border-r border-border-subtle shadow-[14px_0_36px_-12px_rgba(15,23,42,0.18)] dark:shadow-[16px_0_40px_-10px_rgba(0,0,0,0.7)]'
+            : '-translate-x-full opacity-0 border-r-0 shadow-none'
         }`}
       >
         {/* Top Header */}
@@ -532,13 +534,13 @@ export const MIU_CHANGELOG_RELEASES: MiuReleaseChangelog[] = [
     id: 'miu-3.9',
     version: 'Miu 3.9',
     shortLabel: 'Agen, dibangun kembali untuk...',
-    title: 'Agen Miu AI, Pustaka Skill Komunitas & Dual Web Search',
+    title: 'Agen Miu AI, Pustaka Skill Komunitas & Web Tool',
     date: 'Terbaru',
     badge: 'Baru',
     highlights: [
-      'Pustaka Skill Komunitas: Instal skill.md siap pakai ke catatan Anda atau unggah skill buatan Anda beserta penjelasan fungsinya.',
+      'Halaman Pustaka Skill: Temukan & instal skill.md siap pakai langsung dari halaman Pustaka atau unggah skill buatan Anda beserta penjelasan fungsinya.',
       'Tool Calling Penuh: Miu AI kini dapat membaca, membuat, mengubah, dan menghapus catatan workspace secara langsung.',
-      'Dual Web Search Provider: Pencarian internet real-time terintegrasi dengan Tavily AI Search & Google Serper.',
+      'Web Tool Real-Time: Pencarian informasi & referensi web terkini secara otomatis oleh Agen Miu AI.',
       'Koneksi Webhook & API Eksternal: Hubungkan halaman skill.md ke endpoint REST API atau webhook luar.'
     ]
   },

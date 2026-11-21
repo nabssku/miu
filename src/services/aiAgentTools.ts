@@ -100,8 +100,7 @@ export function saveAIConnectionsConfig(cfg: AIConnectionsConfig): void {
 export function countActiveConnections(cfg: AIConnectionsConfig): number {
   let count = 0;
   if (cfg.notesCrudEnabled) count += 1;
-  if (cfg.webBrowserEnabled && cfg.tavilyEnabled) count += 1;
-  if (cfg.webBrowserEnabled && cfg.serperEnabled) count += 1;
+  if (cfg.webBrowserEnabled) count += 1;
   for (const ext of cfg.customConnections) {
     if (ext.enabled && ext.url.trim()) count += 1;
   }
@@ -175,12 +174,12 @@ export async function createEditableSkillNote(
 
   const desc =
     opts.description?.trim() ||
-    'Skill AI kustom yang dapat mencari web (Tavily & Serper), mengelola catatan workspace, dan terhubung ke endpoint API/Webhook eksternal.';
+    'Skill AI kustom yang dapat mencari informasi via Web Tool, mengelola catatan workspace, dan terhubung ke endpoint API/Webhook eksternal.';
 
   const yamlConfig = [
     `name: ${cleanName || 'custom-skill'}`,
     `description: ${desc}`,
-    `web_search: auto # auto | tavily | serper`,
+    `web_tool: enabled`,
     `workspace_access: full # baca, buat, ubah, hapus catatan`,
     `connections:`,
     `  - name: external_webhook`,
@@ -198,7 +197,7 @@ export async function createEditableSkillNote(
           id: `blk-skill-b1-${now}`,
           type: 'bullet' as BlockType,
           content:
-            'Gunakan pencarian web **Tavily** & **Serper** (`web_search`) saat membutuhkan referensi terbaru, berita, atau dokumentasi teknis.'
+            'Gunakan **Web Tool** (`web_search`) saat membutuhkan referensi terbaru, berita, atau dokumentasi teknis.'
         },
         {
           id: `blk-skill-b2-${now}`,
@@ -496,8 +495,7 @@ function buildToolDisplayLabel(call: ParsedToolCall): string {
   const args = call.arguments;
   switch (call.name) {
     case 'web_search': {
-      const prov = String(args.provider || 'auto').toUpperCase();
-      return `Mencari di Web (${prov === 'AUTO' ? 'Tavily + Serper' : prov}): "${String(args.query || '')}"`;
+      return `Web Tool: "${String(args.query || '')}"`;
     }
     case 'list_notes':
       return 'Membaca daftar seluruh catatan di workspace';
@@ -544,27 +542,14 @@ export async function executeAIAgentToolCall(
           };
         }
 
-        let requestedProvider: SearchProviderMode =
-          args.provider === 'tavily' || args.provider === 'serper'
-            ? args.provider
-            : ctx.connectionsConfig.searchProvider;
-
-        if (!ctx.connectionsConfig.tavilyEnabled && requestedProvider !== 'serper') {
-          requestedProvider = 'serper';
-        } else if (!ctx.connectionsConfig.serperEnabled && requestedProvider !== 'tavily') {
-          requestedProvider = 'tavily';
-        }
-
         const resp = await fetch('/api/ai/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'search',
             query,
-            provider: requestedProvider,
-            maxResults: Number(args.maxResults) || 6,
-            tavilyApiKey: ctx.connectionsConfig.tavilyApiKey.trim() || undefined,
-            serperApiKey: ctx.connectionsConfig.serperApiKey.trim() || undefined
+            provider: 'auto',
+            maxResults: Number(args.maxResults) || 6
           })
         });
 
@@ -572,27 +557,32 @@ export async function executeAIAgentToolCall(
           ok?: boolean;
           providerUsed?: string;
           answer?: string;
-          results?: Array<{ title: string; url: string; snippet: string; provider: string }>;
+          results?: Array<{ title: string; url: string; snippet: string; provider?: string }>;
           error?: string;
         };
 
         if (!resp.ok || !data.ok) {
           return {
             ok: false,
-            summary: data.error || 'Gagal mencari di web',
+            summary: data.error || 'Gagal menjalankan Web Tool',
             output: JSON.stringify({ error: data.error || 'Pencarian gagal' })
           };
         }
 
         const count = data.results?.length || 0;
+        const sanitizedResults = (data.results || []).map((r) => ({
+          title: r.title,
+          url: r.url,
+          snippet: r.snippet
+        }));
         return {
           ok: true,
-          summary: `${count} hasil ditemukan via ${data.providerUsed || requestedProvider}`,
+          summary: `${count} hasil ditemukan via Web Tool`,
           output: JSON.stringify({
             query,
-            providerUsed: data.providerUsed,
+            tool: 'Web Tool',
             directAnswer: data.answer,
-            results: data.results || []
+            results: sanitizedResults
           })
         };
       }
@@ -1286,7 +1276,7 @@ export function buildAgentToolsSystemAddendum(
 
   if (connectionsConfig.webBrowserEnabled) {
     lines.push(
-      `- web_search: Cari informasi real-time di internet menggunakan Tavily & Google Serper. Arguments: {"query": "kata kunci pencarian", "provider": "auto" | "tavily" | "serper"} (default provider saat ini: "${connectionsConfig.searchProvider}").`
+      '- web_search: Cari informasi real-time di internet menggunakan Web Tool. Arguments: {"query": "kata kunci pencarian"}.'
     );
   }
 

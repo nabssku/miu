@@ -167,7 +167,7 @@ import {
   SidebarWhatsNewButton,
   type SidebarSectionId
 } from './SidebarInboxPopover';
-import { SkillLibraryModal } from '../ai/SkillLibraryModal';
+import { PustakaPageView, type PustakaSkillSubTab } from './PustakaPageView';
 import {
   loadActiveSkillNoteIds,
   saveActiveSkillNoteIds
@@ -255,7 +255,10 @@ export const BlockEditor: React.FC = () => {
     useState<SidebarSectionId | null>(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [isInboxOpen, setIsInboxOpen] = useState(false);
-  const [showSidebarSkillLibrary, setShowSidebarSkillLibrary] = useState(false);
+  const [pustakaSubTab, setPustakaSubTab] = useState<PustakaSkillSubTab>('active');
+  const [activeSkillIdsState, setActiveSkillIdsState] = useState<string[]>(() =>
+    loadActiveSkillNoteIds()
+  );
   const [quickLinkCopied, setQuickLinkCopied] = useState(false);
   const [copiedMetaField, setCopiedMetaField] = useState<string | null>(null);
   const sidebarSearchInputRef = useRef<HTMLInputElement | null>(null);
@@ -271,6 +274,12 @@ export const BlockEditor: React.FC = () => {
       // ignore
     }
   }, []);
+
+  useEffect(() => {
+    if (!isSidebarOpen) {
+      setIsInboxOpen(false);
+    }
+  }, [isSidebarOpen]);
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
@@ -347,7 +356,20 @@ export const BlockEditor: React.FC = () => {
     window.addEventListener('mouseup', onMouseUp);
   };
 
-  const [mainViewMode, setMainViewMode] = useState<'document' | 'kanban' | 'calendar'>('document');
+  const [mainViewMode, setMainViewMode] = useState<
+    'document' | 'kanban' | 'calendar' | 'pustaka'
+  >('document');
+
+  useEffect(() => {
+    const handleOpenPustaka = (e: Event) => {
+      const custom = e as CustomEvent<{ subTab?: PustakaSkillSubTab }>;
+      setPustakaSubTab(custom.detail?.subTab || 'active');
+      setActiveSkillIdsState(loadActiveSkillNoteIds());
+      setMainViewMode('pustaka');
+    };
+    window.addEventListener('miu:open-pustaka-page', handleOpenPustaka);
+    return () => window.removeEventListener('miu:open-pustaka-page', handleOpenPustaka);
+  }, []);
   const [searchQuery, setSearchQuery] = useState('');
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [showCoverPicker, setShowCoverPicker] = useState(false);
@@ -5865,7 +5887,11 @@ export const BlockEditor: React.FC = () => {
                 <div className="flex items-center gap-0.5 shrink-0">
                   <SidebarWhatsNewButton />
                   <SidebarQuickLauncherPopover
-                    onOpenSkillLibrary={() => setShowSidebarSkillLibrary(true)}
+                    onOpenSkillLibrary={() => {
+                      setPustakaSubTab('active');
+                      setActiveSkillIdsState(loadActiveSkillNoteIds());
+                      setMainViewMode('pustaka');
+                    }}
                     onOpenKanban={() =>
                       setMainViewMode((prev) =>
                         prev === 'kanban' ? 'document' : 'kanban'
@@ -5935,35 +5961,11 @@ export const BlockEditor: React.FC = () => {
           }}
         />
 
-        {/* Pustaka Skill Modal opened from Sidebar Bottom-Right Quick Launcher */}
-        <SkillLibraryModal
-          isOpen={showSidebarSkillLibrary}
-          initialTab="browse"
-          onClose={() => setShowSidebarSkillLibrary(false)}
-          workspaceNotes={allNotes}
-          activeSkillIds={loadActiveSkillNoteIds()}
-          onSkillInstalled={(installedNote) => {
-            const currentIds = loadActiveSkillNoteIds();
-            if (!currentIds.includes(installedNote.id)) {
-              saveActiveSkillNoteIds([...currentIds, installedNote.id]);
-            }
-            openDocumentNote(installedNote.id);
-          }}
-          onOpenNote={(note) => {
-            openDocumentNote(note.id);
-          }}
-          ownerId={currentUser?.id}
-          ownerEmail={currentUser?.email}
-          ownerName={currentUser?.name}
-          semesterId={activeNote?.semesterId || activeSemesterId || 'sem-1'}
-          courseId={activeNote?.courseId || activeCourseId || 'course-default'}
-        />
-
         {/* =================================================================== */}
-        {/* MAIN PANEL: CLEAN NOTION TOP NAVBAR + PUBLIC BANNER + DOCUMENT      */}
+        {/* MAIN PANEL: CLEAN TOP NAVBAR + PUBLIC BANNER + DOCUMENT / PUSTAKA   */}
         {/* =================================================================== */}
         <div className="flex-1 min-w-0 min-h-screen flex flex-col bg-surface">
-          {/* Minimal Sticky Notion Top Navbar (image.png & image_4.png) */}
+          {/* Minimal Sticky Top Navbar */}
           <header
             className={`sticky top-0 z-20 px-3 sm:px-4 ${
               hasTopIsland ? 'pt-[52px] pb-2' : 'h-11'
@@ -5991,6 +5993,10 @@ export const BlockEditor: React.FC = () => {
                 <div className="inline-flex items-center gap-1.5 font-medium text-text-primary px-1.5 py-0.5">
                   <Calendar className="w-4 h-4 text-text-secondary" />
                   <span>Kalender &amp; Deadline</span>
+                </div>
+              ) : mainViewMode === 'pustaka' ? (
+                <div className="inline-flex items-center gap-1.5 font-medium text-text-primary px-1.5 py-0.5">
+                  <span>Pustaka</span>
                 </div>
               ) : (
                 <>
@@ -6256,6 +6262,41 @@ export const BlockEditor: React.FC = () => {
                 void handleToggleTodoDeadlineFromCalendar(noteId, blockId, nextChecked)
               }
               onSaveGoogleSyncId={(params) => handleSaveGoogleSyncIdFromCalendar(params)}
+            />
+          ) : mainViewMode === 'pustaka' ? (
+            <PustakaPageView
+              allNotes={allNotes}
+              myNotes={myNotes}
+              sharedWithMeNotes={sharedWithMeNotes}
+              favoriteNotes={favoriteNotes}
+              activeSkillIds={activeSkillIdsState}
+              onToggleSkillActive={(skillNoteId) => {
+                setActiveSkillIdsState((prev) => {
+                  const next = prev.includes(skillNoteId)
+                    ? prev.filter((id) => id !== skillNoteId)
+                    : [...prev, skillNoteId];
+                  saveActiveSkillNoteIds(next);
+                  return next;
+                });
+              }}
+              onSkillInstalled={(installedNote) => {
+                setActiveSkillIdsState((prev) => {
+                  const next = prev.includes(installedNote.id)
+                    ? prev
+                    : [...prev, installedNote.id];
+                  saveActiveSkillNoteIds(next);
+                  return next;
+                });
+                openDocumentNote(installedNote.id);
+              }}
+              onOpenNote={(noteId) => openDocumentNote(noteId)}
+              onOpenAIDrawer={() => setIsAIDrawerOpen(true)}
+              initialSubTab={pustakaSubTab}
+              ownerId={currentUser?.id}
+              ownerEmail={currentUser?.email}
+              ownerName={currentUser?.name}
+              semesterId={activeNote?.semesterId || activeSemesterId || 'sem-1'}
+              courseId={activeNote?.courseId || activeCourseId || 'course-default'}
             />
           ) : activeNote ? (
             <div className="flex-1 flex flex-col">

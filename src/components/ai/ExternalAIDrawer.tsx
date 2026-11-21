@@ -48,7 +48,6 @@ import {
 } from 'lucide-react';
 import { ConversationalVoicePanel } from './ConversationalVoicePanel';
 import { MiuAIFaceIcon } from './MiuAIFaceIcon';
-import { SkillLibraryModal } from './SkillLibraryModal';
 import { db } from '../../db/database';
 import { useMiu } from '../../context/MiuContext';
 import { flattenBlocks } from '../../utils/blockTreeHelper';
@@ -72,8 +71,7 @@ import {
   runAgentWithToolsStream,
   saveActiveSkillNoteIds,
   saveAIConnectionsConfig,
-  type AIConnectionsConfig,
-  type SearchProviderMode
+  type AIConnectionsConfig
 } from '../../services/aiAgentTools';
 import type { AIChatMessage, AIProviderId } from '../../types/miu';
 import {
@@ -165,7 +163,7 @@ export const ExternalAIDrawer: React.FC = () => {
   const [isExpandedWidth, setIsExpandedWidth] = useState(false);
   const [includeNoteContext, setIncludeNoteContext] = useState(true);
 
-  // Tool Calling, Web Search (Tavily + Serper), Skills (skill.md) & External Connections
+  // Tool Calling, Web Tool, Skills (skill.md) & External Connections
   const [connectionsConfig, setConnectionsConfig] = useState<AIConnectionsConfig>(
     () => DEFAULT_AI_CONNECTIONS_CONFIG
   );
@@ -176,10 +174,14 @@ export const ExternalAIDrawer: React.FC = () => {
   const [newConnUrl, setNewConnUrl] = useState('');
   const [newConnMethod, setNewConnMethod] = useState<'GET' | 'POST'>('POST');
   const [newConnAuth, setNewConnAuth] = useState('');
-  const [showSearchApiKeys, setShowSearchApiKeys] = useState(false);
-  const [skillLibraryModalTab, setSkillLibraryModalTab] = useState<'browse' | 'upload' | null>(
-    null
-  );
+
+  const openPustakaInMainPage = (subTab: 'active' | 'discover' | 'upload' = 'discover') => {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('miu:open-pustaka-page', { detail: { subTab } })
+      );
+    }
+  };
 
   const [openMenu, setOpenMenu] = useState<OpenMenuType>('none');
   const [customPrompt, setCustomPrompt] = useState('');
@@ -722,7 +724,7 @@ export const ExternalAIDrawer: React.FC = () => {
     }
 
     const baseSystemPrompt =
-      'Kamu adalah Miu AI, asisten workspace & agent cerdas yang dapat mencari informasi di web (Tavily & Serper), mengakses/mengubah/membuat/menghapus catatan pengguna secara langsung, menjalankan skill.md, dan terhubung ke API eksternal. Gunakan struktur Markdown yang bersih (## Subjudul, - Poin Bullet, 1. Poin Nomor, - [ ] Pelacak Tugas, **Tebal** untuk istilah penting, dan $...$ atau $$...$$ untuk rumus LaTeX). Jangan tampilkan tag <think>.';
+      'Kamu adalah Miu AI, asisten workspace & agent cerdas yang dapat mencari informasi via Web Tool, mengakses/mengubah/membuat/menghapus catatan pengguna secara langsung, menjalankan skill.md, dan terhubung ke API eksternal. Gunakan struktur Markdown yang bersih (## Subjudul, - Poin Bullet, 1. Poin Nomor, - [ ] Pelacak Tugas, **Tebal** untuk istilah penting, dan $...$ atau $$...$$ untuk rumus LaTeX). Jangan tampilkan tag <think>.';
 
     const finalSystemPrompt =
       !contextInUserPrompt && noteContent.trim()
@@ -1179,13 +1181,13 @@ export const ExternalAIDrawer: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
-                    setSkillLibraryModalTab('browse');
+                    openPustakaInMainPage('active');
                     setOpenMenu('none');
                   }}
                   className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
                 >
                   <BookOpen className="w-3.5 h-3.5 text-amber-500" />
-                  <span>Pustaka Skill (Instal &amp; Unggah)</span>
+                  <span>Pustaka Skill (Halaman)</span>
                 </button>
                 <button
                   type="button"
@@ -1193,7 +1195,7 @@ export const ExternalAIDrawer: React.FC = () => {
                   className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
                 >
                   <LayoutGrid className="w-3.5 h-3.5 text-text-secondary" />
-                  <span>Koneksi (Tavily, Serper &amp; API)</span>
+                  <span>Koneksi &amp; Web Tool</span>
                 </button>
                 <button
                   type="button"
@@ -1281,7 +1283,7 @@ export const ExternalAIDrawer: React.FC = () => {
                         ...prev,
                         webBrowserEnabled: true
                       }));
-                      setCustomPrompt('Cari di web menggunakan Tavily & Serper tentang: ');
+                      setCustomPrompt('Cari menggunakan Web Tool tentang: ');
                       window.setTimeout(() => textareaRef.current?.focus(), 30);
                     }}
                     className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] text-text-primary hover:bg-subtle transition text-left"
@@ -1374,7 +1376,7 @@ export const ExternalAIDrawer: React.FC = () => {
 
                   return (
                     <div key={msg.id} className="space-y-2">
-                      {/* Tool Execution Badges (Web Search Tavily/Serper, Notes CRUD, Skills, Connections) */}
+                      {/* Tool Execution Badges (Web Tool, Notes CRUD, Skills, Connections) */}
                       {msg.toolExecutions && msg.toolExecutions.length > 0 && (
                         <div className="space-y-1">
                           {msg.toolExecutions.map((exec) => (
@@ -1719,7 +1721,7 @@ export const ExternalAIDrawer: React.FC = () => {
               </div>
             )}
 
-            {/* Active Skill.md & Web Browser Pills above Composer */}
+            {/* Active Skill.md & Web Tool Pills above Composer */}
             {(activeSkillNotes.length > 0 || connectionsConfig.webBrowserEnabled) && (
               <div className="flex flex-wrap items-center gap-1.5">
                 {connectionsConfig.webBrowserEnabled && (
@@ -1727,17 +1729,10 @@ export const ExternalAIDrawer: React.FC = () => {
                     type="button"
                     onClick={() => setOpenMenu('connections')}
                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-500/12 border border-sky-500/30 text-[10.5px] font-medium text-sky-600 dark:text-sky-300 hover:bg-sky-500/20 transition"
-                    title="Klik untuk mengatur provider pencarian Tavily & Serper"
+                    title="Web Tool aktif"
                   >
                     <Globe className="w-3 h-3 shrink-0" />
-                    <span>
-                      Web:{' '}
-                      {connectionsConfig.searchProvider === 'auto'
-                        ? 'Tavily + Serper'
-                        : connectionsConfig.searchProvider === 'tavily'
-                          ? 'Tavily'
-                          : 'Serper'}
-                    </span>
+                    <span>Web Tool</span>
                   </button>
                 )}
 
@@ -1882,7 +1877,7 @@ export const ExternalAIDrawer: React.FC = () => {
                     ? `Tanyakan tentang "${aiPdfAttachment.fileName}"...`
                     : aiImageAttachment
                       ? 'Tanyakan tentang gambar di atas...'
-                      : 'Tanya, cari web (Tavily/Serper), atau kelola catatan...'
+                      : 'Tanya, cari via Web Tool, atau kelola catatan...'
                 }
                 className="w-full bg-transparent text-[13px] text-text-primary placeholder:text-text-secondary/70 focus:outline-none resize-none leading-relaxed max-h-36 overflow-y-auto"
               />
@@ -2112,7 +2107,7 @@ export const ExternalAIDrawer: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => {
-                                setSkillLibraryModalTab('browse');
+                                openPustakaInMainPage('active');
                                 setOpenMenu('none');
                               }}
                               className="py-1.5 px-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-semibold flex items-center justify-center gap-1 transition shadow-sm"
@@ -2123,7 +2118,7 @@ export const ExternalAIDrawer: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => {
-                                setSkillLibraryModalTab('upload');
+                                openPustakaInMainPage('upload');
                                 setOpenMenu('none');
                               }}
                               className="py-1.5 px-2 rounded-lg bg-surface hover:bg-subtle text-text-primary border border-border-subtle text-[11px] font-semibold flex items-center justify-center gap-1 transition"
@@ -2232,7 +2227,7 @@ export const ExternalAIDrawer: React.FC = () => {
                       </div>
                     )}
 
-                    {/* SUBMENU 3: KONEKSI (TAVILY, SERPER, WORKSPACE CRUD & CUSTOM WEBHOOK/API) */}
+                    {/* SUBMENU 3: KONEKSI & TOOL CALLING (WEB TOOL, WORKSPACE CRUD & CUSTOM WEBHOOK/API) */}
                     {openMenu === 'connections' && (
                       <div className="absolute left-0 bottom-full mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-2xl bg-surface border border-border-subtle shadow-2xl p-3 z-50 space-y-2.5 text-xs max-h-[75vh] overflow-y-auto">
                         <div className="flex items-center justify-between">
@@ -2244,130 +2239,40 @@ export const ExternalAIDrawer: React.FC = () => {
                             <ArrowLeft className="w-3.5 h-3.5" />
                             <span>Koneksi &amp; Tool Calling ({activeConnectionCount})</span>
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => setShowSearchApiKeys((v) => !v)}
-                            className="text-[10.5px] font-medium text-sky-600 dark:text-sky-400 hover:underline"
-                          >
-                            {showSearchApiKeys ? 'Tutup Key' : 'API Key'}
-                          </button>
                         </div>
 
-                        {/* 1. Web Search Providers: Tavily & Serper */}
-                        <div className="p-2.5 rounded-xl bg-subtle/60 border border-border-subtle space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-text-primary">
-                              Provider Pencarian Web
-                            </span>
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 font-semibold">
-                              Aktif
-                            </span>
-                          </div>
-
-                          <div className="grid grid-cols-3 gap-1">
-                            {(
-                              [
-                                { id: 'auto', label: 'Tavily + Serper' },
-                                { id: 'tavily', label: 'Tavily' },
-                                { id: 'serper', label: 'Serper' }
-                              ] as const
-                            ).map((prov) => (
-                              <button
-                                key={prov.id}
-                                type="button"
-                                onClick={() =>
-                                  setConnectionsConfig((prev) => ({
-                                    ...prev,
-                                    webBrowserEnabled: true,
-                                    searchProvider: prov.id as SearchProviderMode
-                                  }))
-                                }
-                                className={`py-1.5 px-1.5 rounded-lg text-[11px] font-medium border text-center transition ${
-                                  connectionsConfig.searchProvider === prov.id
-                                    ? 'bg-sky-600 border-sky-600 text-white font-semibold'
-                                    : 'bg-surface border-border-subtle text-text-secondary hover:text-text-primary'
+                        {/* 1. Web Tool (Privacy-Protected Real-Time Web Search) */}
+                        <div className="p-2.5 rounded-xl bg-subtle/60 border border-border-subtle flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-semibold text-text-primary">
+                                Web Tool
+                              </span>
+                              <span
+                                className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                                  connectionsConfig.webBrowserEnabled
+                                    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300'
+                                    : 'bg-subtle text-text-secondary'
                                 }`}
                               >
-                                {prov.label}
-                              </button>
-                            ))}
-                          </div>
-
-                          {/* Individual Tavily & Serper switches */}
-                          <div className="space-y-1.5 pt-1">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="font-medium text-text-primary">
-                                  Tavily AI Search
-                                </div>
-                                <div className="text-[10px] text-emerald-600 dark:text-emerald-400">
-                                  API Key terhubung (tvly-•••drPb)
-                                </div>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setConnectionsConfig((prev) => ({
-                                    ...prev,
-                                    tavilyEnabled: !prev.tavilyEnabled
-                                  }))
-                                }
-                              >
-                                {renderSwitch(connectionsConfig.tavilyEnabled)}
-                              </button>
+                                {connectionsConfig.webBrowserEnabled ? 'Aktif' : 'Nonaktif'}
+                              </span>
                             </div>
-
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="font-medium text-text-primary">
-                                  Serper Google Search
-                                </div>
-                                <div className="text-[10px] text-emerald-600 dark:text-emerald-400">
-                                  API Key terhubung (fe89•••2414)
-                                </div>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setConnectionsConfig((prev) => ({
-                                    ...prev,
-                                    serperEnabled: !prev.serperEnabled
-                                  }))
-                                }
-                              >
-                                {renderSwitch(connectionsConfig.serperEnabled)}
-                              </button>
+                            <div className="text-[10.5px] text-text-secondary mt-0.5">
+                              Akses pencarian informasi &amp; referensi web real-time
                             </div>
                           </div>
-
-                          {showSearchApiKeys && (
-                            <div className="space-y-1.5 pt-1.5 border-t border-border-subtle">
-                              <input
-                                type="password"
-                                value={connectionsConfig.tavilyApiKey}
-                                onChange={(e) =>
-                                  setConnectionsConfig((prev) => ({
-                                    ...prev,
-                                    tavilyApiKey: e.target.value
-                                  }))
-                                }
-                                placeholder="Override Tavily Key (opsional, default sudah aktif)"
-                                className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[10.5px] text-text-primary focus:outline-none"
-                              />
-                              <input
-                                type="password"
-                                value={connectionsConfig.serperApiKey}
-                                onChange={(e) =>
-                                  setConnectionsConfig((prev) => ({
-                                    ...prev,
-                                    serperApiKey: e.target.value
-                                  }))
-                                }
-                                placeholder="Override Serper Key (opsional, default sudah aktif)"
-                                className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[10.5px] text-text-primary focus:outline-none"
-                              />
-                            </div>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setConnectionsConfig((prev) => ({
+                                ...prev,
+                                webBrowserEnabled: !prev.webBrowserEnabled
+                              }))
+                            }
+                          >
+                            {renderSwitch(connectionsConfig.webBrowserEnabled)}
+                          </button>
                         </div>
 
                         {/* 2. Full Workspace Notes CRUD Access */}
@@ -2534,7 +2439,7 @@ export const ExternalAIDrawer: React.FC = () => {
                           </button>
                         </div>
                         <p className="text-[10px] text-text-secondary leading-relaxed">
-                          AI memiliki akses penuh ke seluruh halaman workspace ({allNotes.length} catatan), pencarian web (Tavily &amp; Serper), serta {activeSkillNotes.length} skill.md aktif.
+                          AI memiliki akses penuh ke seluruh halaman workspace ({allNotes.length} catatan), Web Tool, serta {activeSkillNotes.length} skill.md aktif.
                         </p>
                       </div>
                     )}
@@ -2676,28 +2581,6 @@ export const ExternalAIDrawer: React.FC = () => {
           </div>
         </>
       )}
-
-      <SkillLibraryModal
-        isOpen={skillLibraryModalTab !== null}
-        initialTab={skillLibraryModalTab || 'browse'}
-        onClose={() => setSkillLibraryModalTab(null)}
-        workspaceNotes={allNotes}
-        activeSkillIds={activeSkillIds}
-        onSkillInstalled={(installedNote) => {
-          setActiveSkillIds((prev) =>
-            prev.includes(installedNote.id) ? prev : [...prev, installedNote.id]
-          );
-          setActiveNoteId(installedNote.id);
-        }}
-        onOpenNote={(note) => {
-          setActiveNoteId(note.id);
-        }}
-        ownerId={currentUser?.id}
-        ownerEmail={currentUser?.email}
-        ownerName={currentUser?.name}
-        semesterId={activeNote?.semesterId || activeSemesterId || 'sem-1'}
-        courseId={activeNote?.courseId || activeCourseId || 'course-default'}
-      />
     </aside>
   );
 };

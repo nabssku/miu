@@ -816,7 +816,7 @@ export const SkillLibraryModal: React.FC<SkillLibraryModalProps> = ({
                   type="text"
                   value={uploadSummary}
                   onChange={e => setUploadSummary(e.target.value)}
-                  placeholder="Contoh: Merangkum paper akademik, mencari referensi via Tavily/Serper, dan menyusun daftar pustaka APA."
+                  placeholder="Contoh: Merangkum paper akademik, mencari referensi via Web Tool, dan menyusun daftar pustaka APA."
                   className="w-full px-3 py-2 rounded-xl text-[13px] bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700"
                 />
               </div>

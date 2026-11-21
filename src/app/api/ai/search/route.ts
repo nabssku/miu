@@ -30,19 +30,14 @@ function decodeKeyBytes(bytes: number[], seed: number): string {
   );
 }
 
-export function resolveSearchApiKeys(overrides?: {
-  tavilyApiKey?: string;
-  serperApiKey?: string;
-}): { tavilyKey: string; serperKey: string } {
+export function resolveSearchApiKeys(): { tavilyKey: string; serperKey: string } {
   const tavilyKey = (
-    overrides?.tavilyApiKey ||
     process.env.TAVILY_API_KEY ||
     process.env.NEXT_PUBLIC_TAVILY_API_KEY ||
     decodeKeyBytes(DEFAULT_T_BYTES, 0x5a)
   ).trim();
 
   const serperKey = (
-    overrides?.serperApiKey ||
     process.env.SERPER_API_KEY ||
     process.env.NEXT_PUBLIC_SERPER_API_KEY ||
     decodeKeyBytes(DEFAULT_S_BYTES, 0x3c)
@@ -267,10 +262,7 @@ export async function POST(req: NextRequest) {
         ? body.provider
         : 'auto';
     const maxResults = Math.min(10, Math.max(2, Number(body.maxResults) || 6));
-    const { tavilyKey, serperKey } = resolveSearchApiKeys({
-      tavilyApiKey: body.tavilyApiKey,
-      serperApiKey: body.serperApiKey
-    });
+    const { tavilyKey, serperKey } = resolveSearchApiKeys();
 
     const combinedResults: WebSearchResultItem[] = [];
     const seenUrls = new Set<string>();
