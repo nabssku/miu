@@ -1023,6 +1023,51 @@ export async function deleteServerNote(
   return { ok: true, status: 200 };
 }
 
+export interface CloudinaryClientUploadParams {
+  configured: boolean;
+  cloudName?: string;
+  folder?: string;
+  timestamp?: string;
+  apiKey?: string;
+  signature?: string;
+  uploadPreset?: string;
+}
+
+export function getCloudinaryUploadParams(): CloudinaryClientUploadParams {
+  const {
+    cloudinaryCloudName,
+    cloudinaryApiKey,
+    cloudinaryApiSecret,
+    cloudinaryUploadPreset
+  } = getServerCloudEnv();
+
+  if (cloudinaryCloudName && cloudinaryApiKey && cloudinaryApiSecret) {
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const folder = 'miu-notes';
+    const toSign = `folder=${folder}&timestamp=${timestamp}${cloudinaryApiSecret}`;
+    const signature = createHash('sha1').update(toSign).digest('hex');
+    return {
+      configured: true,
+      cloudName: cloudinaryCloudName,
+      folder,
+      timestamp,
+      apiKey: cloudinaryApiKey,
+      signature
+    };
+  }
+
+  if (cloudinaryCloudName && cloudinaryUploadPreset) {
+    return {
+      configured: true,
+      cloudName: cloudinaryCloudName,
+      folder: 'miu-notes',
+      uploadPreset: cloudinaryUploadPreset
+    };
+  }
+
+  return { configured: false };
+}
+
 export async function uploadMediaToServerCloud(
   source: Blob | string
 ): Promise<{ url: string; isCloudinary: boolean }> {

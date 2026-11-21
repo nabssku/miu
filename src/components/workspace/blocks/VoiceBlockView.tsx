@@ -12,7 +12,8 @@ import {
   RotateCcw,
   Sparkles,
   Square,
-  UploadCloud
+  UploadCloud,
+  X
 } from 'lucide-react';
 import type { NoteBlock, VoiceBlockData } from '../../../types/miu';
 import { uploadMediaToCloud } from '../../../services/cloudServices';
@@ -142,15 +143,41 @@ export const VoiceBlockView: React.FC<VoiceBlockViewProps> = ({
     });
   };
 
-  const transcribeAudioBlob = async (blob: Blob, lang: 'id-ID' | 'en-US'): Promise<string> => {
+  const transcribeViaStt = async (
+    payload: { audioUrl: string } | { blob: Blob },
+    lang: 'id-ID' | 'en-US'
+  ): Promise<string> => {
     const cfg = loadElevenLabsConfig();
-    const form = new FormData();
-    form.append('file', blob, 'voice-note.webm');
-    form.append('languageCode', lang === 'en-US' ? 'en' : 'id');
-    if (cfg.apiKey?.trim()) {
-      form.append('elevenlabsApiKey', cfg.apiKey.trim());
+    let res: Response;
+
+    if ('audioUrl' in payload) {
+      res = await fetch('/api/elevenlabs/stt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioUrl: payload.audioUrl,
+          languageCode: lang === 'en-US' ? 'en' : 'id',
+          ...(cfg.apiKey?.trim() ? { elevenlabsApiKey: cfg.apiKey.trim() } : {})
+        })
+      });
+    } else {
+      if (payload.blob.size > 4 * 1024 * 1024) {
+        throw new Error(
+          'Audio lokal melebihi 4 MB untuk transkrip langsung. Unggah lewat Cloud Catatan (Cloudinary) atau rekam lebih singkat.'
+        );
+      }
+      const form = new FormData();
+      form.append('file', payload.blob, 'voice-note.webm');
+      form.append('languageCode', lang === 'en-US' ? 'en' : 'id');
+      if (cfg.apiKey?.trim()) {
+        form.append('elevenlabsApiKey', cfg.apiKey.trim());
+      }
+      res = await fetch('/api/elevenlabs/stt', { method: 'POST', body: form });
     }
-    const res = await fetch('/api/elevenlabs/stt', { method: 'POST', body: form });
+
+    if (res.status === 413) {
+      throw new Error('Ukuran file audio terlalu besar untuk batas server (413).');
+    }
     if (!res.ok) {
       const errData = (await res.json().catch(() => ({}))) as { error?: string };
       if (errData.error === 'ELEVENLABS_API_KEY_MISSING') {
@@ -361,15 +388,20 @@ export const VoiceBlockView: React.FC<VoiceBlockViewProps> = ({
     setTranscribing(true);
     setErrorMsg('');
     try {
-      let blob = lastRecordedBlobRef.current;
-      if (!blob) {
-        const resp = await fetch(audioUrl);
-        if (!resp.ok) {
-          throw new Error('Gagal mengunduh file audio untuk transkripsi.');
+      let text = '';
+      if (audioUrl.startsWith('https://')) {
+        text = await transcribeViaStt({ audioUrl }, language);
+      } else {
+        let blob = lastRecordedBlobRef.current;
+        if (!blob) {
+          const resp = await fetch(audioUrl);
+          if (!resp.ok) {
+            throw new Error('Gagal mengunduh file audio untuk transkripsi.');
+          }
+          blob = await resp.blob();
         }
-        blob = await resp.blob();
+        text = await transcribeViaStt({ blob }, language);
       }
-      const text = await transcribeAudioBlob(blob, language);
       if (!text) {
         setErrorMsg('Tidak ada ucapan yang terdeteksi pada audio.');
         return;
@@ -630,8 +662,16 @@ export const VoiceBlockView: React.FC<VoiceBlockViewProps> = ({
 
       {/* Error Message */}
       {errorMsg && (
-        <div className="px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-500">
-          {errorMsg}
+        <div className="px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-500 flex items-center justify-between gap-2">
+          <span className="min-w-0 break-words">{errorMsg}</span>
+          <button
+            type="button"
+            onClick={() => setErrorMsg('')}
+            className="p-0.5 rounded hover:bg-rose-500/15 shrink-0 transition"
+            title="Tutup pesan error"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 

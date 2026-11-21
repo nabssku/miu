@@ -196,8 +196,13 @@ export const BlockEditor: React.FC = () => {
     isLazytypeActive,
     isAIDrawerOpen,
     setIsAIDrawerOpen,
-    triggerInlineAIExplain
+    triggerInlineAIExplain,
+    islandPosition
   } = useMiu();
+  const hasTopIsland =
+    islandPosition === 'top-left' ||
+    islandPosition === 'top-center' ||
+    islandPosition === 'top-right';
 
   const { remoteCollaborators, reportLocalCursor, reportLocalPointer } = useNotePresence();
 
@@ -370,6 +375,28 @@ export const BlockEditor: React.FC = () => {
       setJustDictatedBlockId((prev) => (prev === eventBlockId ? null : prev));
     }, 1600);
   }, [lastDictationEvent, activeNote?.id]);
+
+  useEffect(() => {
+    if (!menuBlockId) return;
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('[data-miu-block-menu]') || target?.closest('[data-miu-block-gutter]')) {
+        return;
+      }
+      setMenuBlockId(null);
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMenuBlockId(null);
+      }
+    };
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [menuBlockId]);
 
   useEffect(() => {
     return () => {
@@ -1327,8 +1354,25 @@ export const BlockEditor: React.FC = () => {
           createdAt: Date.now()
         }
       });
-    } catch {
-      // ignore
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Gagal mengunggah audio.';
+      try {
+        await patchBlockByIdInDb(targetNoteId, blockId, {
+          type: 'voice',
+          caption: msg,
+          voiceData: {
+            audioUrl: '',
+            language: 'id-ID',
+            transcript: '',
+            createdAt: Date.now()
+          }
+        });
+      } catch {
+        // ignore secondary persistence error
+      }
     } finally {
       setUploadingBlockId(null);
     }
@@ -2799,10 +2843,10 @@ export const BlockEditor: React.FC = () => {
                 }
               : undefined
         }
-        className={`scroll-mt-20 ${
+        className={`${hasTopIsland ? 'scroll-mt-28' : 'scroll-mt-20'} ${
           isInsideColumn
             ? 'group/colblk relative flex items-start gap-1 py-0.5 rounded-lg transition'
-            : 'group relative flex items-start gap-1.5 -ml-2 sm:-ml-16 pl-2 sm:pl-16 py-0.5 rounded-lg transition'
+            : 'group relative flex items-start gap-1.5 sm:-ml-[64px] sm:pl-[64px] py-0.5 rounded-lg transition'
         } ${
           isDictationHighlighted
             ? 'bg-emerald-500/10 ring-1 ring-emerald-400/50'
@@ -2863,7 +2907,7 @@ export const BlockEditor: React.FC = () => {
           ) : (
             <div
               data-miu-block-gutter="true"
-              className={`sm:absolute sm:left-1 top-1 flex items-center gap-0.5 transition no-print shrink-0 ${
+              className={`sm:absolute sm:left-0.5 top-1.5 flex items-center gap-0.5 transition no-print shrink-0 ${
                 isBlockMenuOpen || isSelectMode || isBlockSelected
                   ? 'opacity-100'
                   : 'opacity-0 group-hover:opacity-100'
@@ -2875,19 +2919,19 @@ export const BlockEditor: React.FC = () => {
                   e.stopPropagation();
                   toggleSelectBlock(block.id, e.shiftKey);
                 }}
-                className={`w-4 h-4 mr-0.5 rounded-[4px] border flex items-center justify-center transition ${
+                className={`w-3.5 h-3.5 mr-0.5 rounded-[4px] border flex items-center justify-center transition ${
                   isBlockSelected
                     ? 'bg-rose-500 border-rose-500 text-white'
                     : 'border-text-secondary/40 hover:border-rose-400 bg-surface'
                 }`}
                 title="Pilih blok ini (Shift+Klik untuk pilih rentang)"
               >
-                {isBlockSelected && <Check className="w-3 h-3 stroke-[3]" />}
+                {isBlockSelected && <Check className="w-2.5 h-2.5 stroke-[3]" />}
               </button>
               <button
                 type="button"
                 onClick={() => void handleAddBlockAfter(block.id, 'text')}
-                className="p-1 rounded hover:bg-subtle text-text-secondary/70 hover:text-text-primary"
+                className="p-0.5 rounded hover:bg-subtle text-text-secondary/75 hover:text-text-primary"
                 title="Tambah blok"
               >
                 <Plus className="w-3.5 h-3.5" />
@@ -2908,7 +2952,7 @@ export const BlockEditor: React.FC = () => {
                   setDropTargetColumn(null);
                 }}
                 onClick={() => setMenuBlockId(isBlockMenuOpen ? null : block.id)}
-                className="p-1 rounded hover:bg-subtle text-text-secondary/70 hover:text-text-primary cursor-grab active:cursor-grabbing"
+                className="p-0.5 rounded hover:bg-subtle text-text-secondary/75 hover:text-text-primary cursor-grab active:cursor-grabbing"
                 title="Tarik untuk geser posisi blok, atau klik untuk Menu blok"
               >
                 <GripVertical className="w-3.5 h-3.5" />
@@ -2921,11 +2965,26 @@ export const BlockEditor: React.FC = () => {
           <div
             data-miu-block-menu="true"
             className={`absolute ${
-              isInsideColumn ? 'right-0 top-7' : 'left-0 top-8'
-            } z-30 w-52 miu-card shadow-xl p-1.5 space-y-1 text-xs no-print`}
+              isInsideColumn ? 'right-0 top-7' : 'left-0 sm:left-1 top-8'
+            } z-40 w-56 miu-card shadow-xl p-1.5 space-y-1 text-xs no-print`}
           >
             <div className="grid grid-cols-2 gap-0.5">
-              {SLASH_OPTIONS.slice(0, 10).map(({ id: optId, type, label, Icon, preset }) => (
+              {SLASH_OPTIONS.filter((opt) =>
+                [
+                  'text',
+                  'h1',
+                  'h2',
+                  'h3',
+                  'todo',
+                  'deadline',
+                  'bullet',
+                  'toggle',
+                  'table',
+                  'mermaid',
+                  'voice',
+                  'image'
+                ].includes(opt.id)
+              ).map(({ id: optId, type, label, Icon, preset }) => (
                 <button
                   key={optId}
                   type="button"
@@ -4948,8 +5007,12 @@ export const BlockEditor: React.FC = () => {
         {/* LEFT SIDEBAR: FULL-HEIGHT NOTION PAGE LIST + GOOGLE USER PROFILE    */}
         {/* =================================================================== */}
         {isSidebarOpen && (
-          <aside className="w-60 sm:w-64 h-screen sticky top-0 shrink-0 border-r border-border-subtle bg-subtle/55 flex flex-col justify-between select-none no-print">
-            <div className="p-3 space-y-3 overflow-y-auto flex-1">
+          <aside className="w-60 sm:w-64 h-screen sticky top-0 z-10 overflow-x-hidden shrink-0 border-r border-border-subtle bg-subtle/55 flex flex-col justify-between select-none no-print">
+            <div
+              className={`p-3 ${
+                islandPosition === 'top-left' ? 'pt-14' : ''
+              } space-y-3 overflow-y-auto flex-1`}
+            >
               {/* Logged-in Google User Workspace Switcher */}
               <div className="flex items-center justify-between gap-1.5 px-1 pb-2 border-b border-border-subtle">
                 {currentUser ? (
@@ -5193,8 +5256,12 @@ export const BlockEditor: React.FC = () => {
         {/* =================================================================== */}
         <div className="flex-1 min-w-0 min-h-screen flex flex-col bg-surface">
           {/* Minimal Sticky Notion Top Bar */}
-          <header className="sticky top-0 z-20 px-4 sm:px-6 py-3 bg-surface/85 backdrop-blur-md border-b border-border-subtle/60 flex items-center justify-between gap-2 no-print">
-            <div className="flex items-center gap-1.5 text-xs text-text-primary min-w-0 overflow-x-auto">
+          <header
+            className={`sticky top-0 z-20 px-4 sm:px-6 ${
+              hasTopIsland ? 'pt-[54px] pb-2.5' : 'py-3'
+            } bg-surface/85 backdrop-blur-md border-b border-border-subtle/60 flex items-center justify-between gap-2 no-print`}
+          >
+            <div className="flex items-center gap-1.5 text-xs text-text-primary min-w-0 flex-1 overflow-x-auto">
               {!isSidebarOpen && (
                 <button
                   type="button"
@@ -5268,7 +5335,7 @@ export const BlockEditor: React.FC = () => {
               )}
             </div>
 
-            <div className="flex items-center gap-1.5 text-xs shrink-0">
+            <div className="flex items-center justify-end flex-wrap gap-1 sm:gap-1.5 text-xs shrink-0">
               {activeNote && (
                 <CollaboratorsHeaderStrip
                   collaborators={remoteCollaborators}
@@ -5288,7 +5355,7 @@ export const BlockEditor: React.FC = () => {
                     neonActive ? 'text-emerald-500' : 'text-text-secondary'
                   }`}
                 />
-                <span>
+                <span className="hidden xl:inline">
                   {syncStatus === 'syncing'
                     ? 'Menyimpan ke Cloud...'
                     : neonActive
@@ -5617,15 +5684,15 @@ export const BlockEditor: React.FC = () => {
               {/* Clean Blank Notion Page Container + Floating TOC Rail */}
               <div className="flex-1 flex items-start relative">
               <div
-                className={`w-full mx-auto pt-12 pb-28 flex-1 flex flex-col transition-all ${
+                className={`w-full mx-auto pt-8 sm:pt-10 pb-28 flex-1 flex flex-col transition-all ${
                   activeNote.isFullWidth
-                    ? 'max-w-6xl px-4 sm:px-10'
+                    ? 'max-w-6xl pl-4 pr-4 sm:pl-20 sm:pr-8'
                     : activeNote.isFullWidth === undefined &&
                         activeNote.blocks.some(
                           (b) => b.type === 'columns' && (b.columns?.length || 0) >= 4
                         )
-                      ? 'max-w-5xl px-4 sm:px-12'
-                      : 'max-w-3xl px-6 sm:px-16'
+                      ? 'max-w-5xl pl-4 pr-4 sm:pl-20 sm:pr-10'
+                      : 'max-w-3xl pl-5 pr-5 sm:pl-20 sm:pr-14'
                 }`}
               >
                 {/* Shared Note Permission Banner */}
@@ -5839,7 +5906,11 @@ export const BlockEditor: React.FC = () => {
 
                 {/* Multi-Select Action Bar for Deleting Selected Blocks / Conversations */}
                 {(isSelectMode || selectedBlockIds.length > 0) && (
-                  <div className="sticky top-14 z-20 mb-3 p-2.5 rounded-2xl bg-surface/95 backdrop-blur-md border border-rose-400/40 shadow-lg flex flex-wrap items-center justify-between gap-2 no-print">
+                  <div
+                    className={`sticky ${
+                      hasTopIsland ? 'top-[96px]' : 'top-14'
+                    } z-20 mb-3 p-2.5 rounded-2xl bg-surface/95 backdrop-blur-md border border-rose-400/40 shadow-lg flex flex-wrap items-center justify-between gap-2 no-print`}
+                  >
                     <div className="flex items-center gap-2 text-xs">
                       <span className="px-2 py-0.5 rounded-md bg-rose-500/15 text-rose-600 dark:text-rose-300 font-bold font-mono">
                         {selectedBlockIds.length} dipilih
@@ -6043,6 +6114,7 @@ export const BlockEditor: React.FC = () => {
                 blocks={activeNote.blocks}
                 noteTitle={activeNote.title}
                 isOpen={showTocOutline}
+                hasTopIsland={hasTopIsland}
                 onToggleOpen={() => setShowTocOutline((v) => !v)}
                 onSelectBlock={(blkId) => scrollToBlockById(blkId)}
               />

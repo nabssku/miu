@@ -16,6 +16,7 @@ interface FloatingTocOutlineProps {
   blocks: NoteBlock[];
   noteTitle?: string;
   isOpen: boolean;
+  hasTopIsland?: boolean;
   onToggleOpen: () => void;
   onSelectBlock: (blockId: string) => void;
 }
@@ -41,6 +42,7 @@ export const FloatingTocOutline: React.FC<FloatingTocOutlineProps> = ({
   blocks,
   noteTitle,
   isOpen,
+  hasTopIsland = false,
   onToggleOpen,
   onSelectBlock
 }) => {
@@ -135,7 +137,11 @@ export const FloatingTocOutline: React.FC<FloatingTocOutlineProps> = ({
     <>
       {/* Mobile & Medium Screens: Popover when toggled open from header */}
       {isOpen && (
-        <div className="xl:hidden fixed top-14 right-4 z-30 w-72 max-w-[calc(100vw-2rem)] miu-card shadow-2xl p-3 space-y-2.5 no-print">
+        <div
+          className={`xl:hidden fixed ${
+            hasTopIsland ? 'top-24' : 'top-14'
+          } right-4 z-30 w-72 max-w-[calc(100vw-2rem)] miu-card shadow-2xl p-3 space-y-2.5 no-print`}
+        >
           <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-border-subtle">
             <div className="flex items-center gap-1.5 min-w-0">
               <ListTree className="w-3.5 h-3.5 text-accent-strong shrink-0" />
@@ -158,7 +164,9 @@ export const FloatingTocOutline: React.FC<FloatingTocOutlineProps> = ({
 
       {/* Desktop XL+: Sticky Floating Right-Side Rail (Pinned Card or Minimalist Notion Minimap) */}
       <aside
-        className="hidden xl:flex flex-col sticky top-20 self-start shrink-0 mr-4 z-20 no-print"
+        className={`hidden xl:flex flex-col sticky ${
+          hasTopIsland ? 'top-28' : 'top-20'
+        } self-start shrink-0 mr-4 z-20 no-print`}
         onMouseEnter={() => setIsHoverPreview(true)}
         onMouseLeave={() => setIsHoverPreview(false)}
       >

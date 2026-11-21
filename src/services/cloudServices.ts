@@ -326,6 +326,19 @@ function fileOrBlobToDataUrl(file: File | Blob): Promise<string> {
   });
 }
 
+interface UploadSignResponse {
+  configured?: boolean;
+  cloudName?: string;
+  folder?: string;
+  timestamp?: string;
+  apiKey?: string;
+  signature?: string;
+  uploadPreset?: string;
+}
+
+const MAX_SERVERLESS_UPLOAD_BYTES = 4 * 1024 * 1024;
+const MAX_INLINE_DATAURL_BYTES = 3 * 1024 * 1024;
+
 export async function uploadImageToCloudinary(
   source: File | Blob | string
 ): Promise<{ url: string; isCloudinary: boolean }> {
@@ -342,12 +355,78 @@ export async function uploadImageToCloudinary(
       return { url: source, isCloudinary: false };
     }
 
+    // 1. Prefer direct browser -> Cloudinary signed upload (bypasses 4.5MB Vercel serverless limit!)
+    try {
+      const signRes = await fetch('/api/upload', { method: 'GET', cache: 'no-store' });
+      if (signRes.ok) {
+        const sign = (await signRes.json()) as UploadSignResponse;
+        if (sign.configured && sign.cloudName) {
+          const directForm = new FormData();
+          directForm.append('file', source);
+          if (sign.folder) directForm.append('folder', sign.folder);
+
+          if (sign.signature && sign.apiKey && sign.timestamp) {
+            directForm.append('api_key', sign.apiKey);
+            directForm.append('timestamp', sign.timestamp);
+            directForm.append('signature', sign.signature);
+          } else if (sign.uploadPreset) {
+            directForm.append('upload_preset', sign.uploadPreset);
+          }
+
+          const cloudRes = await fetch(
+            `https://api.cloudinary.com/v1_1/${encodeURIComponent(sign.cloudName)}/auto/upload`,
+            {
+              method: 'POST',
+              body: directForm
+            }
+          );
+
+          if (cloudRes.ok) {
+            const cloudData = (await cloudRes.json()) as { secure_url?: string };
+            if (cloudData.secure_url) {
+              return { url: cloudData.secure_url, isCloudinary: true };
+            }
+          } else {
+            const errJson = (await cloudRes.json().catch(() => ({}))) as {
+              error?: { message?: string };
+            };
+            throw new Error(
+              errJson.error?.message ||
+                `Gagal mengunggah media langsung ke Cloudinary (${cloudRes.status}).`
+            );
+          }
+        }
+      }
+    } catch (directErr) {
+      if (source.size > MAX_SERVERLESS_UPLOAD_BYTES) {
+        throw directErr instanceof Error
+          ? directErr
+          : new Error(
+              'Ukuran file terlalu besar untuk upload standar dan upload langsung ke Cloudinary gagal.'
+            );
+      }
+      // For smaller files, fall through to server upload / local DataURL fallback
+    }
+
+    // 2. If file exceeds serverless request limit without Cloudinary configured, fail with clear message
+    if (source.size > MAX_SERVERLESS_UPLOAD_BYTES) {
+      throw new Error(
+        `Ukuran file (${(source.size / (1024 * 1024)).toFixed(1)} MB) melebihi batas server 4 MB. Aktifkan Cloudinary di Vercel agar file besar bisa langsung diunggah.`
+      );
+    }
+
+    // 3. Fallback through /api/upload for <= 4MB files
     const formData = new FormData();
     formData.append('file', source);
     const res = await fetch('/api/upload', {
       method: 'POST',
       body: formData
     });
+    if (res.status === 413) {
+      throw new Error(
+        'Ukuran file melebihi batas upload server (413). Aktifkan Cloudinary untuk mendukung file media besar.'
+      );
+    }
     if (!res.ok) {
       const errData = (await res.json().catch(() => ({}))) as { error?: string };
       throw new Error(errData.error || `Gagal mengunggah media (${res.status}).`);
@@ -357,11 +436,14 @@ export async function uploadImageToCloudinary(
     if (typeof source === 'string') {
       return { url: source, isCloudinary: false };
     }
-    if (err instanceof Error && err.message.includes('Gagal mengunggah')) {
+    if (err instanceof Error && (err.message.includes('Cloudinary') || err.message.includes('Ukuran file') || err.message.includes('Gagal mengunggah'))) {
       throw err;
     }
-    const dataUrl = await fileOrBlobToDataUrl(source);
-    return { url: dataUrl, isCloudinary: false };
+    if (source.size <= MAX_INLINE_DATAURL_BYTES) {
+      const dataUrl = await fileOrBlobToDataUrl(source);
+      return { url: dataUrl, isCloudinary: false };
+    }
+    throw err instanceof Error ? err : new Error('Gagal mengunggah media ke Cloud Catatan.');
   }
 }
 

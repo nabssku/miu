@@ -5,22 +5,65 @@ export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
-    const incoming = await req.formData();
-    const audioFile = incoming.get('file');
-    const customKey = String(incoming.get('elevenlabsApiKey') || '').trim();
-    const languageCode = String(incoming.get('languageCode') || '').trim();
+    const contentType = req.headers.get('content-type') || '';
+    let audioBlob: Blob | null = null;
+    let customKey = '';
+    let languageCode = '';
+
+    if (contentType.includes('application/json')) {
+      const body = (await req.json()) as {
+        audioUrl?: string;
+        elevenlabsApiKey?: string;
+        languageCode?: string;
+      };
+      customKey = String(body.elevenlabsApiKey || '').trim();
+      languageCode = String(body.languageCode || '').trim();
+      const rawUrl = String(body.audioUrl || '').trim();
+      if (!rawUrl) {
+        return NextResponse.json({ error: 'URL audio tidak ditemukan.' }, { status: 400 });
+      }
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(rawUrl);
+      } catch {
+        return NextResponse.json({ error: 'URL audio tidak valid.' }, { status: 400 });
+      }
+      if (
+        parsedUrl.protocol !== 'https:' ||
+        /^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0)/i.test(parsedUrl.hostname)
+      ) {
+        return NextResponse.json(
+          { error: 'Hanya URL audio HTTPS publik yang diizinkan.' },
+          { status: 400 }
+        );
+      }
+      const mediaResp = await fetch(parsedUrl.toString(), { cache: 'no-store' });
+      if (!mediaResp.ok) {
+        return NextResponse.json(
+          { error: `Gagal mengambil file audio dari cloud (${mediaResp.status}).` },
+          { status: 400 }
+        );
+      }
+      audioBlob = await mediaResp.blob();
+    } else {
+      const incoming = await req.formData();
+      const audioFile = incoming.get('file');
+      customKey = String(incoming.get('elevenlabsApiKey') || '').trim();
+      languageCode = String(incoming.get('languageCode') || '').trim();
+
+      if (!audioFile || typeof audioFile === 'string') {
+        return NextResponse.json({ error: 'File audio rekaman tidak ditemukan.' }, { status: 400 });
+      }
+      audioBlob = audioFile;
+    }
 
     const apiKey = customKey || getServerCloudEnv().elevenLabsApiKey;
     if (!apiKey) {
       return NextResponse.json({ error: 'ELEVENLABS_API_KEY_MISSING' }, { status: 503 });
     }
 
-    if (!audioFile || typeof audioFile === 'string') {
-      return NextResponse.json({ error: 'File audio rekaman tidak ditemukan.' }, { status: 400 });
-    }
-
     const forward = new FormData();
-    forward.append('file', audioFile, 'voice.webm');
+    forward.append('file', audioBlob, 'voice.webm');
     forward.append('model_id', 'scribe_v1');
     if (languageCode) {
       forward.append('language_code', languageCode);

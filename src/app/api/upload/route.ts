@@ -1,7 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { uploadMediaToServerCloud } from '@/lib/serverCloud';
+import { getCloudinaryUploadParams, uploadMediaToServerCloud } from '@/lib/serverCloud';
 
 export const dynamic = 'force-dynamic';
+
+export async function GET() {
+  try {
+    const params = getCloudinaryUploadParams();
+    return NextResponse.json(params, {
+      headers: { 'Cache-Control': 'no-store' }
+    });
+  } catch (err) {
+    console.warn('[API /upload GET] Error:', err);
+    return NextResponse.json({ configured: false }, { status: 500 });
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
