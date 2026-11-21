@@ -1,9 +1,18 @@
+export interface AIToolExecutionRecord {
+  id: string;
+  name: string;
+  label: string;
+  status: 'running' | 'done' | 'error';
+  summary?: string;
+}
+
 export interface AIChatThreadMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   model?: string;
   attachmentLabel?: string;
+  toolExecutions?: AIToolExecutionRecord[];
   createdAt: number;
 }
 
@@ -69,6 +78,9 @@ export function normalizeStoredAIChatThreads(raw: unknown): AIChatThread[] {
           model: typeof m.model === 'string' ? m.model : model,
           attachmentLabel:
             typeof m.attachmentLabel === 'string' ? m.attachmentLabel : undefined,
+          toolExecutions: Array.isArray(m.toolExecutions)
+            ? m.toolExecutions
+            : undefined,
           createdAt:
             typeof m.createdAt === 'number' && Number.isFinite(m.createdAt)
               ? m.createdAt

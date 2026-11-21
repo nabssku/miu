@@ -4,26 +4,36 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   AlignLeft,
+  ArrowLeft,
   ArrowRightToLine,
   ArrowUp,
   AudioLines,
+  BookOpen,
   Check,
   CheckCircle2,
   CheckSquare,
   ChevronDown,
+  ChevronRight,
   ChevronsRight,
   ChevronUp,
+  CloudUpload,
   Copy,
+  ExternalLink,
   Eye,
   EyeOff,
+  FileCode2,
   FileText,
+  Globe,
   ImagePlus,
   Languages,
+  LayoutGrid,
+  Link2,
   ListTodo,
   Loader2,
   Maximize2,
   Minimize2,
   MoreHorizontal,
+  Paperclip,
   Plus,
   RefreshCw,
   Search,
@@ -33,10 +43,12 @@ import {
   Square,
   SquarePen,
   Trash2,
+  Wrench,
   X
 } from 'lucide-react';
 import { ConversationalVoicePanel } from './ConversationalVoicePanel';
 import { MiuAIFaceIcon } from './MiuAIFaceIcon';
+import { SkillLibraryModal } from './SkillLibraryModal';
 import { db } from '../../db/database';
 import { useMiu } from '../../context/MiuContext';
 import { flattenBlocks } from '../../utils/blockTreeHelper';
@@ -47,10 +59,22 @@ import {
   DEFAULT_MODELS,
   loadAIConfig,
   loadDefaultGroqConfig,
-  runExternalAIStream,
   saveAIConfig,
   type AIConfig
 } from '../../services/externalApis';
+import {
+  countActiveConnections,
+  createEditableSkillNote,
+  DEFAULT_AI_CONNECTIONS_CONFIG,
+  isSkillNote,
+  loadActiveSkillNoteIds,
+  loadAIConnectionsConfig,
+  runAgentWithToolsStream,
+  saveActiveSkillNoteIds,
+  saveAIConnectionsConfig,
+  type AIConnectionsConfig,
+  type SearchProviderMode
+} from '../../services/aiAgentTools';
 import type { AIChatMessage, AIProviderId } from '../../types/miu';
 import {
   cleanThinkingTags,
@@ -62,7 +86,8 @@ import { extractTextFromPdfSource, processAndUploadPdf } from '../../utils/pdfHe
 import {
   normalizeStoredAIChatThreads,
   type AIChatThread,
-  type AIChatThreadMessage
+  type AIChatThreadMessage,
+  type AIToolExecutionRecord
 } from '../../utils/aiChatHistory';
 
 type PromptMode =
@@ -70,11 +95,21 @@ type PromptMode =
   | 'translate'
   | 'insights'
   | 'breakdown'
+  | 'agenda'
   | 'quiz'
   | 'explain'
   | 'custom';
 
-type OpenMenuType = 'none' | 'history' | 'more' | 'attach' | 'context' | 'model';
+type OpenMenuType =
+  | 'none'
+  | 'history'
+  | 'more'
+  | 'attach'
+  | 'attach_files'
+  | 'skills'
+  | 'connections'
+  | 'context'
+  | 'model';
 
 const CUSTOM_PROVIDER_PRESETS: Array<{
   id: AIProviderId;
@@ -91,7 +126,10 @@ const CUSTOM_PROVIDER_PRESETS: Array<{
 
 export const ExternalAIDrawer: React.FC = () => {
   const {
+    currentUser,
+    activeSemesterId,
     activeNoteId,
+    setActiveNoteId,
     activeCourseId,
     isAIDrawerOpen,
     setIsAIDrawerOpen,
@@ -127,6 +165,22 @@ export const ExternalAIDrawer: React.FC = () => {
   const [isExpandedWidth, setIsExpandedWidth] = useState(false);
   const [includeNoteContext, setIncludeNoteContext] = useState(true);
 
+  // Tool Calling, Web Search (Tavily + Serper), Skills (skill.md) & External Connections
+  const [connectionsConfig, setConnectionsConfig] = useState<AIConnectionsConfig>(
+    () => DEFAULT_AI_CONNECTIONS_CONFIG
+  );
+  const [activeSkillIds, setActiveSkillIds] = useState<string[]>([]);
+  const [newSkillName, setNewSkillName] = useState('');
+  const [newSkillConnUrl, setNewSkillConnUrl] = useState('');
+  const [newConnName, setNewConnName] = useState('');
+  const [newConnUrl, setNewConnUrl] = useState('');
+  const [newConnMethod, setNewConnMethod] = useState<'GET' | 'POST'>('POST');
+  const [newConnAuth, setNewConnAuth] = useState('');
+  const [showSearchApiKeys, setShowSearchApiKeys] = useState(false);
+  const [skillLibraryModalTab, setSkillLibraryModalTab] = useState<'browse' | 'upload' | null>(
+    null
+  );
+
   const [openMenu, setOpenMenu] = useState<OpenMenuType>('none');
   const [customPrompt, setCustomPrompt] = useState('');
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -154,6 +208,8 @@ export const ExternalAIDrawer: React.FC = () => {
   useEffect(() => {
     const saved = loadAIConfig();
     setCustomConfig(saved);
+    setConnectionsConfig(loadAIConnectionsConfig());
+    setActiveSkillIds(loadActiveSkillNoteIds());
     setConfigHydrated(true);
     void syncCloudStatus().then((status) => {
       if (status.aiModel) {
@@ -166,6 +222,16 @@ export const ExternalAIDrawer: React.FC = () => {
     if (!configHydrated) return;
     saveAIConfig(customConfig);
   }, [customConfig, configHydrated]);
+
+  useEffect(() => {
+    if (!configHydrated) return;
+    saveAIConnectionsConfig(connectionsConfig);
+  }, [connectionsConfig, configHydrated]);
+
+  useEffect(() => {
+    if (!configHydrated) return;
+    saveActiveSkillNoteIds(activeSkillIds);
+  }, [activeSkillIds, configHydrated]);
 
   useEffect(() => {
     if (aiPdfAttachment) {
@@ -301,6 +367,12 @@ export const ExternalAIDrawer: React.FC = () => {
   const noteImages = flatBlocks.filter((b) => b.type === 'image' && Boolean(b.content));
   const notePdfs = flatBlocks.filter((b) => b.type === 'pdf' && Boolean(b.content));
 
+  const skillNotes = allNotes.filter(
+    (n) => isSkillNote(n) || activeSkillIds.includes(n.id)
+  );
+  const activeSkillNotes = allNotes.filter((n) => activeSkillIds.includes(n.id));
+  const activeConnectionCount = countActiveConnections(connectionsConfig);
+
   const activePresetMeta =
     CUSTOM_PROVIDER_PRESETS.find((p) => p.id === customConfig.provider) ||
     CUSTOM_PROVIDER_PRESETS[0];
@@ -324,6 +396,49 @@ export const ExternalAIDrawer: React.FC = () => {
       // ignore
     }
     window.setTimeout(() => textareaRef.current?.focus(), 40);
+  };
+
+  const handleCreateNewSkillNote = async () => {
+    const created = await createEditableSkillNote({
+      skillName: newSkillName.trim() || 'skill.md',
+      connectionUrl: newSkillConnUrl.trim() || undefined,
+      ownerId: currentUser?.id,
+      ownerEmail: currentUser?.email,
+      ownerName: currentUser?.name,
+      semesterId: activeSemesterId,
+      courseId: activeCourseId
+    });
+    setActiveSkillIds((prev) => Array.from(new Set([...prev, created.id])));
+    setActiveNoteId(created.id);
+    setNewSkillName('');
+    setNewSkillConnUrl('');
+    setOpenMenu('none');
+  };
+
+  const handleToggleSkillActive = (noteId: string) => {
+    setActiveSkillIds((prev) =>
+      prev.includes(noteId) ? prev.filter((id) => id !== noteId) : [...prev, noteId]
+    );
+  };
+
+  const handleAddCustomConnection = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newConnName.trim() || !newConnUrl.trim()) return;
+    const item = {
+      id: `conn-${Date.now()}`,
+      name: newConnName.trim(),
+      url: newConnUrl.trim(),
+      method: newConnMethod,
+      authHeader: newConnAuth.trim() || undefined,
+      enabled: true
+    };
+    setConnectionsConfig((prev) => ({
+      ...prev,
+      customConnections: [...prev.customConnections, item]
+    }));
+    setNewConnName('');
+    setNewConnUrl('');
+    setNewConnAuth('');
   };
 
   const handleUploadReferenceImage = async (file: File) => {
@@ -476,24 +591,33 @@ export const ExternalAIDrawer: React.FC = () => {
             ? 'Analisis untuk mendapatkan wawasan'
             : mode === 'breakdown'
               ? 'Buat pelacak tugas'
-              : mode === 'quiz'
-                ? 'Buat kuis & flashcard dari catatan ini'
-                : mode === 'explain' && !rawQuery
-                  ? aiPdfAttachment
-                    ? `Jelaskan dokumen PDF "${aiPdfAttachment.fileName}"`
-                    : aiImageAttachment
-                      ? `Jelaskan gambar "${aiImageAttachment.caption || 'referensi'}"`
-                      : 'Jelaskan materi catatan ini dengan analogi sederhana'
-                  : rawQuery ||
-                    (aiPdfAttachment
-                      ? `Rangkum isi dokumen "${aiPdfAttachment.fileName}"`
-                      : `Jelaskan gambar "${aiImageAttachment?.caption || 'ini'}"`);
+              : mode === 'agenda'
+                ? 'Tulis agenda rapat'
+                : mode === 'quiz'
+                  ? 'Buat kuis & flashcard dari catatan ini'
+                  : mode === 'explain' && !rawQuery
+                    ? aiPdfAttachment
+                      ? `Jelaskan dokumen PDF "${aiPdfAttachment.fileName}"`
+                      : aiImageAttachment
+                        ? `Jelaskan gambar "${aiImageAttachment.caption || 'referensi'}"`
+                        : 'Jelaskan materi catatan ini dengan analogi sederhana'
+                    : rawQuery ||
+                      (aiPdfAttachment
+                        ? `Rangkum isi dokumen "${aiPdfAttachment.fileName}"`
+                        : `Jelaskan gambar "${aiImageAttachment?.caption || 'ini'}"`);
 
-    const attachmentLabel = aiPdfAttachment
-      ? `PDF: ${aiPdfAttachment.fileName}`
-      : aiImageAttachment
-        ? `Gambar: ${aiImageAttachment.caption || 'Catatan'}`
-        : undefined;
+    const attachmentParts: string[] = [];
+    if (aiPdfAttachment) attachmentParts.push(`PDF: ${aiPdfAttachment.fileName}`);
+    if (aiImageAttachment) {
+      attachmentParts.push(`Gambar: ${aiImageAttachment.caption || 'Catatan'}`);
+    }
+    if (activeSkillNotes.length > 0) {
+      attachmentParts.push(
+        `Skill: ${activeSkillNotes.map((s) => s.title || 'skill.md').join(', ')}`
+      );
+    }
+    const attachmentLabel =
+      attachmentParts.length > 0 ? attachmentParts.join(' • ') : undefined;
 
     if (mode === 'custom' && overrideCustomText === undefined) {
       setCustomPrompt('');
@@ -562,6 +686,9 @@ export const ExternalAIDrawer: React.FC = () => {
     } else if (mode === 'insights') {
       userPrompt = `Analisis halaman catatan berikut untuk mendapatkan wawasan mendalam: soroti konsep kunci, hubungan antar bagian, potensi celah pemahaman/risiko yang perlu diperhatikan, serta rekomendasi langkah belajar berikutnya:\n\n${noteContent}`;
       contextInUserPrompt = true;
+    } else if (mode === 'agenda') {
+      userPrompt = `Susun agenda rapat terstruktur (Tujuan Rapat, Daftar Topik & Durasi, Poin Diskusi Utama, dan Action Items - [ ]) berdasarkan konteks catatan ini:\n\n${noteContent}`;
+      contextInUserPrompt = true;
     } else if (mode === 'quiz') {
       userPrompt = `Buatkan 3 soal pilihan ganda latihan beserta kunci jawaban dan penjelasan singkat dari materi berikut:\n\n${noteContent}`;
       contextInUserPrompt = true;
@@ -595,33 +722,66 @@ export const ExternalAIDrawer: React.FC = () => {
     }
 
     const baseSystemPrompt =
-      'Kamu adalah Miu AI, asisten workspace & belajar mahasiswa yang ringkas, akurat, ramah, dan suportif. Gunakan struktur Markdown yang bersih (## Subjudul, - Poin Bullet, 1. Poin Nomor, - [ ] Pelacak Tugas, **Tebal** untuk istilah penting, dan $...$ atau $$...$$ untuk rumus LaTeX). Jangan tampilkan tag <think>. Jawablah secara akurat berdasarkan teks catatan dan dokumen PDF aktif; jika bagian tertentu tidak ada di konteks, sampaikan secara jujur tanpa mengarang.';
+      'Kamu adalah Miu AI, asisten workspace & agent cerdas yang dapat mencari informasi di web (Tavily & Serper), mengakses/mengubah/membuat/menghapus catatan pengguna secara langsung, menjalankan skill.md, dan terhubung ke API eksternal. Gunakan struktur Markdown yang bersih (## Subjudul, - Poin Bullet, 1. Poin Nomor, - [ ] Pelacak Tugas, **Tebal** untuk istilah penting, dan $...$ atau $$...$$ untuk rumus LaTeX). Jangan tampilkan tag <think>.';
 
     const finalSystemPrompt =
       !contextInUserPrompt && noteContent.trim()
-        ? `${baseSystemPrompt}\n\n=== KONTEKS CATATAN & DOKUMEN PDF AKTIF ===\n${noteContent}`
+        ? `${baseSystemPrompt}\n\n=== KONTEKS CATATAN & DOKUMEN PDF AKTIF (ID: ${
+            activeNote.id
+          }) ===\n${noteContent}`
         : baseSystemPrompt;
 
-    let finalOutput = '';
+    let latestText = '';
+    let latestTools: AIToolExecutionRecord[] = [];
     try {
-      await runExternalAIStream(
-        activeConfig,
-        finalSystemPrompt,
+      const result = await runAgentWithToolsStream({
+        config: activeConfig,
+        baseSystemPrompt: finalSystemPrompt,
         userPrompt,
-        (chunk) => {
-          finalOutput = chunk;
+        history: historyForApi,
+        imageUrl: attachedImageUrl,
+        signal: controller.signal,
+        toolContext: {
+          activeNoteId: activeNoteId || activeNote.id,
+          activeSemesterId: activeSemesterId || 'sem-1',
+          activeCourseId: activeCourseId || 'course-default',
+          currentUser,
+          connectionsConfig,
+          activeSkillIds,
+          onSetActiveNoteId: (targetId) => setActiveNoteId(targetId),
+          onActivateSkillNoteId: (skillId) =>
+            setActiveSkillIds((prev) => Array.from(new Set([...prev, skillId])))
+        },
+        onTextChunk: (chunk) => {
+          latestText = chunk;
           setMessages((prev) =>
-            prev.map((m) => (m.id === assistantMsgId ? { ...m, content: chunk } : m))
+            prev.map((m) =>
+              m.id === assistantMsgId ? { ...m, content: chunk } : m
+            )
           );
         },
-        attachedImageUrl,
-        historyForApi,
-        controller.signal
-      );
+        onToolExecutionsUpdate: (execs) => {
+          latestTools = execs;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMsgId ? { ...m, toolExecutions: execs } : m
+            )
+          );
+        }
+      });
 
-      if (finalOutput.trim()) {
+      const finalOutput = result.finalText;
+      const finalExecs = result.toolExecutions;
+
+      if (finalOutput.trim() || finalExecs.length > 0) {
         const finalizedMessages = optimisticMessages.map((m) =>
-          m.id === assistantMsgId ? { ...m, content: finalOutput } : m
+          m.id === assistantMsgId
+            ? {
+                ...m,
+                content: finalOutput,
+                toolExecutions: finalExecs.length > 0 ? finalExecs : undefined
+              }
+            : m
         );
         setMessages(finalizedMessages);
 
@@ -643,9 +803,15 @@ export const ExternalAIDrawer: React.FC = () => {
         controller.signal.aborted ||
         (err instanceof Error && err.name === 'AbortError');
       if (isAborted) {
-        if (finalOutput.trim()) {
+        if (latestText.trim() || latestTools.length > 0) {
           const partialMessages = optimisticMessages.map((m) =>
-            m.id === assistantMsgId ? { ...m, content: finalOutput } : m
+            m.id === assistantMsgId
+              ? {
+                  ...m,
+                  content: latestText,
+                  toolExecutions: latestTools.length > 0 ? latestTools : undefined
+                }
+              : m
           );
           setMessages(partialMessages);
           const nextThread: AIChatThread = {
@@ -765,6 +931,20 @@ export const ExternalAIDrawer: React.FC = () => {
 
   const lastAssistantMsgId =
     [...messages].reverse().find((m) => m.role === 'assistant')?.id || null;
+
+  const renderSwitch = (checked: boolean) => (
+    <span
+      className={`relative inline-flex h-[18px] w-8 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+        checked ? 'bg-sky-600' : 'bg-text-secondary/30'
+      }`}
+    >
+      <span
+        className={`pointer-events-none inline-block h-[14px] w-[14px] transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+          checked ? 'translate-x-3.5' : 'translate-x-0'
+        }`}
+      />
+    </span>
+  );
 
   return (
     <aside
@@ -990,6 +1170,33 @@ export const ExternalAIDrawer: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  onClick={() => setOpenMenu('skills')}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                >
+                  <FileCode2 className="w-3.5 h-3.5 text-text-secondary" />
+                  <span>Kelola Skill (skill.md)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSkillLibraryModalTab('browse');
+                    setOpenMenu('none');
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                >
+                  <BookOpen className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Pustaka Skill (Instal &amp; Unggah)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOpenMenu('connections')}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                >
+                  <LayoutGrid className="w-3.5 h-3.5 text-text-secondary" />
+                  <span>Koneksi (Tavily, Serper &amp; API)</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => {
                     setShowProviderSheet(true);
                     setOpenMenu('none');
@@ -1056,9 +1263,9 @@ export const ExternalAIDrawer: React.FC = () => {
         <>
           <div className="flex-1 overflow-y-auto px-4">
             {messages.length === 0 && !loading && !errorMsg ? (
-              /* Clean Bottom-Anchored Welcome State matching Notion AI */
+              /* Clean Bottom-Anchored Welcome State matching image.png */
               <div className="min-h-full flex flex-col justify-end pb-3 pt-8">
-                <div className="w-10 h-10 rounded-full bg-subtle border border-border-subtle flex items-center justify-center text-text-primary mb-3">
+                <div className="w-11 h-11 rounded-full bg-surface border border-border-subtle shadow-sm flex items-center justify-center text-text-primary mb-3.5">
                   <MiuAIFaceIcon className="w-5 h-5" />
                 </div>
 
@@ -1067,6 +1274,37 @@ export const ExternalAIDrawer: React.FC = () => {
                 </h2>
 
                 <div className="space-y-0.5 -mx-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConnectionsConfig((prev) => ({
+                        ...prev,
+                        webBrowserEnabled: true
+                      }));
+                      setCustomPrompt('Cari di web menggunakan Tavily & Serper tentang: ');
+                      window.setTimeout(() => textareaRef.current?.focus(), 30);
+                    }}
+                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] text-text-primary hover:bg-subtle transition text-left"
+                  >
+                    <Search className="w-4 h-4 text-text-secondary shrink-0" />
+                    <span>Cari apa saja</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void executePrompt('agenda')}
+                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] text-text-primary hover:bg-subtle transition text-left"
+                  >
+                    <MiuAIFaceIcon className="w-4 h-4 text-text-secondary shrink-0" />
+                    <span>Tulis agenda rapat</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => pdfInputRef.current?.click()}
+                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] text-text-primary hover:bg-subtle transition text-left"
+                  >
+                    <FileText className="w-4 h-4 text-text-secondary shrink-0" />
+                    <span>Analisis PDF atau gambar</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => void executePrompt('summarize')}
@@ -1085,14 +1323,6 @@ export const ExternalAIDrawer: React.FC = () => {
                   </button>
                   <button
                     type="button"
-                    onClick={() => void executePrompt('insights')}
-                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] text-text-primary hover:bg-subtle transition text-left"
-                  >
-                    <Search className="w-4 h-4 text-text-secondary shrink-0" />
-                    <span>Analisis untuk mendapatkan wawasan</span>
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => void executePrompt('breakdown')}
                     className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] text-text-primary hover:bg-subtle transition text-left"
                   >
@@ -1102,7 +1332,7 @@ export const ExternalAIDrawer: React.FC = () => {
                 </div>
               </div>
             ) : (
-              /* Multi-Turn Conversational Thread */
+              /* Multi-Turn Conversational Thread + Live Tool Execution Cards */
               <div className="py-3 space-y-4">
                 {showQuizCards && (
                   <button
@@ -1127,7 +1357,7 @@ export const ExternalAIDrawer: React.FC = () => {
                     return (
                       <div key={msg.id} className="flex flex-col items-end gap-1">
                         {msg.attachmentLabel && (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-subtle border border-border-subtle text-[10px] text-text-secondary max-w-[85%] truncate">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-subtle border border-border-subtle text-[10px] text-text-secondary max-w-[88%] truncate">
                             <FileText className="w-2.5 h-2.5 shrink-0" />
                             <span className="truncate">{msg.attachmentLabel}</span>
                           </span>
@@ -1144,6 +1374,38 @@ export const ExternalAIDrawer: React.FC = () => {
 
                   return (
                     <div key={msg.id} className="space-y-2">
+                      {/* Tool Execution Badges (Web Search Tavily/Serper, Notes CRUD, Skills, Connections) */}
+                      {msg.toolExecutions && msg.toolExecutions.length > 0 && (
+                        <div className="space-y-1">
+                          {msg.toolExecutions.map((exec) => (
+                            <div
+                              key={exec.id}
+                              className="rounded-xl bg-subtle/75 border border-border-subtle px-2.5 py-1.5 text-[11.5px] flex items-start justify-between gap-2"
+                            >
+                              <div className="flex items-start gap-2 min-w-0">
+                                {exec.status === 'running' ? (
+                                  <Loader2 className="w-3.5 h-3.5 text-sky-500 animate-spin shrink-0 mt-0.5" />
+                                ) : exec.status === 'done' ? (
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
+                                ) : (
+                                  <Wrench className="w-3.5 h-3.5 text-rose-500 shrink-0 mt-0.5" />
+                                )}
+                                <div className="min-w-0">
+                                  <p className="font-medium text-text-primary truncate">
+                                    {exec.label}
+                                  </p>
+                                  {exec.summary && (
+                                    <p className="text-[10.5px] text-text-secondary truncate">
+                                      {exec.summary}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
                       {msg.content ? (
                         <div className="text-[13px] text-text-primary leading-relaxed">
                           <MarkdownView content={msg.content} />
@@ -1151,7 +1413,11 @@ export const ExternalAIDrawer: React.FC = () => {
                       ) : (
                         <div className="inline-flex items-center gap-2 text-xs text-text-secondary py-1">
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Miu AI sedang mengetik...</span>
+                          <span>
+                            {msg.toolExecutions && msg.toolExecutions.length > 0
+                              ? 'Menyusun hasil dari tool...'
+                              : 'Miu AI sedang berpikir...'}
+                          </span>
                         </div>
                       )}
 
@@ -1308,7 +1574,7 @@ export const ExternalAIDrawer: React.FC = () => {
                 {aiTab === 'groq' ? (
                   <div className="text-[11px] text-text-secondary bg-surface border border-border-subtle rounded-xl p-2.5 flex items-center justify-between gap-2">
                     <span>
-                      Menggunakan model server default:{' '}
+                      Model default:{' '}
                       <strong className="font-mono text-text-primary">
                         {defaultGroqConfig.model}
                       </strong>
@@ -1453,6 +1719,55 @@ export const ExternalAIDrawer: React.FC = () => {
               </div>
             )}
 
+            {/* Active Skill.md & Web Browser Pills above Composer */}
+            {(activeSkillNotes.length > 0 || connectionsConfig.webBrowserEnabled) && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {connectionsConfig.webBrowserEnabled && (
+                  <button
+                    type="button"
+                    onClick={() => setOpenMenu('connections')}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-500/12 border border-sky-500/30 text-[10.5px] font-medium text-sky-600 dark:text-sky-300 hover:bg-sky-500/20 transition"
+                    title="Klik untuk mengatur provider pencarian Tavily & Serper"
+                  >
+                    <Globe className="w-3 h-3 shrink-0" />
+                    <span>
+                      Web:{' '}
+                      {connectionsConfig.searchProvider === 'auto'
+                        ? 'Tavily + Serper'
+                        : connectionsConfig.searchProvider === 'tavily'
+                          ? 'Tavily'
+                          : 'Serper'}
+                    </span>
+                  </button>
+                )}
+
+                {activeSkillNotes.map((sn) => (
+                  <div
+                    key={sn.id}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-subtle border border-border-subtle text-[10.5px] font-medium text-text-primary"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setActiveNoteId(sn.id)}
+                      className="inline-flex items-center gap-1 hover:underline truncate max-w-[140px]"
+                      title="Klik untuk mengedit skill.md ini langsung di catatan"
+                    >
+                      <span>{sn.icon || '🧩'}</span>
+                      <span className="truncate">{sn.title || 'skill.md'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleSkillActive(sn.id)}
+                      className="text-text-secondary hover:text-rose-500 ml-0.5"
+                      title="Nonaktifkan skill ini"
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Attachment & Extraction Pills above Composer */}
             {uploadingRef && pdfProgressMsg && (
               <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-subtle border border-border-subtle text-[11px] text-text-secondary">
@@ -1519,7 +1834,7 @@ export const ExternalAIDrawer: React.FC = () => {
               </div>
             )}
 
-            {/* Rounded Prompt Input Card (Matching Notion AI Composer) */}
+            {/* Rounded Prompt Input Card (Matching Notion AI Composer in image.png) */}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -1567,44 +1882,141 @@ export const ExternalAIDrawer: React.FC = () => {
                     ? `Tanyakan tentang "${aiPdfAttachment.fileName}"...`
                     : aiImageAttachment
                       ? 'Tanyakan tentang gambar di atas...'
-                      : 'Tanya Miu AI...'
+                      : 'Tanya, cari web (Tavily/Serper), atau kelola catatan...'
                 }
                 className="w-full bg-transparent text-[13px] text-text-primary placeholder:text-text-secondary/70 focus:outline-none resize-none leading-relaxed max-h-36 overflow-y-auto"
               />
 
               <div className="flex items-center justify-between gap-2 mt-1.5">
-                {/* Bottom-left controls: + (Attachments & study modes) + Shield (Page context scope) */}
+                {/* Bottom-left controls: + (Attachment, Skill, Browser Web, Koneksi) + Shield */}
                 <div className="flex items-center gap-0.5 relative">
                   <div className="relative" data-ai-popover>
                     <button
                       type="button"
                       onClick={() =>
-                        setOpenMenu((m) => (m === 'attach' ? 'none' : 'attach'))
+                        setOpenMenu((m) =>
+                          m === 'attach' ||
+                          m === 'attach_files' ||
+                          m === 'skills' ||
+                          m === 'connections'
+                            ? 'none'
+                            : 'attach'
+                        )
                       }
-                      className="w-7 h-7 rounded-full hover:bg-subtle text-text-secondary hover:text-text-primary flex items-center justify-center transition"
-                      title="Lampirkan file, konteks catatan, atau template"
-                      aria-label="Lampirkan atau tambah konteks"
+                      className={`w-7 h-7 rounded-full flex items-center justify-center transition ${
+                        openMenu === 'attach' ||
+                        openMenu === 'attach_files' ||
+                        openMenu === 'skills' ||
+                        openMenu === 'connections'
+                          ? 'bg-subtle text-text-primary'
+                          : 'hover:bg-subtle text-text-secondary hover:text-text-primary'
+                      }`}
+                      title="Tambahkan foto & file, Skill (skill.md), Browser Web, atau Koneksi"
+                      aria-label="Menu tambah & koneksi AI"
                     >
                       <Plus className="w-4 h-4" />
                     </button>
 
+                    {/* ======================================================= */}
+                    {/* IMAGE.PNG: "+" MENU (Foto & File, Skill, Browser, Koneksi) */}
+                    {/* ======================================================= */}
                     {openMenu === 'attach' && (
-                      <div className="absolute left-0 bottom-full mb-2 w-64 rounded-xl bg-surface border border-border-subtle shadow-2xl p-1.5 z-50 space-y-1 text-xs">
+                      <div className="absolute left-0 bottom-full mb-2 w-64 rounded-2xl bg-surface border border-border-subtle shadow-[0_18px_46px_-10px_rgba(15,23,42,0.22)] dark:shadow-[0_20px_50px_-10px_rgba(0,0,0,0.75)] p-1.5 z-50 space-y-0.5 text-[13px] text-text-primary select-none">
+                        {/* 1. Tambahkan foto & file */}
+                        <button
+                          type="button"
+                          onClick={() => setOpenMenu('attach_files')}
+                          className="w-full flex items-center justify-between gap-2.5 px-2.5 py-2 rounded-xl hover:bg-subtle transition text-left"
+                        >
+                          <span className="inline-flex items-center gap-2.5">
+                            <Paperclip className="w-4 h-4 text-text-primary shrink-0" />
+                            <span className="font-medium">Tambahkan foto &amp; file</span>
+                          </span>
+                        </button>
+
+                        {/* 2. Skill (skill.md editable in notes) */}
+                        <button
+                          type="button"
+                          onClick={() => setOpenMenu('skills')}
+                          className="w-full flex items-center justify-between gap-2.5 px-2.5 py-2 rounded-xl hover:bg-subtle transition text-left"
+                        >
+                          <span className="inline-flex items-center gap-2.5">
+                            <FileCode2 className="w-4 h-4 text-text-primary shrink-0" />
+                            <span className="font-medium">Skill</span>
+                          </span>
+                          {activeSkillNotes.length > 0 && (
+                            <span className="text-xs text-text-secondary font-medium">
+                              {activeSkillNotes.length}
+                            </span>
+                          )}
+                        </button>
+
+                        {/* 3. Browser Web Beta [Toggle Switch] */}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setConnectionsConfig((prev) => ({
+                              ...prev,
+                              webBrowserEnabled: !prev.webBrowserEnabled
+                            }))
+                          }
+                          className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl hover:bg-subtle transition text-left"
+                        >
+                          <span className="inline-flex items-center gap-2.5 min-w-0">
+                            <Globe className="w-4 h-4 text-text-primary shrink-0" />
+                            <span className="font-medium truncate">Browser Web</span>
+                            <span className="px-1.5 py-0.5 rounded-md bg-subtle border border-border-subtle text-[10px] font-semibold text-text-secondary leading-none">
+                              Beta
+                            </span>
+                          </span>
+                          {renderSwitch(connectionsConfig.webBrowserEnabled)}
+                        </button>
+
+                        {/* 4. Koneksi [count >] */}
+                        <button
+                          type="button"
+                          onClick={() => setOpenMenu('connections')}
+                          className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl hover:bg-subtle transition text-left"
+                        >
+                          <span className="inline-flex items-center gap-2.5">
+                            <LayoutGrid className="w-4 h-4 text-text-primary shrink-0" />
+                            <span className="font-medium">Koneksi</span>
+                          </span>
+                          <span className="inline-flex items-center gap-1 text-xs text-text-secondary">
+                            <span>{activeConnectionCount}</span>
+                            <ChevronRight className="w-3.5 h-3.5" />
+                          </span>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* SUBMENU 1: TAMBAHKAN FOTO & FILE */}
+                    {openMenu === 'attach_files' && (
+                      <div className="absolute left-0 bottom-full mb-2 w-64 rounded-2xl bg-surface border border-border-subtle shadow-2xl p-2 z-50 space-y-1 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => setOpenMenu('attach')}
+                          className="inline-flex items-center gap-1.5 px-1.5 py-1 text-text-secondary hover:text-text-primary font-medium"
+                        >
+                          <ArrowLeft className="w-3.5 h-3.5" />
+                          <span>Tambahkan foto &amp; file</span>
+                        </button>
+
                         <button
                           type="button"
                           onClick={() => pdfInputRef.current?.click()}
-                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                          className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
                         >
-                          <FileText className="w-3.5 h-3.5 text-rose-500" />
+                          <FileText className="w-4 h-4 text-rose-500" />
                           <span>Unggah dokumen PDF</span>
                         </button>
                         <button
                           type="button"
                           onClick={() => imageInputRef.current?.click()}
-                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
+                          className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
                         >
-                          <ImagePlus className="w-3.5 h-3.5 text-indigo-500" />
-                          <span>Unggah gambar referensi</span>
+                          <ImagePlus className="w-4 h-4 text-indigo-500" />
+                          <span>Unggah foto / gambar</span>
                         </button>
 
                         {notePdfs.length > 0 && (
@@ -1621,7 +2033,7 @@ export const ExternalAIDrawer: React.FC = () => {
                                   onClick={() => void handleAttachNotePdf(pdfBlk, i)}
                                   className="w-full flex items-center gap-2 px-2.5 py-1 rounded-lg hover:bg-subtle text-text-primary transition text-left"
                                 >
-                                  <FileText className="w-3 h-3 text-rose-500 shrink-0" />
+                                  <FileText className="w-3.5 h-3.5 text-rose-500 shrink-0" />
                                   <span className="truncate">
                                     {pdfBlk.fileName || pdfBlk.caption || `PDF ${i + 1}`}
                                   </span>
@@ -1662,26 +2074,413 @@ export const ExternalAIDrawer: React.FC = () => {
                             </div>
                           </>
                         )}
+                      </div>
+                    )}
 
-                        <div className="h-px bg-border-subtle my-1" />
-                        <button
-                          type="button"
-                          onClick={() => void executePrompt('quiz')}
-                          disabled={loading}
-                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
-                        >
-                          <Sparkles className="w-3.5 h-3.5 text-text-secondary" />
-                          <span>Buat kuis &amp; flashcard</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void executePrompt('explain')}
-                          disabled={loading}
-                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition"
-                        >
-                          <CheckSquare className="w-3.5 h-3.5 text-text-secondary" />
-                          <span>Jelaskan materi / analogi</span>
-                        </button>
+                    {/* SUBMENU 2: SKILL (skill.md) MANAGER & CREATOR */}
+                    {openMenu === 'skills' && (
+                      <div className="absolute left-0 bottom-full mb-2 w-80 rounded-2xl bg-surface border border-border-subtle shadow-2xl p-2.5 z-50 space-y-2.5 text-xs">
+                        <div className="flex items-center justify-between">
+                          <button
+                            type="button"
+                            onClick={() => setOpenMenu('attach')}
+                            className="inline-flex items-center gap-1.5 text-text-secondary hover:text-text-primary font-semibold"
+                          >
+                            <ArrowLeft className="w-3.5 h-3.5" />
+                            <span>Skill AI (skill.md)</span>
+                          </button>
+                          <span className="text-[10px] text-text-secondary">
+                            Pustaka &amp; Catatan
+                          </span>
+                        </div>
+
+                        {/* Pustaka Skill (Browse/Install & Upload to Community Library) */}
+                        <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/25 space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                              <BookOpen className="w-3.5 h-3.5" />
+                              <span>Pustaka Skill Komunitas</span>
+                            </span>
+                            <span className="text-[10px] text-amber-700/80 dark:text-amber-300/80">
+                              Instal &amp; Bagikan
+                            </span>
+                          </div>
+                          <p className="text-[10.5px] text-text-secondary leading-snug">
+                            Instal skill dari pustaka beserta penjelasan fungsinya, atau unggah <code className="font-mono">skill.md</code> Anda ke pustaka.
+                          </p>
+                          <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSkillLibraryModalTab('browse');
+                                setOpenMenu('none');
+                              }}
+                              className="py-1.5 px-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-semibold flex items-center justify-center gap-1 transition shadow-sm"
+                            >
+                              <BookOpen className="w-3.5 h-3.5" />
+                              <span>Buka Pustaka</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSkillLibraryModalTab('upload');
+                                setOpenMenu('none');
+                              }}
+                              className="py-1.5 px-2 rounded-lg bg-surface hover:bg-subtle text-text-primary border border-border-subtle text-[11px] font-semibold flex items-center justify-center gap-1 transition"
+                            >
+                              <CloudUpload className="w-3.5 h-3.5 text-amber-500" />
+                              <span>Unggah Skill</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Create New Editable skill.md Note */}
+                        <div className="p-2 rounded-xl bg-subtle/60 border border-border-subtle space-y-1.5">
+                          <div className="text-[11px] font-semibold text-text-primary">
+                            Buat Skill Baru (skill.md)
+                          </div>
+                          <input
+                            type="text"
+                            value={newSkillName}
+                            onChange={(e) => setNewSkillName(e.target.value)}
+                            placeholder="Nama skill (mis: riset-iot/skill.md)"
+                            className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[11px] text-text-primary focus:outline-none focus:border-sky-500"
+                          />
+                          <input
+                            type="text"
+                            value={newSkillConnUrl}
+                            onChange={(e) => setNewSkillConnUrl(e.target.value)}
+                            placeholder="URL Koneksi/Webhook (opsional https://...)"
+                            className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[10.5px] text-text-primary focus:outline-none focus:border-sky-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleCreateNewSkillNote()}
+                            className="w-full py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-[11.5px] font-semibold flex items-center justify-center gap-1.5 transition"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>Buat &amp; Edit skill.md di Catatan</span>
+                          </button>
+                        </div>
+
+                        {/* Existing skill.md notes + option to use current note as skill */}
+                        <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-text-secondary px-1">
+                            Daftar Skill di Workspace ({skillNotes.length})
+                          </div>
+
+                          {skillNotes.length === 0 ? (
+                            <p className="text-[11px] text-text-secondary px-1 py-1.5">
+                              Belum ada `skill.md`. Klik tombol di atas untuk membuat halaman `skill.md` baru yang bisa diedit bebas di catatan.
+                            </p>
+                          ) : (
+                            skillNotes.map((sn) => {
+                              const isActive = activeSkillIds.includes(sn.id);
+                              return (
+                                <div
+                                  key={sn.id}
+                                  className="flex items-center justify-between gap-1.5 px-2 py-1.5 rounded-lg hover:bg-subtle transition"
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleSkillActive(sn.id)}
+                                    className="flex items-center gap-2 min-w-0 flex-1 text-left"
+                                  >
+                                    <span
+                                      className={`w-4 h-4 rounded-[4px] border flex items-center justify-center shrink-0 ${
+                                        isActive
+                                          ? 'bg-sky-600 border-sky-600 text-white'
+                                          : 'border-text-secondary/40 bg-surface'
+                                      }`}
+                                    >
+                                      {isActive && <Check className="w-3 h-3 stroke-[3]" />}
+                                    </span>
+                                    <span className="truncate font-medium text-text-primary">
+                                      {sn.icon || '🧩'} {sn.title || 'skill.md'}
+                                    </span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setActiveNoteId(sn.id);
+                                      setOpenMenu('none');
+                                    }}
+                                    className="px-1.5 py-0.5 rounded bg-subtle hover:bg-surface border border-border-subtle text-[10px] font-medium text-text-secondary hover:text-text-primary shrink-0 inline-flex items-center gap-1"
+                                    title="Buka & edit halaman skill.md ini di editor catatan"
+                                  >
+                                    <span>Edit</span>
+                                    <ExternalLink className="w-2.5 h-2.5" />
+                                  </button>
+                                </div>
+                              );
+                            })
+                          )}
+
+                          {activeNote && !skillNotes.some((s) => s.id === activeNote.id) && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleSkillActive(activeNote.id)}
+                              className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-subtle text-sky-600 dark:text-sky-400 font-medium text-left transition"
+                            >
+                              <Plus className="w-3.5 h-3.5 shrink-0" />
+                              <span className="truncate">
+                                Jadikan halaman aktif &ldquo;{activeNote.title || 'Tanpa Judul'}&rdquo; sebagai Skill
+                              </span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* SUBMENU 3: KONEKSI (TAVILY, SERPER, WORKSPACE CRUD & CUSTOM WEBHOOK/API) */}
+                    {openMenu === 'connections' && (
+                      <div className="absolute left-0 bottom-full mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-2xl bg-surface border border-border-subtle shadow-2xl p-3 z-50 space-y-2.5 text-xs max-h-[75vh] overflow-y-auto">
+                        <div className="flex items-center justify-between">
+                          <button
+                            type="button"
+                            onClick={() => setOpenMenu('attach')}
+                            className="inline-flex items-center gap-1.5 text-text-secondary hover:text-text-primary font-semibold"
+                          >
+                            <ArrowLeft className="w-3.5 h-3.5" />
+                            <span>Koneksi &amp; Tool Calling ({activeConnectionCount})</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setShowSearchApiKeys((v) => !v)}
+                            className="text-[10.5px] font-medium text-sky-600 dark:text-sky-400 hover:underline"
+                          >
+                            {showSearchApiKeys ? 'Tutup Key' : 'API Key'}
+                          </button>
+                        </div>
+
+                        {/* 1. Web Search Providers: Tavily & Serper */}
+                        <div className="p-2.5 rounded-xl bg-subtle/60 border border-border-subtle space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-text-primary">
+                              Provider Pencarian Web
+                            </span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 font-semibold">
+                              Aktif
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-1">
+                            {(
+                              [
+                                { id: 'auto', label: 'Tavily + Serper' },
+                                { id: 'tavily', label: 'Tavily' },
+                                { id: 'serper', label: 'Serper' }
+                              ] as const
+                            ).map((prov) => (
+                              <button
+                                key={prov.id}
+                                type="button"
+                                onClick={() =>
+                                  setConnectionsConfig((prev) => ({
+                                    ...prev,
+                                    webBrowserEnabled: true,
+                                    searchProvider: prov.id as SearchProviderMode
+                                  }))
+                                }
+                                className={`py-1.5 px-1.5 rounded-lg text-[11px] font-medium border text-center transition ${
+                                  connectionsConfig.searchProvider === prov.id
+                                    ? 'bg-sky-600 border-sky-600 text-white font-semibold'
+                                    : 'bg-surface border-border-subtle text-text-secondary hover:text-text-primary'
+                                }`}
+                              >
+                                {prov.label}
+                              </button>
+                            ))}
+                          </div>
+
+                          {/* Individual Tavily & Serper switches */}
+                          <div className="space-y-1.5 pt-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="font-medium text-text-primary">
+                                  Tavily AI Search
+                                </div>
+                                <div className="text-[10px] text-emerald-600 dark:text-emerald-400">
+                                  API Key terhubung (tvly-•••drPb)
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setConnectionsConfig((prev) => ({
+                                    ...prev,
+                                    tavilyEnabled: !prev.tavilyEnabled
+                                  }))
+                                }
+                              >
+                                {renderSwitch(connectionsConfig.tavilyEnabled)}
+                              </button>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="font-medium text-text-primary">
+                                  Serper Google Search
+                                </div>
+                                <div className="text-[10px] text-emerald-600 dark:text-emerald-400">
+                                  API Key terhubung (fe89•••2414)
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setConnectionsConfig((prev) => ({
+                                    ...prev,
+                                    serperEnabled: !prev.serperEnabled
+                                  }))
+                                }
+                              >
+                                {renderSwitch(connectionsConfig.serperEnabled)}
+                              </button>
+                            </div>
+                          </div>
+
+                          {showSearchApiKeys && (
+                            <div className="space-y-1.5 pt-1.5 border-t border-border-subtle">
+                              <input
+                                type="password"
+                                value={connectionsConfig.tavilyApiKey}
+                                onChange={(e) =>
+                                  setConnectionsConfig((prev) => ({
+                                    ...prev,
+                                    tavilyApiKey: e.target.value
+                                  }))
+                                }
+                                placeholder="Override Tavily Key (opsional, default sudah aktif)"
+                                className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[10.5px] text-text-primary focus:outline-none"
+                              />
+                              <input
+                                type="password"
+                                value={connectionsConfig.serperApiKey}
+                                onChange={(e) =>
+                                  setConnectionsConfig((prev) => ({
+                                    ...prev,
+                                    serperApiKey: e.target.value
+                                  }))
+                                }
+                                placeholder="Override Serper Key (opsional, default sudah aktif)"
+                                className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[10.5px] text-text-primary focus:outline-none"
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 2. Full Workspace Notes CRUD Access */}
+                        <div className="p-2.5 rounded-xl bg-subtle/60 border border-border-subtle flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="font-semibold text-text-primary">
+                              Akses Penuh Catatan Workspace
+                            </div>
+                            <div className="text-[10.5px] text-text-secondary">
+                              Lihat, buat, ubah, hapus &amp; buka semua catatan
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setConnectionsConfig((prev) => ({
+                                ...prev,
+                                notesCrudEnabled: !prev.notesCrudEnabled
+                              }))
+                            }
+                          >
+                            {renderSwitch(connectionsConfig.notesCrudEnabled)}
+                          </button>
+                        </div>
+
+                        {/* 3. Custom External API / Webhook Connections for Skills */}
+                        <div className="p-2.5 rounded-xl bg-subtle/60 border border-border-subtle space-y-2">
+                          <div className="font-semibold text-text-primary">
+                            Koneksi Eksternal (Webhook / API Skill)
+                          </div>
+
+                          {connectionsConfig.customConnections.length > 0 && (
+                            <div className="space-y-1">
+                              {connectionsConfig.customConnections.map((conn) => (
+                                <div
+                                  key={conn.id}
+                                  className="flex items-center justify-between gap-1.5 px-2 py-1 rounded-lg bg-surface border border-border-subtle text-[11px]"
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <div className="font-semibold text-text-primary truncate">
+                                      {conn.name}{' '}
+                                      <span className="text-[9.5px] font-mono text-sky-500">
+                                        {conn.method}
+                                      </span>
+                                    </div>
+                                    <div className="text-[10px] font-mono text-text-secondary truncate">
+                                      {conn.url}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setConnectionsConfig((prev) => ({
+                                        ...prev,
+                                        customConnections:
+                                          prev.customConnections.filter(
+                                            (c) => c.id !== conn.id
+                                          )
+                                      }))
+                                    }
+                                    className="p-1 text-text-secondary hover:text-rose-500"
+                                    title="Hapus koneksi"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          <form onSubmit={handleAddCustomConnection} className="space-y-1.5">
+                            <div className="flex gap-1">
+                              <input
+                                type="text"
+                                value={newConnName}
+                                onChange={(e) => setNewConnName(e.target.value)}
+                                placeholder="Nama koneksi (mis: webhook_n8n)"
+                                className="flex-1 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[11px] text-text-primary focus:outline-none"
+                              />
+                              <select
+                                value={newConnMethod}
+                                onChange={(e) =>
+                                  setNewConnMethod(e.target.value as 'GET' | 'POST')
+                                }
+                                className="bg-surface border border-border-subtle rounded-lg px-1.5 py-1 text-[10.5px] font-mono text-text-primary"
+                              >
+                                <option value="POST">POST</option>
+                                <option value="GET">GET</option>
+                              </select>
+                            </div>
+                            <input
+                              type="text"
+                              value={newConnUrl}
+                              onChange={(e) => setNewConnUrl(e.target.value)}
+                              placeholder="https://api.example.com/webhook"
+                              className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[10.5px] text-text-primary focus:outline-none"
+                            />
+                            <input
+                              type="password"
+                              value={newConnAuth}
+                              onChange={(e) => setNewConnAuth(e.target.value)}
+                              placeholder="Header Authorization (opsional: Bearer ...)"
+                              className="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1 font-mono text-[10.5px] text-text-primary focus:outline-none"
+                            />
+                            <button
+                              type="submit"
+                              className="w-full py-1.5 rounded-lg bg-surface hover:bg-subtle border border-border-subtle text-[11px] font-semibold text-text-primary flex items-center justify-center gap-1 transition"
+                            >
+                              <Link2 className="w-3 h-3" />
+                              <span>Tambah Koneksi Eksternal</span>
+                            </button>
+                          </form>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1699,7 +2498,7 @@ export const ExternalAIDrawer: React.FC = () => {
                       }`}
                       title={
                         includeNoteContext
-                          ? `Konteks halaman aktif (${activeNote?.blocks.length || 0} blok)`
+                          ? `Konteks halaman & workspace aktif (${allNotes.length} halaman)`
                           : 'Konteks halaman dinonaktifkan'
                       }
                       aria-label="Konteks halaman catatan"
@@ -1715,7 +2514,7 @@ export const ExternalAIDrawer: React.FC = () => {
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
                             <p className="font-semibold text-text-primary">
-                              Konteks Halaman Aktif
+                              Konteks Halaman &amp; Workspace
                             </p>
                             <p className="text-[11px] text-text-secondary truncate">
                               {activeNote?.title || 'Tanpa Judul'} (
@@ -1735,7 +2534,7 @@ export const ExternalAIDrawer: React.FC = () => {
                           </button>
                         </div>
                         <p className="text-[10px] text-text-secondary leading-relaxed">
-                          Saat aktif, AI otomatis membaca isi blok, tabel, subhalaman, dan transkrip voice note terbaru pada halaman ini.
+                          AI memiliki akses penuh ke seluruh halaman workspace ({allNotes.length} catatan), pencarian web (Tavily &amp; Serper), serta {activeSkillNotes.length} skill.md aktif.
                         </p>
                       </div>
                     )}
@@ -1877,6 +2676,28 @@ export const ExternalAIDrawer: React.FC = () => {
           </div>
         </>
       )}
+
+      <SkillLibraryModal
+        isOpen={skillLibraryModalTab !== null}
+        initialTab={skillLibraryModalTab || 'browse'}
+        onClose={() => setSkillLibraryModalTab(null)}
+        workspaceNotes={allNotes}
+        activeSkillIds={activeSkillIds}
+        onSkillInstalled={(installedNote) => {
+          setActiveSkillIds((prev) =>
+            prev.includes(installedNote.id) ? prev : [...prev, installedNote.id]
+          );
+          setActiveNoteId(installedNote.id);
+        }}
+        onOpenNote={(note) => {
+          setActiveNoteId(note.id);
+        }}
+        ownerId={currentUser?.id}
+        ownerEmail={currentUser?.email}
+        ownerName={currentUser?.name}
+        semesterId={activeNote?.semesterId || activeSemesterId || 'sem-1'}
+        courseId={activeNote?.courseId || activeCourseId || 'course-default'}
+      />
     </aside>
   );
 };

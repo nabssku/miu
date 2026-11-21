@@ -161,9 +161,17 @@ import {
   renderSidebarSectionIcon,
   saveSidebarSections,
   SIDEBAR_SECTION_CATALOG,
-  SidebarInboxPopover,
+  SidebarInboxSlideDrawer,
+  SidebarInboxTriggerButton,
+  SidebarQuickLauncherPopover,
+  SidebarWhatsNewButton,
   type SidebarSectionId
 } from './SidebarInboxPopover';
+import { SkillLibraryModal } from '../ai/SkillLibraryModal';
+import {
+  loadActiveSkillNoteIds,
+  saveActiveSkillNoteIds
+} from '../../services/aiAgentTools';
 
 const PAGE_ICONS = [
   '📄', '📝', '📘', '💡', '⚡', '🧠', '🎓', '🧪',
@@ -246,6 +254,8 @@ export const BlockEditor: React.FC = () => {
   const [draggedSidebarSection, setDraggedSidebarSection] =
     useState<SidebarSectionId | null>(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [isInboxOpen, setIsInboxOpen] = useState(false);
+  const [showSidebarSkillLibrary, setShowSidebarSkillLibrary] = useState(false);
   const [quickLinkCopied, setQuickLinkCopied] = useState(false);
   const [copiedMetaField, setCopiedMetaField] = useState<string | null>(null);
   const sidebarSearchInputRef = useRef<HTMLInputElement | null>(null);
@@ -5243,15 +5253,11 @@ export const BlockEditor: React.FC = () => {
                 </button>
 
                 <div className="flex items-center gap-0.5">
-                  <SidebarInboxPopover
+                  <SidebarInboxTriggerButton
+                    isOpen={isInboxOpen}
+                    onToggle={() => setIsInboxOpen((v) => !v)}
                     allNotes={allNotes}
                     sharedWithMeNotes={sharedWithMeNotes}
-                    onSelectNote={(targetNoteId, openComments) => {
-                      openDocumentNote(targetNoteId);
-                      if (openComments) {
-                        setShowCommentsPanel(true);
-                      }
-                    }}
                   />
                   <button
                     type="button"
@@ -5721,19 +5727,6 @@ export const BlockEditor: React.FC = () => {
 
                           <button
                             type="button"
-                            onClick={() => setMainViewMode('kanban')}
-                            className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] transition ${
-                              mainViewMode === 'kanban'
-                                ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
-                                : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
-                            }`}
-                          >
-                            <Columns3 className="w-4 h-4 text-text-secondary shrink-0" />
-                            <span className="truncate">Database baru</span>
-                          </button>
-
-                          <button
-                            type="button"
                             onClick={() => void handleCreateNote(null, true)}
                             className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-text-secondary/80 hover:bg-text-primary/[0.04] hover:text-text-primary transition"
                           >
@@ -5768,7 +5761,7 @@ export const BlockEditor: React.FC = () => {
                       return (
                         <div key="sec-apps" className="space-y-0.5">
                           <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
-                            Aplikasi Notion
+                            Aplikasi Miu
                           </div>
                           <button
                             type="button"
@@ -5782,21 +5775,21 @@ export const BlockEditor: React.FC = () => {
                             <span className="w-4 h-4 rounded-[4px] border border-border-subtle bg-surface flex items-center justify-center text-[9px] font-bold text-text-secondary shrink-0">
                               27
                             </span>
-                            <span className="truncate">Notion Calendar</span>
+                            <span className="truncate">Miu Calendar</span>
                           </button>
                           <button
                             type="button"
-                            onClick={() => setMainViewMode('kanban')}
+                            onClick={() => setMainViewMode('document')}
                             className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] transition ${
-                              mainViewMode === 'kanban'
+                              mainViewMode === 'document'
                                 ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
                                 : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
                             }`}
                           >
                             <span className="w-4 h-4 rounded-[4px] border border-border-subtle bg-surface flex items-center justify-center text-[9px] font-bold text-text-secondary shrink-0">
-                              N
+                              M
                             </span>
-                            <span className="truncate">Notion Desktop</span>
+                            <span className="truncate">Miu Desktop</span>
                           </button>
                         </div>
                       );
@@ -5870,37 +5863,16 @@ export const BlockEditor: React.FC = () => {
                 </button>
 
                 <div className="flex items-center gap-0.5 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setShowCloudSettingsModal(true)}
-                    className="p-1 rounded-md hover:bg-text-primary/[0.05] text-text-secondary hover:text-text-primary relative transition"
-                    title={
-                      syncStatus === 'syncing'
-                        ? 'Menyimpan ke Cloud...'
-                        : neonActive
-                          ? 'Cloud Catatan Terhubung'
-                          : 'Status Penyimpanan & Bantuan'
-                    }
-                  >
-                    <HelpCircle className="w-4 h-4" />
-                    <span
-                      className={`absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full ${
-                        neonActive ? 'bg-rose-500' : 'bg-amber-500'
-                      }`}
-                    />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
+                  <SidebarWhatsNewButton />
+                  <SidebarQuickLauncherPopover
+                    onOpenSkillLibrary={() => setShowSidebarSkillLibrary(true)}
+                    onOpenKanban={() =>
                       setMainViewMode((prev) =>
                         prev === 'kanban' ? 'document' : 'kanban'
                       )
                     }
-                    className="p-1 rounded-md hover:bg-text-primary/[0.05] text-text-secondary hover:text-text-primary transition"
-                    title="Beralih tampilan aplikasi"
-                  >
-                    <LayoutGrid className="w-4 h-4" />
-                  </button>
+                    isKanbanActive={mainViewMode === 'kanban'}
+                  />
                 </div>
 
                 {showUserMenu && (
@@ -5947,6 +5919,45 @@ export const BlockEditor: React.FC = () => {
             </div>
           </aside>
         )}
+
+        {/* Sliding Inbox Drawer attached to Left Sidebar (slides right to open, slides left to close, same width as sidebar) */}
+        <SidebarInboxSlideDrawer
+          isOpen={isInboxOpen && isSidebarOpen}
+          onClose={() => setIsInboxOpen(false)}
+          sidebarWidth={sidebarWidth}
+          allNotes={allNotes}
+          sharedWithMeNotes={sharedWithMeNotes}
+          onSelectNote={(targetNoteId, openComments) => {
+            openDocumentNote(targetNoteId);
+            if (openComments) {
+              setShowCommentsPanel(true);
+            }
+          }}
+        />
+
+        {/* Pustaka Skill Modal opened from Sidebar Bottom-Right Quick Launcher */}
+        <SkillLibraryModal
+          isOpen={showSidebarSkillLibrary}
+          initialTab="browse"
+          onClose={() => setShowSidebarSkillLibrary(false)}
+          workspaceNotes={allNotes}
+          activeSkillIds={loadActiveSkillNoteIds()}
+          onSkillInstalled={(installedNote) => {
+            const currentIds = loadActiveSkillNoteIds();
+            if (!currentIds.includes(installedNote.id)) {
+              saveActiveSkillNoteIds([...currentIds, installedNote.id]);
+            }
+            openDocumentNote(installedNote.id);
+          }}
+          onOpenNote={(note) => {
+            openDocumentNote(note.id);
+          }}
+          ownerId={currentUser?.id}
+          ownerEmail={currentUser?.email}
+          ownerName={currentUser?.name}
+          semesterId={activeNote?.semesterId || activeSemesterId || 'sem-1'}
+          courseId={activeNote?.courseId || activeCourseId || 'course-default'}
+        />
 
         {/* =================================================================== */}
         {/* MAIN PANEL: CLEAN NOTION TOP NAVBAR + PUBLIC BANNER + DOCUMENT      */}
