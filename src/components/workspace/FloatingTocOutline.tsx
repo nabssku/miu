@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { ListTree, X } from 'lucide-react';
+import { ListTree, Pin, X } from 'lucide-react';
 import type { NoteBlock } from '../../types/miu';
 import { flattenBlocks } from '../../utils/blockTreeHelper';
 import { stripInlineMarkdown } from '../../utils/markdown';
@@ -17,6 +17,7 @@ interface FloatingTocOutlineProps {
   noteTitle?: string;
   isOpen: boolean;
   hasTopIsland?: boolean;
+  isAIDrawerOpen?: boolean;
   onToggleOpen: () => void;
   onSelectBlock: (blockId: string) => void;
 }
@@ -42,13 +43,14 @@ export const FloatingTocOutline: React.FC<FloatingTocOutlineProps> = ({
   blocks,
   noteTitle,
   isOpen,
-  hasTopIsland = false,
+  isAIDrawerOpen = false,
   onToggleOpen,
   onSelectBlock
 }) => {
   const headings = useMemo(() => extractTocHeadings(blocks), [blocks]);
   const [activeId, setActiveId] = useState<string>('');
-  const [isHoverPreview, setIsHoverPreview] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
+  const [isPinnedList, setIsPinnedList] = useState(false);
 
   useEffect(() => {
     if (headings.length === 0) {
@@ -59,7 +61,7 @@ export const FloatingTocOutline: React.FC<FloatingTocOutlineProps> = ({
     let rafId = 0;
     const computeActive = () => {
       rafId = 0;
-      const threshold = 136;
+      const threshold = 150;
       let current = headings[0]?.id || '';
       for (const h of headings) {
         const escaped = h.id.replace(/"/g, '\\"');
@@ -90,157 +92,117 @@ export const FloatingTocOutline: React.FC<FloatingTocOutlineProps> = ({
     };
   }, [headings]);
 
-  if (headings.length === 0) {
+  if (!isOpen || headings.length === 0) {
     return null;
   }
 
-  const renderHeadingList = (compact = false) => (
-    <nav aria-label="Daftar Isi Catatan" className="space-y-0.5 max-h-[60vh] overflow-y-auto pr-1">
-      {headings.map((h) => {
-        const isActive = activeId === h.id;
-        const indentClass = h.level === 1 ? 'pl-2' : h.level === 2 ? 'pl-4' : 'pl-6';
-        return (
-          <button
-            key={h.id}
-            type="button"
-            onClick={() => onSelectBlock(h.id)}
-            title={h.text}
-            className={`w-full text-left py-1 pr-2 ${indentClass} rounded-lg transition flex items-center gap-1.5 ${
-              isActive
-                ? 'bg-accent-strong/12 text-accent-strong font-semibold'
-                : 'text-text-secondary hover:text-text-primary hover:bg-subtle/70'
-            } ${compact ? 'text-[11px]' : 'text-xs'}`}
-          >
-            <span
-              className={`shrink-0 rounded-full transition-all ${
-                isActive
-                  ? 'w-1.5 h-1.5 bg-accent-strong'
-                  : h.level === 1
-                    ? 'w-1.5 h-1.5 bg-text-secondary/40'
-                    : 'w-1 h-1 bg-text-secondary/30'
-              }`}
-            />
-            <span
-              className={`truncate ${
-                h.level === 1 ? 'font-semibold' : h.level === 2 ? 'font-medium' : 'font-normal'
-              }`}
-            >
-              {h.text}
-            </span>
-          </button>
-        );
-      })}
-    </nav>
-  );
+  const showExpandedCard = isHovered || isPinnedList;
 
   return (
-    <>
-      {/* Mobile & Medium Screens: Popover when toggled open from header */}
-      {isOpen && (
-        <div
-          className={`xl:hidden fixed ${
-            hasTopIsland ? 'top-24' : 'top-14'
-          } right-4 z-30 w-72 max-w-[calc(100vw-2rem)] miu-card shadow-2xl p-3 space-y-2.5 no-print`}
-        >
-          <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-border-subtle">
+    <aside
+      aria-label="Daftar Isi Halaman"
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+      className={`fixed top-1/2 -translate-y-1/2 z-20 flex items-center justify-end no-print transition-all duration-200 ${
+        isAIDrawerOpen
+          ? 'right-3 sm:right-[354px] lg:right-[394px]'
+          : 'right-3 sm:right-5'
+      }`}
+    >
+      {/* Expanded Floating List Card on Right-Center */}
+      {showExpandedCard && (
+        <div className="mr-2 w-60 max-w-[calc(100vw-3rem)] rounded-xl bg-surface/95 backdrop-blur-md border border-border-subtle shadow-[0_12px_32px_-8px_rgba(15,23,42,0.18)] dark:shadow-[0_14px_36px_-8px_rgba(0,0,0,0.65)] p-2.5 space-y-1.5">
+          <div className="flex items-center justify-between gap-2 px-1.5 pb-1.5 border-b border-border-subtle/70">
             <div className="flex items-center gap-1.5 min-w-0">
-              <ListTree className="w-3.5 h-3.5 text-accent-strong shrink-0" />
-              <span className="text-xs font-bold text-text-primary truncate">
-                {noteTitle?.trim() || 'Daftar Isi'}
+              <ListTree className="w-3.5 h-3.5 text-text-secondary shrink-0" />
+              <span className="text-[11px] font-semibold text-text-secondary truncate">
+                {noteTitle?.trim() || 'Daftar isi'}
               </span>
             </div>
-            <button
-              type="button"
-              onClick={onToggleOpen}
-              className="p-1 rounded-md hover:bg-subtle text-text-secondary hover:text-text-primary transition"
-              title="Tutup Daftar Isi"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-          {renderHeadingList(false)}
-        </div>
-      )}
-
-      {/* Desktop XL+: Sticky Floating Right-Side Rail (Pinned Card or Minimalist Notion Minimap) */}
-      <aside
-        className={`hidden xl:flex flex-col sticky ${
-          hasTopIsland ? 'top-28' : 'top-20'
-        } self-start shrink-0 mr-4 z-20 no-print`}
-        onMouseEnter={() => setIsHoverPreview(true)}
-        onMouseLeave={() => setIsHoverPreview(false)}
-      >
-        {isOpen ? (
-          <div className="w-56 miu-card shadow-sm border border-border-subtle/80 bg-surface/90 backdrop-blur-md p-3 space-y-2">
-            <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-border-subtle/70">
-              <div className="flex items-center gap-1.5 min-w-0">
-                <ListTree className="w-3.5 h-3.5 text-accent-strong shrink-0" />
-                <span className="text-[11px] font-bold uppercase tracking-wider text-text-secondary">
-                  Daftar Isi
-                </span>
-                <span className="px-1.5 py-0.2 rounded-full bg-subtle text-[10px] font-mono text-text-secondary">
-                  {headings.length}
-                </span>
-              </div>
+            <div className="flex items-center gap-0.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsPinnedList((v) => !v)}
+                className={`p-1 rounded-md transition ${
+                  isPinnedList
+                    ? 'bg-subtle text-text-primary'
+                    : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
+                }`}
+                title={isPinnedList ? 'Lepas sematan daftar isi' : 'Sematkan daftar isi tetap terbuka'}
+              >
+                <Pin className="w-3 h-3" />
+              </button>
               <button
                 type="button"
                 onClick={onToggleOpen}
-                className="p-0.5 rounded hover:bg-subtle text-text-secondary hover:text-text-primary transition"
-                title="Perkecil ke minimap"
+                className="p-1 rounded-md hover:bg-subtle text-text-secondary hover:text-text-primary transition"
+                title="Sembunyikan daftar isi"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-3 h-3" />
               </button>
             </div>
-            {renderHeadingList(true)}
           </div>
-        ) : (
-          <div className="relative flex flex-col items-end">
-            <button
-              type="button"
-              onClick={onToggleOpen}
-              title="Buka Daftar Isi (Outline)"
-              className="px-2 py-2.5 rounded-xl hover:bg-subtle/70 transition flex flex-col items-end gap-1.5"
-            >
-              {headings.slice(0, 18).map((h) => {
-                const isActive = activeId === h.id;
-                const barWidth =
-                  h.level === 1 ? 'w-5' : h.level === 2 ? 'w-3.5' : 'w-2';
-                return (
+
+          <nav className="space-y-0.5 max-h-[52vh] overflow-y-auto pr-0.5">
+            {headings.map((h) => {
+              const isActive = activeId === h.id;
+              const indentClass =
+                h.level === 1 ? 'pl-2' : h.level === 2 ? 'pl-4' : 'pl-6';
+              return (
+                <button
+                  key={h.id}
+                  type="button"
+                  onClick={() => onSelectBlock(h.id)}
+                  title={h.text}
+                  className={`w-full text-left py-1 pr-2 ${indentClass} rounded-lg text-[12.5px] transition flex items-center gap-2 ${
+                    isActive
+                      ? 'bg-subtle text-text-primary font-semibold'
+                      : 'text-text-secondary hover:text-text-primary hover:bg-subtle/60'
+                  }`}
+                >
                   <span
-                    key={h.id}
-                    className={`h-[2.5px] rounded-full transition-all ${barWidth} ${
+                    className={`shrink-0 rounded-full ${
                       isActive
-                        ? 'bg-accent-strong scale-x-110'
-                        : 'bg-text-secondary/35'
+                        ? 'w-1.5 h-1.5 bg-text-primary'
+                        : 'w-1 h-1 bg-text-secondary/40'
                     }`}
                   />
-                );
-              })}
-            </button>
+                  <span className="truncate">{h.text}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+      )}
 
-            {isHoverPreview && (
-              <div className="absolute right-0 top-0 w-56 miu-card shadow-xl border border-border-subtle bg-surface/95 backdrop-blur-md p-3 space-y-2 z-30">
-                <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-border-subtle/70">
-                  <div className="flex items-center gap-1.5">
-                    <ListTree className="w-3.5 h-3.5 text-accent-strong" />
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-text-secondary">
-                      Daftar Isi
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={onToggleOpen}
-                    className="text-[10px] font-semibold text-accent-strong hover:underline"
-                  >
-                    Sematkan
-                  </button>
-                </div>
-                {renderHeadingList(true)}
-              </div>
-            )}
-          </div>
-        )}
-      </aside>
-    </>
+      {/* Right-Center Vertical List of Tick Bars (Notion Outline Rail) */}
+      <div className="py-2 px-1.5 rounded-full flex flex-col items-end gap-2 select-none">
+        {headings.slice(0, 24).map((h) => {
+          const isActive = activeId === h.id;
+          const barWidth =
+            h.level === 1 ? 'w-4' : h.level === 2 ? 'w-3' : 'w-2';
+          return (
+            <button
+              key={h.id}
+              type="button"
+              onClick={() => {
+                onSelectBlock(h.id);
+                setIsPinnedList((v) => !v);
+              }}
+              title={h.text}
+              className="group/tick py-0.5 flex items-center justify-end focus:outline-none"
+            >
+              <span
+                className={`block h-[2px] rounded-full transition-all duration-150 ${barWidth} ${
+                  isActive
+                    ? 'bg-text-primary w-4 h-[2.5px]'
+                    : 'bg-text-secondary/30 group-hover/tick:bg-text-secondary/70'
+                }`}
+              />
+            </button>
+          );
+        })}
+      </div>
+    </aside>
   );
 };

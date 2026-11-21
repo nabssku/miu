@@ -165,6 +165,7 @@ export function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
   }
 
   const now = Date.now();
+  const parsedShareSettings = parseShareSettingsField(r.share_settings);
   return {
     id: r.id,
     ownerId: r.user_id,
@@ -178,6 +179,9 @@ export function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
     cover: r.cover || '',
     isFavorite: Boolean(r.is_favorite),
     isFullWidth: Boolean(r.is_full_width),
+    fontStyle: parsedShareSettings.fontStyle || 'default',
+    isSmallText: Boolean(parsedShareSettings.isSmallText),
+    isLocked: Boolean(parsedShareSettings.isLocked),
     kanbanStatus:
       r.kanban_status === 'in_progress' || r.kanban_status === 'done'
         ? r.kanban_status
@@ -186,7 +190,7 @@ export function parseNeonNoteRow(r: NeonNoteRow): NoteRecord {
     dueTime: r.due_time || '',
     googleEventId: r.google_event_id || '',
     blocks: parseBlocksField(r.blocks),
-    shareSettings: parseShareSettingsField(r.share_settings),
+    shareSettings: parsedShareSettings,
     comments: parsedComments,
     createdAt: parseEpochMs(r.created_at, now),
     updatedAt: parseEpochMs(r.updated_at, now)

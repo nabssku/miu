@@ -219,6 +219,8 @@ export type SharePermission = 'view' | 'comment' | 'edit';
 
 export type NoteKanbanStatus = 'todo' | 'in_progress' | 'done';
 
+export type NoteFontStyle = 'default' | 'serif' | 'mono';
+
 export interface SharedCollaborator {
   email: string;
   role: SharePermission;
@@ -229,6 +231,10 @@ export interface NoteShareSettings {
   isPublicLink: boolean;
   publicRole: SharePermission;
   collaborators: SharedCollaborator[];
+  fontStyle?: NoteFontStyle;
+  isSmallText?: boolean;
+  isLocked?: boolean;
+  showPageDiscussions?: boolean;
 }
 
 export interface NoteComment {
@@ -269,6 +275,9 @@ export interface NoteRecord {
   cover?: string;
   isFavorite?: boolean;
   isFullWidth?: boolean;
+  fontStyle?: NoteFontStyle;
+  isSmallText?: boolean;
+  isLocked?: boolean;
   kanbanStatus?: NoteKanbanStatus;
   dueDate?: string; // YYYY-MM-DD note deadline
   dueTime?: string; // HH:mm optional

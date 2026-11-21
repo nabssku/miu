@@ -23,12 +23,17 @@ import {
   FileText,
   Globe,
   GripVertical,
+  HelpCircle,
+  Home,
+  Info,
+  LayoutGrid,
   Link2,
   ListTree,
   Loader2,
   Lock,
   LogOut,
   Maximize2,
+  MessageCircle,
   MessageSquare,
   Minimize2,
   PanelLeft,
@@ -39,7 +44,9 @@ import {
   Send,
   Settings,
   Share2,
+  SlidersHorizontal,
   Sparkles,
+  SquarePen,
   Star,
   Trash2,
   Ungroup,
@@ -72,6 +79,7 @@ import type {
   NoteBlock,
   NoteBlockBase,
   NoteComment,
+  NoteFontStyle,
   NoteKanbanStatus,
   NoteRecord,
   NoteShareSettings,
@@ -146,6 +154,16 @@ import {
   KanbanBoardView,
   renderKanbanStatusIcon
 } from './KanbanBoardView';
+import { PageActionsMenu } from './PageActionsMenu';
+import {
+  AddSidebarSectionPopover,
+  loadSidebarSections,
+  renderSidebarSectionIcon,
+  saveSidebarSections,
+  SIDEBAR_SECTION_CATALOG,
+  SidebarInboxPopover,
+  type SidebarSectionId
+} from './SidebarInboxPopover';
 
 const PAGE_ICONS = [
   '📄', '📝', '📘', '💡', '⚡', '🧠', '🎓', '🧪',
@@ -218,21 +236,107 @@ export const BlockEditor: React.FC = () => {
   const activeNote = queriedNote || allNotes[0];
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [showTocOutline, setShowTocOutline] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(248);
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+  const [isCustomizeSidebar, setIsCustomizeSidebar] = useState(false);
+  const [showAddSidebarSection, setShowAddSidebarSection] = useState(false);
+  const [sidebarSections, setSidebarSections] = useState<SidebarSectionId[]>(
+    () => loadSidebarSections()
+  );
+  const [draggedSidebarSection, setDraggedSidebarSection] =
+    useState<SidebarSectionId | null>(null);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [quickLinkCopied, setQuickLinkCopied] = useState(false);
+  const [copiedMetaField, setCopiedMetaField] = useState<string | null>(null);
+  const sidebarSearchInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [showTocOutline, setShowTocOutline] = useState(true);
   useEffect(() => {
-    if (window.innerWidth >= 1280) {
-      setShowTocOutline(true);
+    try {
+      const savedW = Number(window.localStorage.getItem('miu_sidebar_width'));
+      if (Number.isFinite(savedW) && savedW >= 210 && savedW <= 440) {
+        setSidebarWidth(savedW);
+      }
+    } catch {
+      // ignore
     }
   }, []);
+
   useEffect(() => {
-    if (isAIDrawerOpen && window.innerWidth < 1536) {
-      setShowTocOutline(false);
-    }
-  }, [isAIDrawerOpen]);
-  const tocHeadings = useMemo(
-    () => extractTocHeadings(activeNote?.blocks),
-    [activeNote?.blocks]
-  );
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
+        e.preventDefault();
+        setIsSidebarOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, []);
+
+  const handleToggleSidebarSection = (id: SidebarSectionId) => {
+    setSidebarSections((prev) => {
+      const exists = prev.includes(id);
+      const next = exists ? prev.filter((s) => s !== id) : [...prev, id];
+      const safeNext = next.length > 0 ? next : ['private' as SidebarSectionId];
+      saveSidebarSections(safeNext);
+      return safeNext;
+    });
+  };
+
+  const handleReorderSidebarSection = (
+    sourceId: SidebarSectionId,
+    targetId: SidebarSectionId
+  ) => {
+    if (sourceId === targetId) return;
+    setSidebarSections((prev) => {
+      const next = prev.filter((s) => s !== sourceId);
+      const targetIdx = next.indexOf(targetId);
+      if (targetIdx === -1) return prev;
+      next.splice(targetIdx, 0, sourceId);
+      saveSidebarSections(next);
+      return next;
+    });
+  };
+
+  const handleStartSidebarResize = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+    let didDrag = false;
+    let latestWidth = startWidth;
+    setIsResizingSidebar(true);
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientX - startX;
+      if (Math.abs(delta) > 3) {
+        didDrag = true;
+      }
+      if (didDrag) {
+        latestWidth = Math.max(210, Math.min(440, startWidth + delta));
+        setSidebarWidth(latestWidth);
+      }
+    };
+
+    const onMouseUp = () => {
+      setIsResizingSidebar(false);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      if (!didDrag) {
+        setIsSidebarOpen(false);
+      } else {
+        try {
+          window.localStorage.setItem('miu_sidebar_width', String(latestWidth));
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
   const [mainViewMode, setMainViewMode] = useState<'document' | 'kanban' | 'calendar'>('document');
   const [searchQuery, setSearchQuery] = useState('');
   const [showIconPicker, setShowIconPicker] = useState(false);
@@ -741,9 +845,25 @@ export const BlockEditor: React.FC = () => {
   }, [activeNote, allNotes, currentUser]);
 
   const isOwner = effectiveRole === 'owner';
-  const canEdit = effectiveRole === 'owner' || effectiveRole === 'edit';
+  const hasEditPermission = effectiveRole === 'owner' || effectiveRole === 'edit';
+  const isPageLocked = Boolean(
+    activeNote?.isLocked ?? activeNote?.shareSettings?.isLocked
+  );
+  const canEdit = hasEditPermission && !isPageLocked;
   const canComment =
     effectiveRole === 'owner' || effectiveRole === 'edit' || effectiveRole === 'comment';
+
+  const activeFontStyle: NoteFontStyle =
+    activeNote?.fontStyle || activeNote?.shareSettings?.fontStyle || 'default';
+  const isSmallText = Boolean(
+    activeNote?.isSmallText ?? activeNote?.shareSettings?.isSmallText
+  );
+  const noteFontFamily =
+    activeFontStyle === 'serif'
+      ? 'Lyon-Text, Georgia, YuMincho, "Yu Mincho", "Hiragino Mincho ProN", Cambria, "Times New Roman", Times, serif'
+      : activeFontStyle === 'mono'
+        ? "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+        : "'Plus Jakarta Sans', Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif";
 
   const childSubpages = useMemo(
     () => (activeNote ? allNotes.filter((n) => n.parentId === activeNote.id) : []),
@@ -799,34 +919,76 @@ export const BlockEditor: React.FC = () => {
   };
 
   const updateNote = async (patch: Partial<NoteRecord>) => {
-    if (!activeNote || !canEdit) return;
+    if (!activeNote || !hasEditPermission) return;
     const fresh = (await db.notes.get(activeNote.id)) || activeNote;
     const updatedAt = Date.now();
-    const nextNote: NoteRecord = {
-      ...fresh,
+
+    const baseShare: NoteShareSettings = patch.shareSettings ||
+      fresh.shareSettings || {
+        isPublicLink: false,
+        publicRole: 'view',
+        collaborators: []
+      };
+
+    const syncedShareSettings: NoteShareSettings = {
+      ...baseShare,
+      ...(patch.fontStyle !== undefined ? { fontStyle: patch.fontStyle } : {}),
+      ...(patch.isSmallText !== undefined ? { isSmallText: patch.isSmallText } : {}),
+      ...(patch.isLocked !== undefined ? { isLocked: patch.isLocked } : {})
+    };
+
+    const finalPatch: Partial<NoteRecord> = {
       ...patch,
+      shareSettings: syncedShareSettings,
       updatedAt
     };
-    await db.notes.update(activeNote.id, {
-      ...patch,
-      updatedAt
-    });
+
+    const nextNote: NoteRecord = {
+      ...fresh,
+      ...finalPatch
+    };
+    await db.notes.update(activeNote.id, finalPatch);
     scheduleNeonSave(nextNote);
   };
 
   const handleUpdateShareSettings = async (settings: NoteShareSettings) => {
     if (!activeNote || !isOwner) return;
     const updatedAt = Date.now();
+    const mergedSettings: NoteShareSettings = {
+      fontStyle: activeFontStyle,
+      isSmallText,
+      isLocked: isPageLocked,
+      ...settings
+    };
     const nextNote: NoteRecord = {
       ...activeNote,
-      shareSettings: settings,
+      shareSettings: mergedSettings,
       updatedAt
     };
     await db.notes.update(activeNote.id, {
-      shareSettings: settings,
+      shareSettings: mergedSettings,
       updatedAt
     });
     scheduleNeonSave(nextNote);
+  };
+
+  const handleCopyActiveShareLink = async () => {
+    if (!activeNote) return;
+    const currentSettings: NoteShareSettings = activeNote.shareSettings || {
+      isPublicLink: false,
+      publicRole: 'view',
+      collaborators: []
+    };
+    if (!currentSettings.isPublicLink && isOwner) {
+      await handleUpdateShareSettings({
+        ...currentSettings,
+        isPublicLink: true
+      });
+    }
+    const shareUrl = `${window.location.origin}/app?share=${encodeURIComponent(activeNote.id)}`;
+    await navigator.clipboard.writeText(shareUrl);
+    setQuickLinkCopied(true);
+    window.setTimeout(() => setQuickLinkCopied(false), 2000);
   };
 
   const handleAddComment = async (e: React.FormEvent) => {
@@ -2153,8 +2315,8 @@ export const BlockEditor: React.FC = () => {
     }
   };
 
-  const handleExportMarkdown = () => {
-    if (!activeNote) return;
+  const buildActiveNoteMarkdown = (): string => {
+    if (!activeNote) return '';
     const mdLines = [`# ${activeNote.title || 'Tanpa Judul'}\n`];
 
     const appendBlocksMd = (blocks: Array<NoteBlock | NoteBlockBase>) => {
@@ -2222,13 +2384,25 @@ export const BlockEditor: React.FC = () => {
     };
 
     appendBlocksMd(activeNote.blocks);
-    const blob = new Blob([mdLines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+    return mdLines.join('\n');
+  };
+
+  const handleExportMarkdown = () => {
+    if (!activeNote) return;
+    const mdText = buildActiveNoteMarkdown();
+    const blob = new Blob([mdText], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `${(activeNote.title || 'catatan').toLowerCase().replace(/\s+/g, '-')}.md`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleCopyPageContent = async () => {
+    if (!activeNote) return;
+    const mdText = buildActiveNoteMarkdown();
+    await navigator.clipboard.writeText(mdText);
   };
 
   // Reorder single block or selected group via Drag & Drop (supports root & inside columns)
@@ -2643,15 +2817,15 @@ export const BlockEditor: React.FC = () => {
             }}
             onClick={() => openDocumentNote(note.id)}
             style={{ paddingLeft: `${8 + depth * 14}px` }}
-            className={`group flex items-center justify-between gap-1 pr-1.5 py-1.5 rounded-lg text-xs cursor-pointer transition ${
+            className={`group flex items-center justify-between gap-1 pr-1.5 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
               isPageDropTarget
                 ? 'bg-accent-strong/15 ring-1 ring-accent-strong text-text-primary'
                 : isSelected && mainViewMode === 'document'
-                  ? 'bg-surface font-semibold text-text-primary shadow-sm'
-                  : 'text-text-secondary hover:bg-surface/60 hover:text-text-primary'
+                  ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
+                  : 'text-text-secondary hover:bg-text-primary/[0.04] dark:hover:bg-white/[0.05] hover:text-text-primary'
             } ${draggedNoteId === note.id ? 'opacity-50' : ''}`}
           >
-            <div className="flex items-center gap-1 min-w-0 flex-1">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
               {hasChildren ? (
                 <button
                   type="button"
@@ -2659,19 +2833,17 @@ export const BlockEditor: React.FC = () => {
                     e.stopPropagation();
                     setCollapsedParents((prev) => ({ ...prev, [note.id]: !prev[note.id] }));
                   }}
-                  className="p-0.5 rounded hover:bg-subtle text-text-secondary shrink-0"
+                  className="p-0.5 -ml-1 rounded hover:bg-subtle text-text-secondary shrink-0"
                   title={isCollapsed ? 'Tampilkan subhalaman' : 'Sembunyikan subhalaman'}
                 >
                   {isCollapsed ? (
-                    <ChevronRight className="w-3 h-3" />
+                    <ChevronRight className="w-3.5 h-3.5" />
                   ) : (
-                    <ChevronDown className="w-3 h-3" />
+                    <ChevronDown className="w-3.5 h-3.5" />
                   )}
                 </button>
-              ) : (
-                <span className="w-4 shrink-0" />
-              )}
-              <span className="text-sm leading-none shrink-0">{note.icon || '📄'}</span>
+              ) : null}
+              <span className="text-[15px] leading-none shrink-0">{note.icon || '📄'}</span>
               <span className="truncate">{note.title || 'Tanpa Judul'}</span>
             </div>
 
@@ -3145,6 +3317,7 @@ export const BlockEditor: React.FC = () => {
 
           {block.type === 'h1' && (() => {
             const isEditingH1 = canEdit && (editingBlockId === block.id || !block.content.trim());
+            const h1Size = isSmallText ? 'text-[22px] leading-[1.3]' : 'text-[26px] leading-[1.3]';
             return (
               <div className="relative w-full">
                 {isEditingH1 ? (
@@ -3160,13 +3333,13 @@ export const BlockEditor: React.FC = () => {
                     }
                     onKeyDown={(e) => handleBlockKeyDown(e, block)}
                     placeholder="Heading 1"
-                    className="w-full bg-transparent text-2xl font-bold text-text-primary focus:outline-none pt-3 pb-1"
+                    className={`w-full bg-transparent ${h1Size} font-bold tracking-tight text-text-primary focus:outline-none pt-3 pb-1`}
                   />
                 ) : (
                   <div
                     ref={(el) => setCaretHostRef(block.id, 'content', el)}
                     onClick={() => focusPreviewBlock(block)}
-                    className={`w-full min-h-[2.5rem] text-2xl font-bold text-text-primary pt-3 pb-1 whitespace-pre-wrap break-words ${
+                    className={`w-full min-h-[2.3rem] ${h1Size} font-bold tracking-tight text-text-primary pt-3 pb-1 whitespace-pre-wrap break-words ${
                       canEdit ? 'cursor-text' : 'cursor-default'
                     }`}
                   >
@@ -3189,6 +3362,7 @@ export const BlockEditor: React.FC = () => {
 
           {block.type === 'h2' && (() => {
             const isEditingH2 = canEdit && (editingBlockId === block.id || !block.content.trim());
+            const h2Size = isSmallText ? 'text-[18.5px] leading-[1.35]' : 'text-[21px] leading-[1.35]';
             return (
               <div className="relative w-full">
                 {isEditingH2 ? (
@@ -3204,13 +3378,13 @@ export const BlockEditor: React.FC = () => {
                     }
                     onKeyDown={(e) => handleBlockKeyDown(e, block)}
                     placeholder="Heading 2"
-                    className="w-full bg-transparent text-xl font-bold text-text-primary focus:outline-none pt-2 pb-0.5"
+                    className={`w-full bg-transparent ${h2Size} font-bold tracking-tight text-text-primary focus:outline-none pt-2.5 pb-0.5`}
                   />
                 ) : (
                   <div
                     ref={(el) => setCaretHostRef(block.id, 'content', el)}
                     onClick={() => focusPreviewBlock(block)}
-                    className={`w-full min-h-[2.1rem] text-xl font-bold text-text-primary pt-2 pb-0.5 whitespace-pre-wrap break-words ${
+                    className={`w-full min-h-[2rem] ${h2Size} font-bold tracking-tight text-text-primary pt-2.5 pb-0.5 whitespace-pre-wrap break-words ${
                       canEdit ? 'cursor-text' : 'cursor-default'
                     }`}
                   >
@@ -3233,6 +3407,7 @@ export const BlockEditor: React.FC = () => {
 
           {block.type === 'h3' && (() => {
             const isEditingH3 = canEdit && (editingBlockId === block.id || !block.content.trim());
+            const h3Size = isSmallText ? 'text-[15.5px] leading-[1.4]' : 'text-[17.5px] leading-[1.4]';
             return (
               <div className="relative w-full">
                 {isEditingH3 ? (
@@ -3248,13 +3423,13 @@ export const BlockEditor: React.FC = () => {
                     }
                     onKeyDown={(e) => handleBlockKeyDown(e, block)}
                     placeholder="Heading 3"
-                    className="w-full bg-transparent text-base font-bold text-text-primary focus:outline-none pt-1.5 pb-0.5"
+                    className={`w-full bg-transparent ${h3Size} font-semibold text-text-primary focus:outline-none pt-1.5 pb-0.5`}
                   />
                 ) : (
                   <div
                     ref={(el) => setCaretHostRef(block.id, 'content', el)}
                     onClick={() => focusPreviewBlock(block)}
-                    className={`w-full min-h-[1.8rem] text-base font-bold text-text-primary pt-1.5 pb-0.5 whitespace-pre-wrap break-words ${
+                    className={`w-full min-h-[1.75rem] ${h3Size} font-semibold text-text-primary pt-1.5 pb-0.5 whitespace-pre-wrap break-words ${
                       canEdit ? 'cursor-text' : 'cursor-default'
                     }`}
                   >
@@ -3281,6 +3456,9 @@ export const BlockEditor: React.FC = () => {
               (editingBlockId === block.id ||
                 !block.content.trim() ||
                 block.content.startsWith('/'));
+            const bodySize = isSmallText
+              ? 'text-[13.5px] leading-[1.6]'
+              : 'text-[15px] leading-[1.65]';
             return (
               <div className="relative w-full">
                 {isEditingText ? (
@@ -3302,14 +3480,14 @@ export const BlockEditor: React.FC = () => {
                       void handleBlockChange(block.id, { content: e.target.value })
                     }
                     onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                    placeholder="Ketik '/' untuk perintah, atau mulai menulis..."
-                    className="w-full bg-transparent text-[15px] sm:text-base leading-[1.68] text-text-primary placeholder:text-text-secondary/35 focus:outline-none resize-none py-0.5"
+                    placeholder="Tekan / untuk menyisipkan blok"
+                    className={`w-full bg-transparent ${bodySize} text-text-primary placeholder:text-text-secondary/40 focus:outline-none resize-none py-0.5`}
                   />
                 ) : (
                   <div
                     ref={(el) => setCaretHostRef(block.id, 'content', el)}
                     onClick={() => focusPreviewBlock(block)}
-                    className={`w-full min-h-[1.75rem] text-[15px] sm:text-base leading-[1.68] text-text-primary py-0.5 whitespace-pre-wrap break-words ${
+                    className={`w-full min-h-[1.65rem] ${bodySize} text-text-primary py-0.5 whitespace-pre-wrap break-words ${
                       canEdit ? 'cursor-text' : 'cursor-default'
                     }`}
                   >
@@ -3332,6 +3510,9 @@ export const BlockEditor: React.FC = () => {
 
           {block.type === 'bullet' && (() => {
             const isEditingBullet = canEdit && (editingBlockId === block.id || !block.content.trim());
+            const bodySize = isSmallText
+              ? 'text-[13.5px] leading-[1.58]'
+              : 'text-[15px] leading-[1.62]';
             return (
               <div className="flex items-start gap-2.5 py-0.5">
                 <span className="text-text-primary font-bold select-none pt-0.5">•</span>
@@ -3355,14 +3536,14 @@ export const BlockEditor: React.FC = () => {
                         void handleBlockChange(block.id, { content: e.target.value })
                       }
                       onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                      placeholder="List"
-                      className="w-full bg-transparent text-[15px] sm:text-base leading-[1.6] text-text-primary focus:outline-none resize-none"
+                      placeholder="Daftar poin"
+                      className={`w-full bg-transparent ${bodySize} text-text-primary focus:outline-none resize-none`}
                     />
                   ) : (
                     <div
                       ref={(el) => setCaretHostRef(block.id, 'content', el)}
                       onClick={() => focusPreviewBlock(block)}
-                      className={`w-full min-h-[1.6rem] text-[15px] sm:text-base leading-[1.6] text-text-primary whitespace-pre-wrap break-words ${
+                      className={`w-full min-h-[1.55rem] ${bodySize} text-text-primary whitespace-pre-wrap break-words ${
                         canEdit ? 'cursor-text' : 'cursor-default'
                       }`}
                     >
@@ -3386,9 +3567,12 @@ export const BlockEditor: React.FC = () => {
 
           {block.type === 'numbered' && (() => {
             const isEditingNum = canEdit && (editingBlockId === block.id || !block.content.trim());
+            const bodySize = isSmallText
+              ? 'text-[13.5px] leading-[1.58]'
+              : 'text-[15px] leading-[1.62]';
             return (
               <div className="flex items-start gap-2 py-0.5">
-                <span className="font-mono text-sm text-text-secondary select-none pt-0.5 min-w-[20px]">
+                <span className="text-sm text-text-secondary select-none pt-0.5 min-w-[20px]">
                   {currentNumber}.
                 </span>
                 <div className="relative flex-1 min-w-0">
@@ -3411,14 +3595,14 @@ export const BlockEditor: React.FC = () => {
                         void handleBlockChange(block.id, { content: e.target.value })
                       }
                       onKeyDown={(e) => handleBlockKeyDown(e, block)}
-                      placeholder="List"
-                      className="w-full bg-transparent text-[15px] sm:text-base leading-[1.6] text-text-primary focus:outline-none resize-none"
+                      placeholder="Daftar bernomor"
+                      className={`w-full bg-transparent ${bodySize} text-text-primary focus:outline-none resize-none`}
                     />
                   ) : (
                     <div
                       ref={(el) => setCaretHostRef(block.id, 'content', el)}
                       onClick={() => focusPreviewBlock(block)}
-                      className={`w-full min-h-[1.6rem] text-[15px] sm:text-base leading-[1.6] text-text-primary whitespace-pre-wrap break-words ${
+                      className={`w-full min-h-[1.55rem] ${bodySize} text-text-primary whitespace-pre-wrap break-words ${
                         canEdit ? 'cursor-text' : 'cursor-default'
                       }`}
                     >
@@ -3442,6 +3626,9 @@ export const BlockEditor: React.FC = () => {
 
           {block.type === 'todo' && (() => {
             const isEditingTodo = canEdit && (editingBlockId === block.id || !block.content.trim());
+            const bodySize = isSmallText
+              ? 'text-[13.5px] leading-[1.58]'
+              : 'text-[15px] leading-[1.62]';
             return (
               <div className="flex items-start gap-2.5 py-0.5">
                 <button
@@ -3452,8 +3639,8 @@ export const BlockEditor: React.FC = () => {
                   }
                   className={`mt-1 w-4 h-4 rounded-[4px] border flex items-center justify-center shrink-0 transition ${
                     block.checked
-                      ? 'bg-accent-strong border-accent-strong text-white dark:text-slate-950'
-                      : 'border-text-secondary/50 hover:border-accent-strong'
+                      ? 'bg-sky-600 border-sky-600 text-white'
+                      : 'border-text-secondary/50 hover:border-sky-600'
                   }`}
                 >
                   {block.checked && <Check className="w-3 h-3 stroke-[3]" />}
@@ -3473,7 +3660,7 @@ export const BlockEditor: React.FC = () => {
                       }
                       onKeyDown={(e) => handleBlockKeyDown(e, block)}
                       placeholder="To-do"
-                      className={`w-full bg-transparent text-[15px] sm:text-base leading-[1.6] focus:outline-none resize-none ${
+                      className={`w-full bg-transparent ${bodySize} focus:outline-none resize-none ${
                         block.checked
                           ? 'line-through text-text-secondary'
                           : 'text-text-primary'
@@ -3483,7 +3670,7 @@ export const BlockEditor: React.FC = () => {
                     <div
                       ref={(el) => setCaretHostRef(block.id, 'content', el)}
                       onClick={() => focusPreviewBlock(block)}
-                      className={`w-full min-h-[1.6rem] text-[15px] sm:text-base leading-[1.6] whitespace-pre-wrap break-words ${
+                      className={`w-full min-h-[1.55rem] ${bodySize} whitespace-pre-wrap break-words ${
                         canEdit ? 'cursor-text' : 'cursor-default'
                       } ${
                         block.checked
@@ -5009,247 +5196,752 @@ export const BlockEditor: React.FC = () => {
           </div>
         )}
         {/* =================================================================== */}
-        {/* LEFT SIDEBAR: FULL-HEIGHT NOTION PAGE LIST + GOOGLE USER PROFILE    */}
+        {/* LEFT SIDEBAR: RESIZABLE + CUSTOMIZABLE NOTION SIDEBAR + INBOX       */}
         {/* =================================================================== */}
         {isSidebarOpen && (
-          <aside className="w-60 sm:w-64 h-screen sticky top-0 z-10 overflow-x-hidden shrink-0 border-r border-border-subtle bg-subtle/55 flex flex-col justify-between select-none no-print">
+          <aside
+            style={{ width: `${sidebarWidth}px` }}
+            className="h-screen sticky top-0 z-20 shrink-0 border-r border-border-subtle bg-[#F7F7F5] dark:bg-subtle/75 flex flex-col justify-between select-none no-print relative"
+          >
+            {/* Right-Edge Drag-to-Resize & Click-to-Close Handle with Tooltip (image_4) */}
             <div
-              className={`p-3 ${
-                islandPosition === 'top-left' ? 'pt-14' : ''
-              } space-y-3 overflow-y-auto flex-1`}
+              onMouseDown={handleStartSidebarResize}
+              className={`group/resizer absolute top-0 -right-1 w-2 h-full cursor-col-resize z-30 flex items-center ${
+                isResizingSidebar ? 'bg-sky-500/40' : 'hover:bg-sky-500/25'
+              } transition-colors`}
             >
-              {/* Logged-in Google User Workspace Switcher */}
-              <div className="flex items-center justify-between gap-1.5 px-1 pb-2 border-b border-border-subtle">
-                {currentUser ? (
-                  <div className="flex items-center gap-2 min-w-0">
-                    <img
-                      src={currentUser.picture}
-                      alt={currentUser.name}
-                      className="w-6 h-6 rounded-full object-cover shrink-0 border border-border-subtle"
-                    />
-                    <div className="min-w-0">
-                      <p className="text-xs font-bold text-text-primary truncate leading-tight">
-                        {currentUser.name}
-                      </p>
-                      <p className="text-[10px] text-text-secondary truncate leading-tight">
-                        {currentUser.email}
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <span className="text-xs font-bold text-text-primary">Catatan Miu</span>
-                )}
+              <div
+                style={{ left: `${sidebarWidth + 8}px`, top: '48%' }}
+                className="opacity-0 group-hover/resizer:opacity-100 pointer-events-none fixed z-50 px-2.5 py-1.5 rounded-lg bg-slate-900/95 text-white text-[11px] leading-snug shadow-xl whitespace-nowrap transition-opacity duration-150"
+              >
+                <div>
+                  <span className="font-semibold text-white">Tutup</span>{' '}
+                  <span className="text-slate-300">Klik atau ⌘\</span>
+                </div>
+                <div>
+                  <span className="font-semibold text-white">Ubah ukuran</span>{' '}
+                  <span className="text-slate-300">Tarik</span>
+                </div>
+              </div>
+            </div>
 
-                <div className="flex items-center gap-0.5 shrink-0">
+            <div
+              className={`px-2.5 pt-2.5 pb-2 ${
+                islandPosition === 'top-left' ? 'pt-14' : ''
+              } flex flex-col gap-2 overflow-y-auto overflow-x-hidden flex-1`}
+            >
+              {/* Top Bar: Sidebar Collapse (Left) + Inbox & New Page (Right) */}
+              <div className="flex items-center justify-between gap-1 px-0.5">
+                <button
+                  type="button"
+                  onClick={() => setIsSidebarOpen(false)}
+                  className="p-1.5 rounded-md hover:bg-text-primary/[0.06] dark:hover:bg-white/[0.06] text-text-secondary hover:text-text-primary transition"
+                  title="Tutup bilah sisi (⌘\)"
+                  aria-label="Tutup bilah sisi"
+                >
+                  <PanelLeft className="w-4 h-4" />
+                </button>
+
+                <div className="flex items-center gap-0.5">
+                  <SidebarInboxPopover
+                    allNotes={allNotes}
+                    sharedWithMeNotes={sharedWithMeNotes}
+                    onSelectNote={(targetNoteId, openComments) => {
+                      openDocumentNote(targetNoteId);
+                      if (openComments) {
+                        setShowCommentsPanel(true);
+                      }
+                    }}
+                  />
                   <button
                     type="button"
-                    onClick={() => void handleCreateNote()}
-                    className="p-1.5 rounded-lg hover:bg-surface text-text-secondary hover:text-text-primary transition"
-                    title="Halaman Baru"
+                    onClick={() => void handleCreateNote(null, true)}
+                    className="p-1.5 rounded-md hover:bg-text-primary/[0.06] dark:hover:bg-white/[0.06] text-text-secondary hover:text-text-primary transition"
+                    title="Buat halaman baru"
+                    aria-label="Buat halaman baru"
                   >
-                    <FilePlus2 className="w-4 h-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsSidebarOpen(false)}
-                    className="p-1.5 rounded-lg hover:bg-surface text-text-secondary hover:text-text-primary transition"
-                    title="Tutup Sidebar"
-                  >
-                    <PanelLeft className="w-4 h-4" />
+                    <SquarePen className="w-4 h-4" />
                   </button>
                 </div>
               </div>
 
-              {/* Search */}
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-text-secondary absolute left-2.5 top-2" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Cari halaman..."
-                  className="w-full bg-surface/75 border border-border-subtle rounded-lg pl-8 pr-2.5 py-1 text-xs text-text-primary placeholder:text-text-secondary/60 focus:outline-none focus:border-accent-strong"
-                />
-              </div>
-
-              {/* New Page Button & Regular Kanban + Calendar Sidebar Menu Items */}
-              <div className="space-y-0.5">
-                <button
-                  type="button"
-                  onClick={() => void handleCreateNote()}
-                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-surface text-xs font-medium text-text-secondary hover:text-text-primary transition"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Halaman baru</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setMainViewMode('kanban')}
-                  className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-xs transition ${
-                    mainViewMode === 'kanban'
-                      ? 'bg-surface font-semibold text-text-primary shadow-sm'
-                      : 'font-medium text-text-secondary hover:bg-surface/60 hover:text-text-primary'
-                  }`}
-                >
-                  <span className="inline-flex items-center gap-2 min-w-0">
-                    <Columns3 className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">Kanban</span>
-                  </span>
-                  <span className="text-[10px] font-mono text-text-secondary/80 shrink-0">
-                    {myNotes.length + sharedWithMeNotes.length}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setMainViewMode('calendar')}
-                  className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-xs transition ${
-                    mainViewMode === 'calendar'
-                      ? 'bg-surface font-semibold text-text-primary shadow-sm'
-                      : 'font-medium text-text-secondary hover:bg-surface/60 hover:text-text-primary'
-                  }`}
-                >
-                  <span className="inline-flex items-center gap-2 min-w-0">
-                    <Calendar className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">Kalender</span>
-                  </span>
-                  {scheduledDeadlineCount > 0 && (
-                    <span className="text-[10px] font-mono text-text-secondary/80 shrink-0">
-                      {scheduledDeadlineCount}
+              {/* Search Input ("Cari atau tanya" + ⌘K badge) */}
+              <div className="px-0.5">
+                <div className="relative flex items-center bg-surface/90 dark:bg-surface border border-border-subtle/90 rounded-lg px-2.5 py-1.5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] focus-within:border-sky-500">
+                  <input
+                    ref={sidebarSearchInputRef}
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Cari atau tanya"
+                    className="w-full bg-transparent text-[13px] text-text-primary placeholder:text-text-secondary/65 focus:outline-none pr-8"
+                  />
+                  {searchQuery ? (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery('')}
+                      className="text-[11px] text-text-secondary hover:text-text-primary"
+                    >
+                      ✕
+                    </button>
+                  ) : (
+                    <span className="px-1.5 py-0.5 rounded bg-subtle border border-border-subtle/80 text-[10px] font-mono font-medium text-text-secondary shrink-0">
+                      ⌘K
                     </span>
                   )}
+                </div>
+              </div>
+
+              {/* Top Shortcut Pills Row: [🏠 Beranda] 💬 📅 + */}
+              <div className="flex items-center gap-1 px-0.5">
+                <button
+                  type="button"
+                  onClick={() => setMainViewMode('document')}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[13px] font-medium transition ${
+                    mainViewMode === 'document'
+                      ? 'bg-text-primary/[0.07] dark:bg-white/[0.09] text-text-primary font-semibold'
+                      : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                  }`}
+                >
+                  <Home className="w-3.5 h-3.5 shrink-0" />
+                  <span>Beranda</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsAIDrawerOpen(!isAIDrawerOpen)}
+                  className={`p-1.5 rounded-md transition ${
+                    isAIDrawerOpen
+                      ? 'bg-text-primary/[0.07] dark:bg-white/[0.09] text-text-primary'
+                      : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                  }`}
+                  title="Obrolan & Asisten AI"
+                >
+                  <MessageCircle className="w-3.5 h-3.5" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setMainViewMode((prev) =>
+                      prev === 'calendar' ? 'document' : 'calendar'
+                    )
+                  }
+                  className={`p-1.5 rounded-md transition relative ${
+                    mainViewMode === 'calendar'
+                      ? 'bg-text-primary/[0.07] dark:bg-white/[0.09] text-text-primary'
+                      : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                  }`}
+                  title="Kalender & Deadline"
+                >
+                  <Calendar className="w-3.5 h-3.5" />
+                  {scheduledDeadlineCount > 0 && (
+                    <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-500" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isCustomizeSidebar) {
+                      setShowAddSidebarSection((v) => !v);
+                    } else {
+                      setMainViewMode((prev) =>
+                        prev === 'kanban' ? 'document' : 'kanban'
+                      );
+                    }
+                  }}
+                  className={`p-1.5 rounded-md transition ${
+                    mainViewMode === 'kanban' && !isCustomizeSidebar
+                      ? 'bg-text-primary/[0.07] dark:bg-white/[0.09] text-text-primary'
+                      : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                  }`}
+                  title={
+                    isCustomizeSidebar
+                      ? 'Tambahkan pintasan'
+                      : 'Papan Kanban & Tampilan Database'
+                  }
+                >
+                  <Plus className="w-3.5 h-3.5" />
                 </button>
               </div>
 
-              {/* Favorites */}
-              {favoriteNotes.length > 0 && !searchQuery && (
-                <div className="space-y-0.5 pt-1">
-                  <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-text-secondary/75">
-                    Favorit
+              {isCustomizeSidebar ? (
+                /* ============================================================= */
+                /* IMAGE_5 & IMAGE_6: SESUAIKAN BILAH SISI (CUSTOMIZE SIDEBAR)   */
+                /* ============================================================= */
+                <div className="space-y-2 pt-1 flex-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddSidebarSection((v) => !v)}
+                    className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13px] text-text-secondary hover:text-text-primary hover:bg-text-primary/[0.04] transition"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Tambahkan pintasan</span>
+                  </button>
+
+                  <div className="h-px bg-border-subtle my-1.5" />
+
+                  <div className="space-y-0.5">
+                    {sidebarSections.map((secId) => {
+                      const meta = SIDEBAR_SECTION_CATALOG.find((s) => s.id === secId);
+                      if (!meta) return null;
+                      return (
+                        <div
+                          key={secId}
+                          draggable
+                          onDragStart={() => setDraggedSidebarSection(secId)}
+                          onDragEnd={() => setDraggedSidebarSection(null)}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={() => {
+                            if (draggedSidebarSection) {
+                              handleReorderSidebarSection(draggedSidebarSection, secId);
+                            }
+                            setDraggedSidebarSection(null);
+                          }}
+                          className={`group flex items-center justify-between gap-2 px-1.5 py-1.5 rounded-md text-[13.5px] text-text-primary hover:bg-text-primary/[0.04] cursor-grab active:cursor-grabbing transition ${
+                            draggedSidebarSection === secId ? 'opacity-45' : ''
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <GripVertical className="w-3.5 h-3.5 text-text-secondary/70 shrink-0" />
+                            {renderSidebarSectionIcon(
+                              secId,
+                              'w-4 h-4 text-text-secondary shrink-0'
+                            )}
+                            <span className="truncate font-medium">{meta.label}</span>
+                          </div>
+                          {sidebarSections.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleSidebarSection(secId)}
+                              className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-rose-500/15 text-text-secondary hover:text-rose-500 text-xs transition"
+                              title="Sembunyikan bagian ini"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
-                  {favoriteNotes.map((note) => (
-                    <button
-                      key={`fav-${note.id}`}
-                      type="button"
-                      onClick={() => openDocumentNote(note.id)}
-                      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-left transition ${
-                        note.id === activeNoteId && mainViewMode === 'document'
-                          ? 'bg-surface font-semibold text-text-primary shadow-sm'
-                          : 'text-text-secondary hover:bg-surface/60 hover:text-text-primary'
-                      }`}
-                    >
-                      <span className="text-sm shrink-0">{note.icon || '📄'}</span>
-                      <span className="truncate flex-1">{note.title || 'Tanpa Judul'}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
 
-              {/* All Pages List (Nested Tree for My Notes) */}
-              <div className="space-y-0.5 pt-1">
-                <div
-                  onDragOver={(e) => {
-                    if (!draggedNoteId) return;
-                    e.preventDefault();
-                    setDropTargetNoteId('ROOT');
-                  }}
-                  onDragLeave={() => {
-                    if (dropTargetNoteId === 'ROOT') setDropTargetNoteId(null);
-                  }}
-                  onDrop={(e) => {
-                    const sourceId = e.dataTransfer.getData('application/miu-note-id') || draggedNoteId;
-                    setDraggedNoteId(null);
-                    setDropTargetNoteId(null);
-                    if (!sourceId) return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    void handleMoveNoteParent(sourceId, null);
-                  }}
-                  className={`flex items-center justify-between px-2 py-1 rounded-lg transition ${
-                    dropTargetNoteId === 'ROOT'
-                      ? 'bg-accent-strong/15 ring-1 ring-accent-strong'
-                      : ''
-                  }`}
-                >
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-text-secondary/75">
-                    {searchQuery.trim()
-                      ? 'Hasil Pencarian'
-                      : dropTargetNoteId === 'ROOT'
-                        ? 'Lepas ke Halaman Utama'
-                        : 'Halaman Saya'}
-                  </span>
-                  {currentUser && (
+                  <div className="relative pt-0.5">
                     <button
                       type="button"
-                      onClick={() => void handleCreateNote(null, true)}
-                      className="p-0.5 rounded hover:bg-surface text-text-secondary hover:text-text-primary"
-                      title="Tambah Halaman"
+                      onClick={() => setShowAddSidebarSection((v) => !v)}
+                      className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-[13px] text-text-secondary hover:text-text-primary hover:bg-text-primary/[0.04] transition"
                     >
-                      <Plus className="w-3 h-3" />
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Tambahkan bagian</span>
                     </button>
-                  )}
-                </div>
 
-                {searchQuery.trim() ? (
-                  visibleNotes.map((note) => {
-                    const isSelected = note.id === activeNoteId && mainViewMode === 'document';
+                    {showAddSidebarSection && (
+                      <div className="mt-1.5">
+                        <AddSidebarSectionPopover
+                          activeSections={sidebarSections}
+                          onToggleSection={handleToggleSidebarSection}
+                          onClose={() => setShowAddSidebarSection(false)}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : searchQuery.trim() ? (
+                /* Search Results in Sidebar */
+                <div className="space-y-0.5 pt-1">
+                  <div className="px-2 pb-1 text-[11px] font-medium text-text-secondary">
+                    Hasil Pencarian ({visibleNotes.length})
+                  </div>
+                  {visibleNotes.map((note) => {
+                    const isSelected =
+                      note.id === activeNoteId && mainViewMode === 'document';
                     return (
-                      <div
+                      <button
                         key={note.id}
+                        type="button"
                         onClick={() => openDocumentNote(note.id)}
-                        className={`group flex items-center justify-between gap-1 px-2 py-1.5 rounded-lg text-xs cursor-pointer transition ${
+                        className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-left transition ${
                           isSelected
-                            ? 'bg-surface font-semibold text-text-primary shadow-sm'
-                            : 'text-text-secondary hover:bg-surface/60 hover:text-text-primary'
+                            ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
+                            : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
                         }`}
                       >
-                        <div className="flex items-center gap-2 min-w-0 flex-1">
-                          <span className="text-sm leading-none shrink-0">{note.icon || '📄'}</span>
-                          <span className="truncate">{note.title || 'Tanpa Judul'}</span>
-                        </div>
-                      </div>
+                        <span className="text-[15px] leading-none shrink-0">
+                          {note.icon || '📄'}
+                        </span>
+                        <span className="truncate">{note.title || 'Tanpa Judul'}</span>
+                      </button>
                     );
-                  })
-                ) : (
-                  renderSidebarPageTree(myNotes, null, 0, false)
-                )}
-              </div>
+                  })}
+                </div>
+              ) : (
+                /* Normal Sidebar Sections in User-Customized Order */
+                <div className="space-y-3 pt-1">
+                  {sidebarSections.map((secId) => {
+                    if (secId === 'favorites') {
+                      if (favoriteNotes.length === 0) return null;
+                      return (
+                        <div key="sec-favorites" className="space-y-0.5">
+                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
+                            Favorit
+                          </div>
+                          {favoriteNotes.map((note) => (
+                            <button
+                              key={`fav-${note.id}`}
+                              type="button"
+                              onClick={() => openDocumentNote(note.id)}
+                              className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-left transition ${
+                                note.id === activeNoteId && mainViewMode === 'document'
+                                  ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
+                                  : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                              }`}
+                            >
+                              <span className="text-[15px] leading-none shrink-0">
+                                {note.icon || '📄'}
+                              </span>
+                              <span className="truncate flex-1">
+                                {note.title || 'Tanpa Judul'}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    }
 
-              {/* Shared With Me Notes (Isolated Section) */}
-              {sharedWithMeNotes.length > 0 && !searchQuery.trim() && (
-                <div className="space-y-0.5 pt-2 border-t border-border-subtle/60">
-                  <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-sky-500">
-                    Dibagikan ke Saya
-                  </div>
-                  {renderSidebarPageTree(sharedWithMeNotes, null, 0, true)}
+                    if (secId === 'recent') {
+                      const recentList = [...myNotes, ...sharedWithMeNotes]
+                        .sort((a, b) => b.updatedAt - a.updatedAt)
+                        .slice(0, 5);
+                      return (
+                        <div key="sec-recent" className="space-y-0.5">
+                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
+                            Terbaru
+                          </div>
+                          {recentList.map((note) => (
+                            <button
+                              key={`rec-${note.id}`}
+                              type="button"
+                              onClick={() => openDocumentNote(note.id)}
+                              className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-left transition ${
+                                note.id === activeNoteId && mainViewMode === 'document'
+                                  ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
+                                  : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                              }`}
+                            >
+                              <span className="text-[15px] leading-none shrink-0">
+                                {note.icon || '📄'}
+                              </span>
+                              <span className="truncate flex-1">
+                                {note.title || 'Tanpa Judul'}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    }
+
+                    if (secId === 'database_views') {
+                      return (
+                        <div key="sec-db-views" className="space-y-0.5">
+                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
+                            Tampilan database
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setMainViewMode('kanban')}
+                            className={`w-full flex items-center justify-between gap-2 px-2 py-1 rounded-md text-[13.5px] transition ${
+                              mainViewMode === 'kanban'
+                                ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
+                                : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                            }`}
+                          >
+                            <span className="inline-flex items-center gap-2 min-w-0">
+                              <Columns3 className="w-4 h-4 shrink-0" />
+                              <span className="truncate">Papan Kanban</span>
+                            </span>
+                            <span className="text-[11px] font-mono text-text-secondary/80">
+                              {myNotes.length + sharedWithMeNotes.length}
+                            </span>
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    if (secId === 'pinned') {
+                      const pinnedNotes = favoriteNotes.length > 0 ? favoriteNotes : myNotes.slice(0, 2);
+                      return (
+                        <div key="sec-pinned" className="space-y-0.5">
+                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
+                            Disematkan
+                          </div>
+                          {pinnedNotes.map((note) => (
+                            <button
+                              key={`pin-${note.id}`}
+                              type="button"
+                              onClick={() => openDocumentNote(note.id)}
+                              className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary text-left transition"
+                            >
+                              <span className="text-[15px] leading-none shrink-0">
+                                {note.icon || '📌'}
+                              </span>
+                              <span className="truncate">{note.title || 'Tanpa Judul'}</span>
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    }
+
+                    if (secId === 'chats' || secId === 'agent') {
+                      return (
+                        <div key={`sec-${secId}`} className="space-y-0.5">
+                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
+                            {secId === 'agent' ? 'Agent' : 'Obrolan'}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIsAIDrawerOpen(true)}
+                            className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary text-left transition"
+                          >
+                            {renderSidebarSectionIcon(secId, 'w-4 h-4 shrink-0')}
+                            <span className="truncate">
+                              {secId === 'agent' ? 'Miu AI Agent' : 'Obrolan AI & Diskusi'}
+                            </span>
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    if (secId === 'upcoming_events') {
+                      return (
+                        <div key="sec-events" className="space-y-0.5">
+                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
+                            Acara mendatang
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setMainViewMode('calendar')}
+                            className="w-full flex items-center justify-between gap-2 px-2 py-1 rounded-md text-[13.5px] text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary text-left transition"
+                          >
+                            <span className="inline-flex items-center gap-2 truncate">
+                              <Calendar className="w-4 h-4 shrink-0" />
+                              <span className="truncate">Jadwal &amp; Deadline</span>
+                            </span>
+                            {scheduledDeadlineCount > 0 && (
+                              <span className="text-[11px] font-mono">
+                                {scheduledDeadlineCount}
+                              </span>
+                            )}
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    if (secId === 'ai_meeting_notes') {
+                      const voiceNotes = myNotes.filter((n) =>
+                        flattenBlocks(n.blocks).some((b) => b.type === 'voice')
+                      );
+                      return (
+                        <div key="sec-meeting" className="space-y-0.5">
+                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
+                            Catatan Rapat AI
+                          </div>
+                          {voiceNotes.map((vn) => (
+                            <button
+                              key={`vn-${vn.id}`}
+                              type="button"
+                              onClick={() => openDocumentNote(vn.id)}
+                              className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary text-left transition"
+                            >
+                              <span className="text-[15px] leading-none shrink-0">
+                                {vn.icon || '🎙️'}
+                              </span>
+                              <span className="truncate">{vn.title || 'Catatan Rapat'}</span>
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            onClick={() => void handleCreateNote(null, true)}
+                            className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13px] text-text-secondary/80 hover:text-text-primary hover:bg-text-primary/[0.04] text-left transition"
+                          >
+                            <Plus className="w-3.5 h-3.5 shrink-0" />
+                            <span>Rekam rapat baru</span>
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    if (secId === 'private') {
+                      return (
+                        <div key="sec-private" className="space-y-0.5">
+                          <div
+                            onDragOver={(e) => {
+                              if (!draggedNoteId) return;
+                              e.preventDefault();
+                              setDropTargetNoteId('ROOT');
+                            }}
+                            onDragLeave={() => {
+                              if (dropTargetNoteId === 'ROOT') setDropTargetNoteId(null);
+                            }}
+                            onDrop={(e) => {
+                              const sourceId =
+                                e.dataTransfer.getData('application/miu-note-id') ||
+                                draggedNoteId;
+                              setDraggedNoteId(null);
+                              setDropTargetNoteId(null);
+                              if (!sourceId) return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void handleMoveNoteParent(sourceId, null);
+                            }}
+                            className={`group/priv flex items-center justify-between px-2 py-0.5 rounded-md transition ${
+                              dropTargetNoteId === 'ROOT'
+                                ? 'bg-accent-strong/15 ring-1 ring-accent-strong'
+                                : ''
+                            }`}
+                          >
+                            <span className="text-[11.5px] font-medium text-text-secondary">
+                              {dropTargetNoteId === 'ROOT'
+                                ? 'Lepas ke Privat'
+                                : 'Privat'}
+                            </span>
+                            {currentUser && (
+                              <button
+                                type="button"
+                                onClick={() => void handleCreateNote(null, true)}
+                                className="opacity-0 group-hover/priv:opacity-100 p-0.5 rounded hover:bg-text-primary/[0.06] text-text-secondary hover:text-text-primary transition"
+                                title="Tambah halaman baru"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+
+                          {renderSidebarPageTree(myNotes, null, 0, false)}
+
+                          <button
+                            type="button"
+                            onClick={() => setMainViewMode('kanban')}
+                            className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] transition ${
+                              mainViewMode === 'kanban'
+                                ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
+                                : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                            }`}
+                          >
+                            <Columns3 className="w-4 h-4 text-text-secondary shrink-0" />
+                            <span className="truncate">Database baru</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => void handleCreateNote(null, true)}
+                            className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-text-secondary/80 hover:bg-text-primary/[0.04] hover:text-text-primary transition"
+                          >
+                            <Plus className="w-4 h-4 shrink-0" />
+                            <span className="truncate">Tambah baru</span>
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    if (secId === 'shared') {
+                      return (
+                        <div key="sec-shared" className="space-y-0.5">
+                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
+                            Dibagikan
+                          </div>
+                          {sharedWithMeNotes.length > 0 &&
+                            renderSidebarPageTree(sharedWithMeNotes, null, 0, true)}
+                          <button
+                            type="button"
+                            onClick={() => setShowShareModal(true)}
+                            className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-text-secondary/85 hover:bg-text-primary/[0.04] hover:text-text-primary transition"
+                          >
+                            <Plus className="w-4 h-4 shrink-0" />
+                            <span className="truncate">Mulai berkolaborasi</span>
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    if (secId === 'apps') {
+                      return (
+                        <div key="sec-apps" className="space-y-0.5">
+                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
+                            Aplikasi Notion
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setMainViewMode('calendar')}
+                            className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] transition ${
+                              mainViewMode === 'calendar'
+                                ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
+                                : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                            }`}
+                          >
+                            <span className="w-4 h-4 rounded-[4px] border border-border-subtle bg-surface flex items-center justify-center text-[9px] font-bold text-text-secondary shrink-0">
+                              27
+                            </span>
+                            <span className="truncate">Notion Calendar</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setMainViewMode('kanban')}
+                            className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] transition ${
+                              mainViewMode === 'kanban'
+                                ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
+                                : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                            }`}
+                          >
+                            <span className="w-4 h-4 rounded-[4px] border border-border-subtle bg-surface flex items-center justify-center text-[9px] font-bold text-text-secondary shrink-0">
+                              N
+                            </span>
+                            <span className="truncate">Notion Desktop</span>
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    if (secId === 'developer') {
+                      return (
+                        <div key="sec-developer" className="space-y-0.5">
+                          <button
+                            type="button"
+                            onClick={() => setShowCloudSettingsModal(true)}
+                            className="w-full flex items-center justify-between px-2 py-0.5 rounded-md text-[11.5px] font-medium text-text-secondary hover:text-text-primary transition text-left"
+                            title="Konfigurasi Cloud Catatan & Developer API"
+                          >
+                            <span>Developer</span>
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    return null;
+                  })}
                 </div>
               )}
             </div>
 
-            {/* Sidebar Footer: Cloud Status (Neon & Cloudinary) + Logout */}
-            <div className="p-3 border-t border-border-subtle space-y-2 text-[11px] text-text-secondary">
-              <div className="flex items-center justify-between">
+            {/* Sidebar Bottom Area: "Sesuaikan bilah sisi" / "Selesai" + User Profile Bar */}
+            <div className="px-2.5 pt-1.5 pb-2 space-y-1.5 border-t border-border-subtle/70 bg-[#F7F7F5] dark:bg-subtle/75">
+              {isCustomizeSidebar ? (
                 <button
                   type="button"
-                  onClick={() => setShowCloudSettingsModal(true)}
-                  className="inline-flex items-center gap-1.5 hover:text-text-primary transition"
-                  title="Status Cloud Catatan"
+                  onClick={() => {
+                    setIsCustomizeSidebar(false);
+                    setShowAddSidebarSection(false);
+                  }}
+                  className="w-full py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-[13px] font-semibold shadow-sm transition"
                 >
-                  <Settings className="w-3.5 h-3.5" />
-                  <span>{neonActive ? 'Cloud Catatan' : 'Penyimpanan Lokal'}</span>
+                  Selesai
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setIsCustomizeSidebar(true)}
+                  className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[12.5px] text-text-secondary hover:text-text-primary hover:bg-text-primary/[0.04] transition"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">Sesuaikan bilah sisi</span>
+                </button>
+              )}
+
+              {/* Bottom User Profile & Quick Icons Bar */}
+              <div className="relative flex items-center justify-between gap-1 pt-1 border-t border-border-subtle/60">
+                <button
+                  type="button"
+                  onClick={() => setShowUserMenu((v) => !v)}
+                  className="flex items-center gap-1.5 px-1.5 py-1 rounded-md hover:bg-text-primary/[0.05] text-left min-w-0 flex-1 transition"
+                >
+                  {currentUser?.picture ? (
+                    <img
+                      src={currentUser.picture}
+                      alt={currentUser.name}
+                      className="w-5 h-5 rounded-md object-cover shrink-0 border border-border-subtle"
+                    />
+                  ) : (
+                    <span className="text-sm leading-none shrink-0">🏠</span>
+                  )}
+                  <span className="text-[12.5px] font-medium text-text-primary truncate">
+                    {currentUser?.name || 'Catatan Pribadi'}
+                  </span>
+                  <ChevronDown className="w-3.5 h-3.5 text-text-secondary shrink-0" />
                 </button>
 
-                {currentUser && (
+                <div className="flex items-center gap-0.5 shrink-0">
                   <button
                     type="button"
-                    onClick={logoutGoogleUser}
-                    className="inline-flex items-center gap-1 text-rose-500 hover:underline"
-                    title="Keluar dari akun Google"
+                    onClick={() => setShowCloudSettingsModal(true)}
+                    className="p-1 rounded-md hover:bg-text-primary/[0.05] text-text-secondary hover:text-text-primary relative transition"
+                    title={
+                      syncStatus === 'syncing'
+                        ? 'Menyimpan ke Cloud...'
+                        : neonActive
+                          ? 'Cloud Catatan Terhubung'
+                          : 'Status Penyimpanan & Bantuan'
+                    }
                   >
-                    <LogOut className="w-3 h-3" />
-                    <span>Keluar</span>
+                    <HelpCircle className="w-4 h-4" />
+                    <span
+                      className={`absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full ${
+                        neonActive ? 'bg-rose-500' : 'bg-amber-500'
+                      }`}
+                    />
                   </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setMainViewMode((prev) =>
+                        prev === 'kanban' ? 'document' : 'kanban'
+                      )
+                    }
+                    className="p-1 rounded-md hover:bg-text-primary/[0.05] text-text-secondary hover:text-text-primary transition"
+                    title="Beralih tampilan aplikasi"
+                  >
+                    <LayoutGrid className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {showUserMenu && (
+                  <div className="absolute left-0 bottom-full mb-1.5 w-56 rounded-xl bg-surface border border-border-subtle shadow-2xl p-2 z-50 space-y-1 text-xs">
+                    {currentUser && (
+                      <div className="px-2 py-1 border-b border-border-subtle">
+                        <p className="font-semibold text-text-primary truncate">
+                          {currentUser.name}
+                        </p>
+                        <p className="text-[11px] text-text-secondary truncate">
+                          {currentUser.email}
+                        </p>
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowUserMenu(false);
+                        setShowCloudSettingsModal(true);
+                      }}
+                      className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition text-left"
+                    >
+                      <Settings className="w-3.5 h-3.5 text-text-secondary" />
+                      <span>
+                        {neonActive ? 'Cloud Catatan (Aktif)' : 'Pengaturan Cloud'}
+                      </span>
+                    </button>
+                    {currentUser && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowUserMenu(false);
+                          logoutGoogleUser();
+                        }}
+                        className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-rose-500/10 text-rose-500 transition text-left"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>Keluar dari Google</span>
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -5257,67 +5949,90 @@ export const BlockEditor: React.FC = () => {
         )}
 
         {/* =================================================================== */}
-        {/* MAIN PANEL: CLEAN FULL-SCREEN NOTION DOCUMENT                       */}
+        {/* MAIN PANEL: CLEAN NOTION TOP NAVBAR + PUBLIC BANNER + DOCUMENT      */}
         {/* =================================================================== */}
         <div className="flex-1 min-w-0 min-h-screen flex flex-col bg-surface">
-          {/* Minimal Sticky Notion Top Bar */}
+          {/* Minimal Sticky Notion Top Navbar (image.png & image_4.png) */}
           <header
-            className={`sticky top-0 z-20 px-4 sm:px-6 ${
-              hasTopIsland ? 'pt-[54px] pb-2.5' : 'py-3'
-            } bg-surface/85 backdrop-blur-md border-b border-border-subtle/60 flex items-center justify-between gap-2 no-print`}
+            className={`sticky top-0 z-20 px-3 sm:px-4 ${
+              hasTopIsland ? 'pt-[52px] pb-2' : 'h-11'
+            } bg-surface/95 backdrop-blur-md border-b border-border-subtle/50 flex items-center justify-between gap-2 no-print`}
           >
-            <div className="flex items-center gap-1.5 text-xs text-text-primary min-w-0 flex-1 overflow-x-auto">
+            {/* Left: Sidebar Open Button + Breadcrumbs */}
+            <div className="flex items-center gap-1 text-[13.5px] text-text-primary min-w-0 flex-1 overflow-x-auto">
               {!isSidebarOpen && (
                 <button
                   type="button"
                   onClick={() => setIsSidebarOpen(true)}
-                  className="p-1.5 rounded-lg hover:bg-subtle text-text-secondary hover:text-text-primary transition shrink-0"
-                  title="Buka Sidebar"
+                  className="p-1.5 rounded-md hover:bg-subtle text-text-secondary hover:text-text-primary transition shrink-0"
+                  title="Buka bilah sisi (⌘\)"
                 >
                   <PanelLeft className="w-4 h-4" />
                 </button>
               )}
 
-              {/* Breadcrumbs Navigation across Subpages vs Kanban / Calendar Title */}
               {mainViewMode === 'kanban' ? (
-                <div className="inline-flex items-center gap-1.5 font-semibold text-text-primary px-1.5 py-0.5">
-                  <Columns3 className="w-3.5 h-3.5 text-accent-strong" />
+                <div className="inline-flex items-center gap-1.5 font-medium text-text-primary px-1.5 py-0.5">
+                  <Columns3 className="w-4 h-4 text-text-secondary" />
                   <span>Papan Kanban</span>
                 </div>
               ) : mainViewMode === 'calendar' ? (
-                <div className="inline-flex items-center gap-1.5 font-semibold text-text-primary px-1.5 py-0.5">
-                  <Calendar className="w-3.5 h-3.5 text-accent-strong" />
+                <div className="inline-flex items-center gap-1.5 font-medium text-text-primary px-1.5 py-0.5">
+                  <Calendar className="w-4 h-4 text-text-secondary" />
                   <span>Kalender &amp; Deadline</span>
                 </div>
               ) : (
                 <>
-                  <div className="flex items-center gap-1 min-w-0">
+                  <div className="flex items-center gap-0.5 min-w-0">
                     {breadcrumbPath.map((crumb, idx) => {
                       const isLast = idx === breadcrumbPath.length - 1;
                       return (
                         <React.Fragment key={crumb.id}>
                           {idx > 0 && (
-                            <span className="text-text-secondary/50 select-none">/</span>
+                            <span className="text-text-secondary/45 px-0.5 select-none">
+                              /
+                            </span>
                           )}
                           <button
                             type="button"
                             onClick={() => openDocumentNote(crumb.id)}
-                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md truncate max-w-[160px] transition ${
+                            className={`inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded-md truncate max-w-[180px] sm:max-w-[230px] transition ${
                               isLast
-                                ? 'font-semibold text-text-primary'
+                                ? 'font-medium text-text-primary'
                                 : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
                             }`}
                           >
-                            <span className="shrink-0">{crumb.icon || '📄'}</span>
-                            <span className="truncate">{crumb.title || 'Tanpa Judul'}</span>
+                            <span className="text-sm leading-none shrink-0">
+                              {crumb.icon || '📄'}
+                            </span>
+                            <span className="truncate">
+                              {crumb.title || 'Tanpa Judul'}
+                            </span>
                           </button>
                         </React.Fragment>
                       );
                     })}
                   </div>
 
+                  {isPageLocked && (
+                    <button
+                      type="button"
+                      disabled={!hasEditPermission}
+                      onClick={() => void updateNote({ isLocked: false })}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-500/12 text-amber-600 dark:text-amber-300 hover:bg-amber-500/20 shrink-0 transition"
+                      title={
+                        hasEditPermission
+                          ? 'Halaman dikunci — Klik untuk membuka kunci'
+                          : 'Halaman dikunci'
+                      }
+                    >
+                      <Lock className="w-3 h-3" />
+                      <span>Terkunci</span>
+                    </button>
+                  )}
+
                   {!isOwner && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-500/15 text-sky-600 dark:text-sky-300 shrink-0">
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-sky-500/12 text-sky-600 dark:text-sky-300 shrink-0">
                       {effectiveRole === 'edit' ? (
                         <>
                           <Pencil className="w-2.5 h-2.5" />
@@ -5340,7 +6055,8 @@ export const BlockEditor: React.FC = () => {
               )}
             </div>
 
-            <div className="flex items-center justify-end flex-wrap gap-1 sm:gap-1.5 text-xs shrink-0">
+            {/* Right: Collaborators + Bagikan + Copy Active Link + Star + Corner Actions Menu */}
+            <div className="flex items-center justify-end gap-0.5 sm:gap-1 text-[13.5px] shrink-0">
               {activeNote && (
                 <CollaboratorsHeaderStrip
                   collaborators={remoteCollaborators}
@@ -5348,219 +6064,133 @@ export const BlockEditor: React.FC = () => {
                 />
               )}
 
-              {/* Cloud Catatan Sync Status Indicator */}
-              <button
-                type="button"
-                onClick={() => setShowCloudSettingsModal(true)}
-                className="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-text-secondary hover:bg-subtle transition"
-                title="Status Cloud Catatan"
-              >
-                <Database
-                  className={`w-3 h-3 ${
-                    neonActive ? 'text-emerald-500' : 'text-text-secondary'
-                  }`}
-                />
-                <span className="hidden xl:inline">
-                  {syncStatus === 'syncing'
-                    ? 'Menyimpan ke Cloud...'
-                    : neonActive
-                      ? 'Cloud Catatan'
-                      : 'Tersimpan'}
-                </span>
-              </button>
-
-              {/* Share & Access Control Button (Document mode) */}
-              {mainViewMode === 'document' && activeNote && (
-                <button
-                  type="button"
-                  onClick={() => setShowShareModal(true)}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition ${
-                    activeNote.shareSettings?.isPublicLink ||
-                    (activeNote.shareSettings?.collaborators?.length || 0) > 0
-                      ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300 border border-sky-400/30'
-                      : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
-                  }`}
-                  title="Bagikan catatan & atur hak akses (Edit / Lihat / Komentar)"
-                >
-                  {activeNote.shareSettings?.isPublicLink ? (
-                    <Globe className="w-3.5 h-3.5" />
-                  ) : (
-                    <Share2 className="w-3.5 h-3.5" />
-                  )}
-                  <span className="hidden sm:inline">Bagikan</span>
-                </button>
-              )}
-
-              {/* Comments Toggle */}
-              {mainViewMode === 'document' && activeNote && (
-                <button
-                  type="button"
-                  onClick={() => setShowCommentsPanel((v) => !v)}
-                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition ${
-                    showCommentsPanel
-                      ? 'bg-amber-500/15 text-amber-600 dark:text-amber-300'
-                      : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
-                  }`}
-                  title="Lihat & tambah komentar catatan"
-                >
-                  <MessageSquare className="w-3.5 h-3.5" />
-                  {(activeNote.comments?.length || 0) > 0 && (
-                    <span className="font-mono text-[10px]">
-                      {activeNote.comments?.length}
-                    </span>
-                  )}
-                </button>
-              )}
-
-              {/* Active Note Kanban Status Selector */}
-              {mainViewMode === 'document' && activeNote && canEdit && (
-                <div className="hidden md:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-lg bg-subtle/70 border border-border-subtle">
-                  {renderKanbanStatusIcon(activeNote.kanbanStatus || 'todo', 'w-3 h-3')}
-                  <select
-                    value={activeNote.kanbanStatus || 'todo'}
-                    onChange={(e) =>
-                      void updateNote({
-                        kanbanStatus: e.target.value as NoteKanbanStatus
-                      })
-                    }
-                    aria-label="Status Kanban Catatan"
-                    className="bg-transparent text-[11px] font-medium text-text-primary focus:outline-none cursor-pointer pr-1"
-                  >
-                    {KANBAN_COLUMNS.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {mainViewMode === 'document' && activeNote && canEdit && (
-                <button
-                  type="button"
-                  onClick={() => void updateNote({ isFavorite: !activeNote.isFavorite })}
-                  className={`p-1.5 rounded-lg transition ${
-                    activeNote.isFavorite
-                      ? 'text-amber-500'
-                      : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
-                  }`}
-                  title="Favorit"
-                >
-                  <Star className={`w-4 h-4 ${activeNote.isFavorite ? 'fill-current' : ''}`} />
-                </button>
-              )}
-
-              {mainViewMode === 'document' && canEdit && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const next = !isSelectMode;
-                    setIsSelectMode(next);
-                    if (!next) {
-                      setSelectedBlockIds([]);
-                    }
-                  }}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition ${
-                    isSelectMode || selectedBlockIds.length > 0
-                      ? 'bg-rose-500/15 text-rose-600 dark:text-rose-300 border border-rose-400/30'
-                      : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
-                  }`}
-                  title="Pilih beberapa blok / percakapan untuk dihapus sekaligus"
-                >
-                  <CheckSquare className="w-3.5 h-3.5" />
-                  <span className="hidden md:inline">
-                    {selectedBlockIds.length > 0
-                      ? `Pilih (${selectedBlockIds.length})`
-                      : 'Pilih & Hapus'}
-                  </span>
-                </button>
-              )}
-
               {mainViewMode === 'document' && activeNote && (
                 <>
-                  {tocHeadings.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setShowTocOutline((v) => !v)}
-                      className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition ${
-                        showTocOutline
-                          ? 'bg-accent-strong/15 text-accent-strong'
-                          : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
-                      }`}
-                      title="Tampilkan / Sembunyikan Daftar Isi (Outline)"
-                    >
-                      <ListTree className="w-3.5 h-3.5" />
-                      <span className="hidden lg:inline">Daftar Isi</span>
-                    </button>
-                  )}
+                  {/* Bagikan Button (Also controls Comments, Download & Print) */}
+                  <button
+                    type="button"
+                    onClick={() => setShowShareModal(true)}
+                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[13.5px] font-medium text-text-primary hover:bg-subtle transition"
+                    title="Bagikan halaman, aktifkan komentar, unduh & cetak"
+                  >
+                    <Globe className="w-4 h-4 text-text-primary" />
+                    <span>Bagikan</span>
+                  </button>
 
-                  {canEdit && (
+                  {/* Instant Active Link Copy Button (🔗) */}
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyActiveShareLink()}
+                    className="p-1.5 rounded-md text-text-secondary hover:bg-subtle hover:text-text-primary transition"
+                    title="Salin tautan (otomatis aktifkan tautan publik)"
+                    aria-label="Salin tautan aktif"
+                  >
+                    {quickLinkCopied ? (
+                      <Check className="w-4 h-4 text-emerald-500" />
+                    ) : (
+                      <Link2 className="w-4 h-4" />
+                    )}
+                  </button>
+
+                  {/* Favorite Star Button (☆) */}
+                  {hasEditPermission && (
                     <button
                       type="button"
-                      onClick={() => {
-                        const autoWide = activeNote.blocks.some(
-                          (b) => b.type === 'columns' && (b.columns?.length || 0) >= 4
-                        );
-                        const currentlyWide =
-                          activeNote.isFullWidth !== undefined
-                            ? activeNote.isFullWidth
-                            : autoWide;
-                        void updateNote({ isFullWidth: !currentlyWide });
-                      }}
-                      className={`p-1.5 rounded-lg transition ${
-                        activeNote.isFullWidth
-                          ? 'bg-accent-strong/15 text-accent-strong'
+                      onClick={() =>
+                        void updateNote({ isFavorite: !activeNote.isFavorite })
+                      }
+                      className={`p-1.5 rounded-md transition ${
+                        activeNote.isFavorite
+                          ? 'text-amber-500'
                           : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
                       }`}
                       title={
-                        activeNote.isFullWidth
-                          ? 'Gunakan Lebar Halaman Standar'
-                          : 'Perlebar Halaman (Full Width untuk Tabel & 4-5 Kolom)'
+                        activeNote.isFavorite
+                          ? 'Hapus dari Favorit'
+                          : 'Tambahkan ke Favorit'
                       }
+                      aria-label="Favorit"
                     >
-                      {activeNote.isFullWidth ? (
-                        <Minimize2 className="w-4 h-4" />
-                      ) : (
-                        <Maximize2 className="w-4 h-4" />
-                      )}
+                      <Star
+                        className={`w-4 h-4 ${
+                          activeNote.isFavorite ? 'fill-current' : ''
+                        }`}
+                      />
                     </button>
                   )}
 
-                  <button
-                    type="button"
-                    onClick={handleExportMarkdown}
-                    className="p-1.5 rounded-lg text-text-secondary hover:bg-subtle hover:text-text-primary transition"
-                    title="Ekspor Markdown (.md)"
-                  >
-                    <Download className="w-4 h-4" />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => window.print()}
-                    className="p-1.5 rounded-lg text-text-secondary hover:bg-subtle hover:text-text-primary transition"
-                    title="Cetak PDF"
-                  >
-                    <Printer className="w-4 h-4" />
-                  </button>
+                  {/* Top-Right Corner Hamburger / More Actions Menu (image_2 & image_3) */}
+                  <PageActionsMenu
+                    note={activeNote}
+                    allNotes={myNotes}
+                    canEdit={hasEditPermission}
+                    isOwner={isOwner}
+                    fontStyle={activeFontStyle}
+                    isSmallText={isSmallText}
+                    isFullWidth={Boolean(activeNote.isFullWidth)}
+                    showTocOutline={showTocOutline}
+                    showCommentsPanel={showCommentsPanel}
+                    isLocked={isPageLocked}
+                    onCopyActiveShareLink={handleCopyActiveShareLink}
+                    onCopyPageContent={handleCopyPageContent}
+                    onDuplicateNote={() => {
+                      const fakeEvent = {
+                        stopPropagation: () => {}
+                      } as React.MouseEvent;
+                      void handleDuplicateNote(activeNote, fakeEvent);
+                    }}
+                    onMoveNoteToParent={(targetParentId) =>
+                      void handleMoveNoteParent(activeNote.id, targetParentId)
+                    }
+                    onChangeFontStyle={(nextStyle) =>
+                      void updateNote({ fontStyle: nextStyle })
+                    }
+                    onToggleSmallText={() =>
+                      void updateNote({ isSmallText: !isSmallText })
+                    }
+                    onToggleFullWidth={() => {
+                      const autoWide = activeNote.blocks.some(
+                        (b) => b.type === 'columns' && (b.columns?.length || 0) >= 4
+                      );
+                      const currentlyWide =
+                        activeNote.isFullWidth !== undefined
+                          ? activeNote.isFullWidth
+                          : autoWide;
+                      void updateNote({ isFullWidth: !currentlyWide });
+                    }}
+                    onToggleTocOutline={() => setShowTocOutline((v) => !v)}
+                    onToggleCommentsPanel={() => setShowCommentsPanel((v) => !v)}
+                    onToggleLockPage={() =>
+                      void updateNote({ isLocked: !isPageLocked })
+                    }
+                    onOpenAIDrawer={() => setIsAIDrawerOpen(true)}
+                    onDeleteNote={() => {
+                      const fakeEvent = {
+                        stopPropagation: () => {}
+                      } as React.MouseEvent;
+                      void handleDeleteNote(activeNote, fakeEvent);
+                    }}
+                    onExportMarkdown={handleExportMarkdown}
+                    onPrintPdf={() => window.print()}
+                  />
                 </>
               )}
-
-              <button
-                type="button"
-                onClick={() => setIsAIDrawerOpen(!isAIDrawerOpen)}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition ${
-                  isAIDrawerOpen
-                    ? 'bg-indigo-500/15 text-indigo-600 dark:text-indigo-300'
-                    : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
-                }`}
-                title="Buka Asisten AI"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>AI</span>
-              </button>
             </div>
           </header>
+
+          {/* Public Link Active Info Banner below Navbar (image.png & image_4.png) */}
+          {mainViewMode === 'document' &&
+            activeNote?.shareSettings?.isPublicLink && (
+              <div
+                onClick={() => setShowShareModal(true)}
+                className="w-full bg-sky-500/10 dark:bg-sky-500/15 border-b border-sky-500/20 py-1.5 px-4 text-center text-[12.5px] font-medium text-sky-600 dark:text-sky-300 flex items-center justify-center gap-1.5 cursor-pointer hover:bg-sky-500/15 transition no-print"
+              >
+                <span>
+                  Halaman ini dapat dilihat oleh siapa pun yang memiliki tautan.
+                </span>
+                <Info className="w-3.5 h-3.5 shrink-0" />
+              </div>
+            )}
 
           {mainViewMode === 'kanban' ? (
             <KanbanBoardView
@@ -5686,337 +6316,354 @@ export const BlockEditor: React.FC = () => {
                 </div>
               )}
 
-              {/* Clean Blank Notion Page Container + Floating TOC Rail */}
+              {/* Clean Blank Notion Page Container + Right-Center Floating TOC */}
               <div className="flex-1 flex items-start relative">
-              <div
-                className={`w-full mx-auto pt-8 sm:pt-10 pb-28 flex-1 flex flex-col transition-all ${
-                  activeNote.isFullWidth
-                    ? 'max-w-6xl pl-4 pr-4 sm:pl-20 sm:pr-8'
-                    : activeNote.isFullWidth === undefined &&
-                        activeNote.blocks.some(
-                          (b) => b.type === 'columns' && (b.columns?.length || 0) >= 4
-                        )
-                      ? 'max-w-5xl pl-4 pr-4 sm:pl-20 sm:pr-10'
-                      : 'max-w-3xl pl-5 pr-5 sm:pl-20 sm:pr-14'
-                }`}
-              >
-                {/* Shared Note Permission Banner */}
-                {!isOwner && (
-                  <div className="mb-4 px-3.5 py-2 rounded-xl bg-subtle/80 border border-border-subtle flex items-center justify-between gap-2 text-xs text-text-secondary no-print">
-                    <div className="flex items-center gap-2 min-w-0">
-                      {effectiveRole === 'edit' ? (
-                        <Pencil className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                      ) : effectiveRole === 'comment' ? (
-                        <MessageSquare className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                      ) : (
-                        <Lock className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+                <div
+                  style={{ fontFamily: noteFontFamily }}
+                  className={`w-full mx-auto pt-8 sm:pt-12 pb-24 flex-1 flex flex-col transition-all ${
+                    activeNote.isFullWidth
+                      ? 'max-w-6xl pl-4 pr-4 sm:pl-20 sm:pr-12'
+                      : activeNote.isFullWidth === undefined &&
+                          activeNote.blocks.some(
+                            (b) => b.type === 'columns' && (b.columns?.length || 0) >= 4
+                          )
+                        ? 'max-w-5xl pl-4 pr-4 sm:pl-20 sm:pr-12'
+                        : 'max-w-3xl pl-5 pr-5 sm:pl-20 sm:pr-16'
+                  }`}
+                >
+                  {/* Shared Note Permission Banner */}
+                  {!isOwner && (
+                    <div className="mb-4 px-3.5 py-2 rounded-xl bg-subtle/80 border border-border-subtle flex items-center justify-between gap-2 text-xs text-text-secondary no-print">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {effectiveRole === 'edit' ? (
+                          <Pencil className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                        ) : effectiveRole === 'comment' ? (
+                          <MessageSquare className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                        ) : (
+                          <Lock className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+                        )}
+                        <span className="truncate">
+                          {effectiveRole === 'edit'
+                            ? `Catatan bersama (${activeNote.ownerName || 'Kolaborasi'}) • Anda dapat mengedit isi halaman.`
+                            : effectiveRole === 'comment'
+                              ? `Catatan bersama (${activeNote.ownerName || 'Pemilik'}) • Hak Akses: Pemberi Komentar.`
+                              : `Catatan bersama (${activeNote.ownerName || 'Pemilik'}) • Hak Akses: Hanya Lihat.`}
+                        </span>
+                      </div>
+                      {!currentUser && (
+                        <button
+                          type="button"
+                          onClick={() => setShowLoginModalForGuest(true)}
+                          className="px-2.5 py-1 rounded-lg bg-surface border border-border-subtle text-[11px] font-semibold text-text-primary hover:border-accent-strong shrink-0"
+                        >
+                          Masuk Google
+                        </button>
                       )}
-                      <span className="truncate">
-                        {effectiveRole === 'edit'
-                          ? `Catatan bersama (${activeNote.ownerName || 'Kolaborasi'}) • Anda dapat mengedit isi halaman.`
-                          : effectiveRole === 'comment'
-                            ? `Catatan bersama (${activeNote.ownerName || 'Pemilik'}) • Hak Akses: Pemberi Komentar.`
-                            : `Catatan bersama (${activeNote.ownerName || 'Pemilik'}) • Hak Akses: Hanya Lihat.`}
-                      </span>
                     </div>
-                    {!currentUser && (
-                      <button
-                        type="button"
-                        onClick={() => setShowLoginModalForGuest(true)}
-                        className="px-2.5 py-1 rounded-lg bg-surface border border-border-subtle text-[11px] font-semibold text-text-primary hover:border-accent-strong shrink-0"
-                      >
-                        Masuk Google
-                      </button>
-                    )}
-                  </div>
-                )}
+                  )}
 
-                {/* Hover controls for Icon & Cover + Page Icon + Add Subpage */}
-                <div className="group relative mb-2">
-                  <div className="flex items-center gap-2 mb-2 flex-wrap">
-                    <div className="relative">
-                      <button
-                        type="button"
-                        disabled={!canEdit}
-                        onClick={() => setShowIconPicker((v) => !v)}
-                        className={`text-4xl leading-none p-1 rounded-xl transition select-none ${
-                          canEdit ? 'hover:bg-subtle cursor-pointer' : 'cursor-default'
-                        } ${activeNote.cover ? '-mt-12 bg-surface shadow-sm' : ''}`}
-                        title={canEdit ? 'Ganti ikon' : undefined}
-                      >
-                        {activeNote.icon || '📄'}
-                      </button>
+                  {/* Page Icon + Subtle Hover Actions (Tambah sampul / Tambah komentar) + Title */}
+                  <div className="group relative mb-2">
+                    <div className="flex flex-col items-start gap-1.5 mb-2">
+                      <div className="relative">
+                        <button
+                          type="button"
+                          disabled={!canEdit}
+                          onClick={() => setShowIconPicker((v) => !v)}
+                          className={`text-5xl sm:text-6xl leading-none p-1 -ml-1 rounded-xl transition select-none ${
+                            canEdit ? 'hover:bg-subtle cursor-pointer' : 'cursor-default'
+                          } ${activeNote.cover ? '-mt-12 bg-surface shadow-sm' : ''}`}
+                          title={canEdit ? 'Ganti ikon halaman' : undefined}
+                        >
+                          {activeNote.icon || '📄'}
+                        </button>
 
-                      {showIconPicker && canEdit && (
-                        <div className="absolute left-0 top-full mt-1.5 z-30 miu-card shadow-xl p-2 w-56 no-print">
-                          <div className="grid grid-cols-8 gap-1">
-                            {PAGE_ICONS.map((emoji) => (
-                              <button
-                                key={emoji}
-                                type="button"
-                                onClick={() => {
-                                  void updateNote({ icon: emoji });
-                                  setShowIconPicker(false);
-                                }}
-                                className="w-6 h-6 rounded hover:bg-subtle flex items-center justify-center text-sm"
-                              >
-                                {emoji}
-                              </button>
-                            ))}
+                        {showIconPicker && canEdit && (
+                          <div className="absolute left-0 top-full mt-1.5 z-30 miu-card shadow-xl p-2 w-56 no-print">
+                            <div className="grid grid-cols-8 gap-1">
+                              {PAGE_ICONS.map((emoji) => (
+                                <button
+                                  key={emoji}
+                                  type="button"
+                                  onClick={() => {
+                                    void updateNote({ icon: emoji });
+                                    setShowIconPicker(false);
+                                  }}
+                                  className="w-6 h-6 rounded hover:bg-subtle flex items-center justify-center text-sm"
+                                >
+                                  {emoji}
+                                </button>
+                              ))}
+                            </div>
                           </div>
-                        </div>
-                      )}
-                    </div>
+                        )}
+                      </div>
 
-                    {canEdit && (
-                      <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-1 no-print">
-                        {!activeNote.cover && (
+                      {/* Subtle Page Controls Row (matching image.png: Add cover / Add comment) */}
+                      <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-2 text-xs text-text-secondary/80 no-print">
+                        {canEdit && !activeNote.cover && (
                           <button
                             type="button"
                             onClick={() => void updateNote({ cover: COVER_PRESETS[0].css })}
-                            className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded hover:bg-subtle"
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-subtle hover:text-text-primary transition"
                           >
-                            + Tambah sampul
+                            <span>🖼️</span>
+                            <span>Tambah sampul</span>
                           </button>
                         )}
+                        {canComment && (
+                          <button
+                            type="button"
+                            onClick={() => setShowCommentsPanel(true)}
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-subtle hover:text-text-primary transition"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            <span>Tambah komentar</span>
+                          </button>
+                        )}
+                        {canEdit && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCreateNote(activeNote.id, true)}
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-subtle hover:text-text-primary transition"
+                          >
+                            <FilePlus2 className="w-3.5 h-3.5" />
+                            <span>Tambah subhalaman</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Notion Page Title */}
+                    {(() => {
+                      const titleCollaborators = collaboratorsByBlockId['__title__'] || [];
+                      const titlePointers = pointersByBlockId['__title__'] || [];
+                      const primaryTitleCollab = titleCollaborators[0];
+                      const isTitleJumpHighlighted = jumpHighlightBlockId === '__title__';
+                      const titleSizeClass = isSmallText
+                        ? 'text-[28px] sm:text-[32px] leading-[1.2]'
+                        : 'text-[32px] sm:text-[40px] leading-[1.18]';
+
+                      const reportTitleCursor = (
+                        el: HTMLInputElement,
+                        isEditing: boolean,
+                        immediate = false
+                      ) => {
+                        const start =
+                          typeof el.selectionStart === 'number'
+                            ? el.selectionStart
+                            : el.value.length;
+                        const end =
+                          typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+                        reportLocalCursor({
+                          noteId: activeNote.id,
+                          blockId: '__title__',
+                          field: 'title',
+                          selectionStart: start,
+                          selectionEnd: end,
+                          isEditing,
+                          immediate
+                        });
+                      };
+
+                      return (
+                        <div
+                          data-miu-title-wrap="true"
+                          onMouseMove={(e) => {
+                            if (mainViewMode !== 'document') return;
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            if (rect.width <= 0 || rect.height <= 0) return;
+                            reportLocalPointer({
+                              noteId: activeNote.id,
+                              pointerBlockId: '__title__',
+                              pointerX: normalizePointerCoordinate(
+                                (e.clientX - rect.left) / rect.width
+                              ),
+                              pointerY: normalizePointerCoordinate(
+                                (e.clientY - rect.top) / rect.height
+                              )
+                            });
+                          }}
+                          onMouseLeave={() =>
+                            reportLocalPointer({
+                              noteId: activeNote.id,
+                              pointerBlockId: null,
+                              pointerX: null,
+                              pointerY: null
+                            })
+                          }
+                          style={
+                            primaryTitleCollab
+                              ? {
+                                  boxShadow: isTitleJumpHighlighted
+                                    ? `inset 4px 0 0 ${primaryTitleCollab.color}, 0 0 0 2px ${primaryTitleCollab.color}88`
+                                    : `inset 3px 0 0 ${primaryTitleCollab.color}, 0 0 0 1px ${primaryTitleCollab.color}36`,
+                                  backgroundColor: `${primaryTitleCollab.color}0D`
+                                }
+                              : isTitleJumpHighlighted
+                                ? {
+                                    boxShadow: '0 0 0 2px rgba(56, 189, 248, 0.7)'
+                                  }
+                                : undefined
+                          }
+                          className="relative rounded-xl px-1 -mx-1 py-0.5 transition"
+                        >
+                          {titleCollaborators.length > 0 && (
+                            <BlockCollaboratorBadges
+                              collaborators={titleCollaborators}
+                              contentText={activeNote.title}
+                            />
+                          )}
+                          {titlePointers.length > 0 && (
+                            <BlockCollaboratorPointers pointers={titlePointers} />
+                          )}
+                          <input
+                            ref={(el) => setCaretHostRef('__title__', 'title', el)}
+                            type="text"
+                            readOnly={!canEdit}
+                            value={activeNote.title}
+                            onFocus={(e) => reportTitleCursor(e.currentTarget, canEdit, true)}
+                            onInput={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
+                            onClick={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
+                            onKeyUp={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
+                            onSelect={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
+                            onBlur={(e) => reportTitleCursor(e.currentTarget, false, false)}
+                            onChange={(e) => void updateNote({ title: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && canEdit) {
+                                e.preventDefault();
+                                if (activeNote.blocks[0]) {
+                                  setPendingFocusBlockId(activeNote.blocks[0].id);
+                                } else {
+                                  void handleAddBlockAfter(undefined, 'text');
+                                }
+                              }
+                            }}
+                            placeholder="Tanpa Judul"
+                            className={`w-full bg-transparent ${titleSizeClass} font-bold tracking-tight text-text-primary placeholder:text-text-secondary/30 focus:outline-none`}
+                          />
+                          {titleCollaborators.length > 0 && (
+                            <CollaboratorCaretOverlay
+                              hostRefs={caretHostRefs}
+                              hostKey="__title__:title"
+                              layoutKey="title"
+                              text={activeNote.title}
+                              field="title"
+                              collaborators={titleCollaborators}
+                            />
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Multi-Select Action Bar when blocks are selected via gutter checkboxes */}
+                  {(isSelectMode || selectedBlockIds.length > 0) && (
+                    <div
+                      className={`sticky ${
+                        hasTopIsland ? 'top-[96px]' : 'top-14'
+                      } z-20 mb-3 p-2.5 rounded-2xl bg-surface/95 backdrop-blur-md border border-rose-400/40 shadow-lg flex flex-wrap items-center justify-between gap-2 no-print`}
+                    >
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="px-2 py-0.5 rounded-md bg-rose-500/15 text-rose-600 dark:text-rose-300 font-bold font-mono">
+                          {selectedBlockIds.length} dipilih
+                        </span>
+                        <span className="text-[11px] text-text-secondary hidden sm:inline">
+                          Klik kotak centang blok, atau tahan <strong>Shift + Klik</strong> untuk memilih rentang.
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
                         <button
                           type="button"
-                          onClick={() => void handleCreateNote(activeNote.id, true)}
-                          className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded hover:bg-subtle inline-flex items-center gap-1"
+                          onClick={handleSelectAllBlocks}
+                          className="px-2.5 py-1 rounded-lg bg-subtle hover:bg-subtle/80 text-xs font-medium text-text-primary transition"
                         >
-                          <FilePlus2 className="w-3.5 h-3.5" />
-                          <span>+ Tambah subhalaman</span>
+                          {selectedBlockIds.length === activeNote.blocks.length
+                            ? 'Batal Pilih Semua'
+                            : 'Pilih Semua'}
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={selectedBlockIds.length === 0}
+                          onClick={() => void handleDeleteSelectedBlocks()}
+                          className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-rose-500 hover:bg-rose-600 disabled:opacity-40 text-white text-xs font-semibold shadow-sm transition"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Hapus ({selectedBlockIds.length})</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsSelectMode(false);
+                            setSelectedBlockIds([]);
+                          }}
+                          className="px-2 py-1 rounded-lg hover:bg-subtle text-xs text-text-secondary hover:text-text-primary transition"
+                        >
+                          Selesai
                         </button>
                       </div>
+                    </div>
+                  )}
+
+                  {/* Notion Blocks */}
+                  <div
+                    className="space-y-1 mt-3 flex-1"
+                    onMouseLeave={() =>
+                      reportLocalPointer({
+                        noteId: activeNote.id,
+                        pointerBlockId: null,
+                        pointerX: null,
+                        pointerY: null
+                      })
+                    }
+                  >
+                    {(() => {
+                      let rootNumber = 0;
+                      return activeNote.blocks.map((block) => {
+                        if (block.type === 'numbered') rootNumber += 1;
+                        else rootNumber = 0;
+                        return renderBlockRow(block, rootNumber);
+                      });
+                    })()}
+
+                    {/* Clickable Blank Area Below Blocks */}
+                    {canEdit && (
+                      <div
+                        onClick={() => void handleAddBlockAfter(undefined, 'text')}
+                        className="flex-1 min-h-[120px] cursor-text"
+                      />
                     )}
                   </div>
 
-                  {/* Notion Page Title */}
-                  {(() => {
-                    const titleCollaborators = collaboratorsByBlockId['__title__'] || [];
-                    const titlePointers = pointersByBlockId['__title__'] || [];
-                    const primaryTitleCollab = titleCollaborators[0];
-                    const isTitleJumpHighlighted = jumpHighlightBlockId === '__title__';
-
-                    const reportTitleCursor = (
-                      el: HTMLInputElement,
-                      isEditing: boolean,
-                      immediate = false
-                    ) => {
-                      const start =
-                        typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
-                      const end =
-                        typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
-                      reportLocalCursor({
-                        noteId: activeNote.id,
-                        blockId: '__title__',
-                        field: 'title',
-                        selectionStart: start,
-                        selectionEnd: end,
-                        isEditing,
-                        immediate
-                      });
-                    };
-
-                    return (
-                      <div
-                        data-miu-title-wrap="true"
-                        onMouseMove={(e) => {
-                          if (mainViewMode !== 'document') return;
-                          const rect = e.currentTarget.getBoundingClientRect();
-                          if (rect.width <= 0 || rect.height <= 0) return;
-                          reportLocalPointer({
-                            noteId: activeNote.id,
-                            pointerBlockId: '__title__',
-                            pointerX: normalizePointerCoordinate(
-                              (e.clientX - rect.left) / rect.width
-                            ),
-                            pointerY: normalizePointerCoordinate(
-                              (e.clientY - rect.top) / rect.height
-                            )
-                          });
-                        }}
-                        onMouseLeave={() =>
-                          reportLocalPointer({
-                            noteId: activeNote.id,
-                            pointerBlockId: null,
-                            pointerX: null,
-                            pointerY: null
-                          })
-                        }
-                        style={
-                          primaryTitleCollab
-                            ? {
-                                boxShadow: isTitleJumpHighlighted
-                                  ? `inset 4px 0 0 ${primaryTitleCollab.color}, 0 0 0 2px ${primaryTitleCollab.color}88`
-                                  : `inset 3px 0 0 ${primaryTitleCollab.color}, 0 0 0 1px ${primaryTitleCollab.color}36`,
-                                backgroundColor: `${primaryTitleCollab.color}0D`
-                              }
-                            : isTitleJumpHighlighted
-                              ? {
-                                  boxShadow: '0 0 0 2px rgba(56, 189, 248, 0.7)'
-                                }
-                              : undefined
-                        }
-                        className="relative rounded-xl px-1 -mx-1 py-0.5 transition"
-                      >
-                        {titleCollaborators.length > 0 && (
-                          <BlockCollaboratorBadges
-                            collaborators={titleCollaborators}
-                            contentText={activeNote.title}
-                          />
-                        )}
-                        {titlePointers.length > 0 && (
-                          <BlockCollaboratorPointers pointers={titlePointers} />
-                        )}
-                        <input
-                          ref={(el) => setCaretHostRef('__title__', 'title', el)}
-                          type="text"
-                          readOnly={!canEdit}
-                          value={activeNote.title}
-                          onFocus={(e) => reportTitleCursor(e.currentTarget, canEdit, true)}
-                          onInput={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
-                          onClick={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
-                          onKeyUp={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
-                          onSelect={(e) => reportTitleCursor(e.currentTarget, canEdit, false)}
-                          onBlur={(e) => reportTitleCursor(e.currentTarget, false, false)}
-                          onChange={(e) => void updateNote({ title: e.target.value })}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && canEdit) {
-                              e.preventDefault();
-                              if (activeNote.blocks[0]) {
-                                setPendingFocusBlockId(activeNote.blocks[0].id);
-                              } else {
-                                void handleAddBlockAfter(undefined, 'text');
-                              }
-                            }
-                          }}
-                          placeholder={canEdit ? 'Tanpa Judul' : 'Tanpa Judul'}
-                          className="w-full bg-transparent text-3xl sm:text-4xl font-bold tracking-tight text-text-primary placeholder:text-text-secondary/30 focus:outline-none"
-                        />
-                        {titleCollaborators.length > 0 && (
-                          <CollaboratorCaretOverlay
-                            hostRefs={caretHostRefs}
-                            hostKey="__title__:title"
-                            layoutKey="title"
-                            text={activeNote.title}
-                            field="title"
-                            collaborators={titleCollaborators}
-                          />
+                  {/* Child Subpages Summary Section inside Current Page */}
+                  {childSubpages.length > 0 && (
+                    <div className="mt-8 pt-4 border-t border-border-subtle/70 space-y-2.5 no-print">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
+                          Subhalaman ({childSubpages.length})
+                        </span>
+                        {canEdit && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCreateNote(activeNote.id, true)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-subtle hover:bg-subtle/80 text-xs font-medium text-text-primary transition"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>Buat Subhalaman</span>
+                          </button>
                         )}
                       </div>
-                    );
-                  })()}
-                </div>
 
-                {/* Multi-Select Action Bar for Deleting Selected Blocks / Conversations */}
-                {(isSelectMode || selectedBlockIds.length > 0) && (
-                  <div
-                    className={`sticky ${
-                      hasTopIsland ? 'top-[96px]' : 'top-14'
-                    } z-20 mb-3 p-2.5 rounded-2xl bg-surface/95 backdrop-blur-md border border-rose-400/40 shadow-lg flex flex-wrap items-center justify-between gap-2 no-print`}
-                  >
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className="px-2 py-0.5 rounded-md bg-rose-500/15 text-rose-600 dark:text-rose-300 font-bold font-mono">
-                        {selectedBlockIds.length} dipilih
-                      </span>
-                      <span className="text-[11px] text-text-secondary hidden sm:inline">
-                        Klik blok untuk memilih, atau tahan <strong>Shift + Klik</strong> untuk pilih rentang percakapan.
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={handleSelectAllBlocks}
-                        className="px-2.5 py-1 rounded-lg bg-subtle hover:bg-subtle/80 text-xs font-medium text-text-primary transition"
-                      >
-                        {selectedBlockIds.length === activeNote.blocks.length
-                          ? 'Batal Pilih Semua'
-                          : 'Pilih Semua'}
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={selectedBlockIds.length === 0}
-                        onClick={() => void handleDeleteSelectedBlocks()}
-                        className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-rose-500 hover:bg-rose-600 disabled:opacity-40 text-white text-xs font-semibold shadow-sm transition"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Hapus ({selectedBlockIds.length})</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsSelectMode(false);
-                          setSelectedBlockIds([]);
-                        }}
-                        className="px-2 py-1 rounded-lg hover:bg-subtle text-xs text-text-secondary hover:text-text-primary transition"
-                      >
-                        Selesai
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Notion Blocks */}
-                <div
-                  className="space-y-1 mt-4 flex-1"
-                  onMouseLeave={() =>
-                    reportLocalPointer({
-                      noteId: activeNote.id,
-                      pointerBlockId: null,
-                      pointerX: null,
-                      pointerY: null
-                    })
-                  }
-                >
-                  {(() => {
-                    let rootNumber = 0;
-                    return activeNote.blocks.map((block) => {
-                      if (block.type === 'numbered') rootNumber += 1;
-                      else rootNumber = 0;
-                      return renderBlockRow(block, rootNumber);
-                    });
-                  })()}
-
-                  {/* Clickable Blank Area Below Blocks */}
-                  {canEdit && (
-                    <div
-                      onClick={() => void handleAddBlockAfter(undefined, 'text')}
-                      className="flex-1 min-h-[120px] cursor-text"
-                    />
-                  )}
-                </div>
-
-                {/* Child Subpages Summary Section inside Current Page */}
-                {(childSubpages.length > 0 || canEdit) && (
-                  <div className="mt-8 pt-4 border-t border-border-subtle/70 space-y-2.5 no-print">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
-                        Subhalaman ({childSubpages.length})
-                      </span>
-                      {canEdit && (
-                        <button
-                          type="button"
-                          onClick={() => void handleCreateNote(activeNote.id, true)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-subtle hover:bg-subtle/80 text-xs font-medium text-text-primary transition"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          <span>Buat Subhalaman</span>
-                        </button>
-                      )}
-                    </div>
-
-                    {childSubpages.length > 0 && (
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {childSubpages.map((sub) => (
                           <button
                             key={sub.id}
                             type="button"
                             onClick={() => setActiveNoteId(sub.id)}
-                            className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-subtle/55 hover:bg-subtle border border-border-subtle hover:border-accent-strong/60 text-left transition group/subcard"
+                            className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-subtle/55 hover:bg-subtle border border-border-subtle hover:border-accent-strong/60 text-left transition group/subcard"
                           >
                             <div className="flex items-center gap-2 min-w-0">
                               <span className="text-base shrink-0">{sub.icon || '📑'}</span>
@@ -6028,102 +6675,176 @@ export const BlockEditor: React.FC = () => {
                           </button>
                         ))}
                       </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Comments Section (Active when Commenter, Editor, Owner opens it or comments exist) */}
-                {(showCommentsPanel ||
-                  effectiveRole === 'comment' ||
-                  (activeNote.comments && activeNote.comments.length > 0)) && (
-                  <div className="mt-6 pt-5 border-t border-border-subtle space-y-3 no-print">
-                    <div className="flex items-center justify-between">
-                      <span className="inline-flex items-center gap-1.5 text-xs font-bold text-text-primary">
-                        <MessageSquare className="w-4 h-4 text-amber-500" />
-                        <span>Komentar Catatan ({activeNote.comments?.length || 0})</span>
-                      </span>
                     </div>
+                  )}
 
-                    {(activeNote.comments || []).length > 0 && (
-                      <div className="space-y-2">
-                        {(activeNote.comments || []).map((cmt) => {
-                          const canDeleteComment =
-                            isOwner || (currentUser && cmt.authorId === currentUser.id);
-                          return (
-                            <div
-                              key={cmt.id}
-                              className="flex items-start justify-between gap-2 p-3 rounded-xl bg-subtle/55 border border-border-subtle text-xs"
-                            >
-                              <div className="min-w-0 space-y-1">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-bold text-text-primary">
-                                    {cmt.authorName}
-                                  </span>
-                                  <span className="text-[10px] text-text-secondary">
-                                    {new Date(cmt.createdAt).toLocaleString('id-ID', {
-                                      day: '2-digit',
-                                      month: 'short',
-                                      hour: '2-digit',
-                                      minute: '2-digit'
-                                    })}
-                                  </span>
-                                </div>
-                                <p className="text-text-primary leading-relaxed whitespace-pre-wrap">
-                                  {cmt.content}
-                                </p>
-                              </div>
-                              {canDeleteComment && (
-                                <button
-                                  type="button"
-                                  onClick={() => void handleDeleteComment(cmt.id)}
-                                  className="p-1 rounded hover:bg-rose-500/15 text-text-secondary hover:text-rose-500 shrink-0"
-                                  title="Hapus komentar"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })}
+                  {/* Comments Section (Enabled via Bagikan or Tampilan & tata letak) */}
+                  {(showCommentsPanel ||
+                    effectiveRole === 'comment' ||
+                    (activeNote.comments && activeNote.comments.length > 0)) && (
+                    <div className="mt-6 pt-5 border-t border-border-subtle space-y-3 no-print">
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1.5 text-xs font-bold text-text-primary">
+                          <MessageSquare className="w-4 h-4 text-amber-500" />
+                          <span>Diskusi &amp; Komentar Halaman ({activeNote.comments?.length || 0})</span>
+                        </span>
+                        {showCommentsPanel && (
+                          <button
+                            type="button"
+                            onClick={() => setShowCommentsPanel(false)}
+                            className="text-[11px] text-text-secondary hover:text-text-primary"
+                          >
+                            Sembunyikan
+                          </button>
+                        )}
                       </div>
-                    )}
 
-                    {canComment ? (
-                      <form onSubmit={(e) => void handleAddComment(e)} className="flex gap-2">
-                        <input
-                          type="text"
-                          value={newCommentText}
-                          onChange={(e) => setNewCommentText(e.target.value)}
-                          placeholder="Tulis komentar atau masukan untuk catatan ini..."
-                          className="flex-1 bg-subtle border border-border-subtle rounded-xl px-3 py-2 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
-                        />
-                        <button
-                          type="submit"
-                          disabled={!newCommentText.trim()}
-                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-accent-strong text-white dark:text-slate-950 text-xs font-semibold hover:opacity-95 disabled:opacity-40 transition shrink-0"
-                        >
-                          <Send className="w-3.5 h-3.5" />
-                          <span>Kirim</span>
-                        </button>
-                      </form>
-                    ) : (
-                      <p className="text-[11px] text-text-secondary italic">
-                        Hak akses Hanya Lihat — Anda tidak dapat menambahkan komentar pada catatan ini.
-                      </p>
-                    )}
-                  </div>
-                )}
+                      {(activeNote.comments || []).length > 0 && (
+                        <div className="space-y-2">
+                          {(activeNote.comments || []).map((cmt) => {
+                            const canDeleteComment =
+                              isOwner || (currentUser && cmt.authorId === currentUser.id);
+                            return (
+                              <div
+                                key={cmt.id}
+                                className="flex items-start justify-between gap-2 p-3 rounded-xl bg-subtle/55 border border-border-subtle text-xs"
+                              >
+                                <div className="min-w-0 space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-bold text-text-primary">
+                                      {cmt.authorName}
+                                    </span>
+                                    <span className="text-[10px] text-text-secondary">
+                                      {new Date(cmt.createdAt).toLocaleString('id-ID', {
+                                        day: '2-digit',
+                                        month: 'short',
+                                        hour: '2-digit',
+                                        minute: '2-digit'
+                                      })}
+                                    </span>
+                                  </div>
+                                  <p className="text-text-primary leading-relaxed whitespace-pre-wrap">
+                                    {cmt.content}
+                                  </p>
+                                </div>
+                                {canDeleteComment && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleDeleteComment(cmt.id)}
+                                    className="p-1 rounded hover:bg-rose-500/15 text-text-secondary hover:text-rose-500 shrink-0"
+                                    title="Hapus komentar"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {canComment ? (
+                        <form onSubmit={(e) => void handleAddComment(e)} className="flex gap-2">
+                          <input
+                            type="text"
+                            value={newCommentText}
+                            onChange={(e) => setNewCommentText(e.target.value)}
+                            placeholder="Tambahkan komentar di halaman ini..."
+                            className="flex-1 bg-subtle border border-border-subtle rounded-xl px-3 py-2 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
+                          />
+                          <button
+                            type="submit"
+                            disabled={!newCommentText.trim()}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold disabled:opacity-40 transition shrink-0"
+                          >
+                            <Send className="w-3.5 h-3.5" />
+                            <span>Kirim</span>
+                          </button>
+                        </form>
+                      ) : (
+                        <p className="text-[11px] text-text-secondary italic">
+                          Hak akses Hanya Lihat — Anda tidak dapat menambahkan komentar pada catatan ini.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Right-Center Floating Daftar Isi List (kanan tengah) */}
+                <FloatingTocOutline
+                  blocks={activeNote.blocks}
+                  noteTitle={activeNote.title}
+                  isOpen={showTocOutline}
+                  hasTopIsland={hasTopIsland}
+                  isAIDrawerOpen={isAIDrawerOpen}
+                  onToggleOpen={() => setShowTocOutline((v) => !v)}
+                  onSelectBlock={(blkId) => scrollToBlockById(blkId)}
+                />
               </div>
 
-              <FloatingTocOutline
-                blocks={activeNote.blocks}
-                noteTitle={activeNote.title}
-                isOpen={showTocOutline}
-                hasTopIsland={hasTopIsland}
-                onToggleOpen={() => setShowTocOutline((v) => !v)}
-                onSelectBlock={(blkId) => scrollToBlockById(blkId)}
-              />
-            </div>
+              {/* Bottom Metadata Strip (matching image.png & image_4.png) */}
+              <footer className="sticky bottom-0 z-10 px-4 py-1 bg-surface/95 backdrop-blur-sm border-t border-border-subtle/60 flex items-center justify-between gap-3 text-[10px] font-mono text-text-secondary/80 overflow-x-auto no-print">
+                <div className="flex items-center gap-4 min-w-0">
+                  {(
+                    [
+                      {
+                        key: 'user',
+                        label: 'PENGGUNA',
+                        val: currentUser?.id || 'local-guest'
+                      },
+                      {
+                        key: 'workspace',
+                        label: 'RUANG KERJA',
+                        val: activeCourseId || 'workspace-main'
+                      },
+                      {
+                        key: 'page',
+                        label: 'HALAMAN',
+                        val: activeNote.id
+                      },
+                      {
+                        key: 'block',
+                        label: 'BLOK',
+                        val:
+                          activeBlockTarget?.blockId ||
+                          activeNote.blocks[0]?.id ||
+                          'blk-root'
+                      }
+                    ] as const
+                  ).map((meta) => (
+                    <button
+                      key={meta.key}
+                      type="button"
+                      onClick={() => {
+                        void navigator.clipboard.writeText(meta.val);
+                        setCopiedMetaField(meta.key);
+                        window.setTimeout(
+                          () =>
+                            setCopiedMetaField((prev) =>
+                              prev === meta.key ? null : prev
+                            ),
+                          1500
+                        );
+                      }}
+                      className="inline-flex items-center gap-1 hover:text-text-primary transition shrink-0"
+                      title={`Salin ID ${meta.label}: ${meta.val}`}
+                    >
+                      <span className="font-semibold text-text-secondary/65">
+                        {meta.label}
+                      </span>
+                      <span className="truncate max-w-[110px]">{meta.val}</span>
+                      {copiedMetaField === meta.key ? (
+                        <Check className="w-2.5 h-2.5 text-emerald-500" />
+                      ) : (
+                        <Copy className="w-2.5 h-2.5 opacity-60" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-[10px] text-text-secondary/60 shrink-0">
+                  ⌘⇧.
+                </span>
+              </footer>
             </div>
           ) : (
             <div className="py-20 text-center space-y-3 my-auto">
@@ -6131,7 +6852,7 @@ export const BlockEditor: React.FC = () => {
               <button
                 type="button"
                 onClick={() => void handleCreateNote(null, true)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-accent-strong text-white dark:text-slate-950 text-xs font-semibold"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-sky-600 text-white text-xs font-semibold"
               >
                 <Plus className="w-3.5 h-3.5" />
                 Halaman Baru
@@ -6141,11 +6862,15 @@ export const BlockEditor: React.FC = () => {
         </div>
       </div>
 
-      {/* Share & Access Control Modal */}
+      {/* Share, Comments & Export Modal */}
       {showShareModal && activeNote && (
         <ShareNoteModal
           note={activeNote}
           isOwner={isOwner}
+          showCommentsPanel={showCommentsPanel}
+          onToggleCommentsPanel={() => setShowCommentsPanel((v) => !v)}
+          onExportMarkdown={handleExportMarkdown}
+          onPrintPdf={() => window.print()}
           onUpdateShareSettings={handleUpdateShareSettings}
           onClose={() => setShowShareModal(false)}
         />

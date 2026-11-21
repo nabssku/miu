@@ -4,12 +4,14 @@ import React, { useState } from 'react';
 import {
   Check,
   Copy,
+  Download,
   Eye,
   Globe,
   Lock,
   MailPlus,
   MessageSquare,
   Pencil,
+  Printer,
   Share2,
   Trash2,
   UserPlus,
@@ -20,6 +22,10 @@ import type { NoteRecord, NoteShareSettings, SharePermission } from '../../types
 interface ShareNoteModalProps {
   note: NoteRecord;
   isOwner: boolean;
+  showCommentsPanel?: boolean;
+  onToggleCommentsPanel?: () => void;
+  onExportMarkdown?: () => void;
+  onPrintPdf?: () => void;
   onUpdateShareSettings: (settings: NoteShareSettings) => Promise<void>;
   onClose: () => void;
 }
@@ -53,6 +59,10 @@ const ROLE_OPTIONS: Array<{
 export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
   note,
   isOwner,
+  showCommentsPanel = false,
+  onToggleCommentsPanel,
+  onExportMarkdown,
+  onPrintPdf,
   onUpdateShareSettings,
   onClose
 }) => {
@@ -153,18 +163,18 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4 no-print">
-      <div className="w-full max-w-lg rounded-3xl bg-surface border border-border-subtle shadow-2xl p-5 sm:p-6 space-y-5">
+      <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl bg-surface border border-border-subtle shadow-2xl p-5 space-y-4">
         {/* Header */}
         <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-sky-500/15 text-sky-500 flex items-center justify-center shrink-0">
-              <Share2 className="w-5 h-5" />
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-sky-500/15 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
+              <Share2 className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-text-primary">
-                Bagikan Catatan &amp; Hak Akses
+              <h3 className="text-[15px] font-semibold text-text-primary leading-tight">
+                Bagikan, Komentar &amp; Ekspor
               </h3>
-              <p className="text-xs text-text-secondary truncate max-w-[300px]">
+              <p className="text-xs text-text-secondary truncate max-w-[300px] mt-0.5">
                 {note.icon || '📄'} {note.title || 'Tanpa Judul'}
               </p>
             </div>
@@ -173,7 +183,7 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-full hover:bg-subtle text-text-secondary hover:text-text-primary transition"
+            className="p-1.5 rounded-lg hover:bg-subtle text-text-secondary hover:text-text-primary transition"
           >
             <X className="w-4 h-4" />
           </button>
@@ -181,35 +191,35 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
 
         {/* 1. Invite by Email with Role Selector */}
         {isOwner && (
-          <form onSubmit={(e) => void handleInviteEmail(e)} className="space-y-2">
-            <label className="block text-xs font-semibold text-text-primary">
-              Undang Teman / Kolaborator via Email Google
+          <form onSubmit={(e) => void handleInviteEmail(e)} className="space-y-1.5">
+            <label className="block text-xs font-medium text-text-secondary">
+              Undang kolaborator via email
             </label>
-            <div className="flex flex-col sm:flex-row gap-2">
+            <div className="flex flex-col sm:flex-row gap-1.5">
               <div className="relative flex-1">
-                <MailPlus className="w-4 h-4 text-text-secondary absolute left-3 top-2.5" />
+                <MailPlus className="w-3.5 h-3.5 text-text-secondary absolute left-3 top-2.5" />
                 <input
                   type="email"
                   value={emailInput}
                   onChange={(e) => setEmailInput(e.target.value)}
                   placeholder="nama@gmail.com"
-                  className="w-full bg-subtle border border-border-subtle rounded-xl pl-9 pr-3 py-2 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
+                  className="w-full bg-subtle/70 border border-border-subtle rounded-lg pl-8 pr-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-strong"
                 />
               </div>
 
               <select
                 value={inviteRole}
                 onChange={(e) => setInviteRole(e.target.value as SharePermission)}
-                className="bg-subtle border border-border-subtle rounded-xl px-3 py-2 text-xs font-semibold text-text-primary focus:outline-none focus:border-accent-strong"
+                className="bg-subtle/70 border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs font-medium text-text-primary focus:outline-none focus:border-accent-strong"
               >
-                <option value="view">👁️ Hanya Lihat</option>
-                <option value="comment">💬 Pemberi Komentar</option>
-                <option value="edit">✏️ Bisa Diedit</option>
+                <option value="view">Hanya Lihat</option>
+                <option value="comment">Pemberi Komentar</option>
+                <option value="edit">Bisa Diedit</option>
               </select>
 
               <button
                 type="submit"
-                className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-accent-strong text-white dark:text-slate-950 text-xs font-bold hover:opacity-95 transition shrink-0"
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition shrink-0"
               >
                 <UserPlus className="w-3.5 h-3.5" />
                 <span>Undang</span>
@@ -219,31 +229,31 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
         )}
 
         {/* Collaborator List */}
-        <div className="space-y-2">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
-            Daftar Akses Pengguna
+        <div className="space-y-1.5">
+          <div className="text-[11px] font-medium text-text-secondary">
+            Akses pengguna
           </div>
 
-          <div className="max-h-40 overflow-y-auto space-y-1.5 pr-0.5">
+          <div className="max-h-36 overflow-y-auto space-y-1 pr-0.5">
             {/* Owner Row */}
-            <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-subtle/50 border border-border-subtle text-xs">
+            <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-subtle/50 border border-border-subtle text-xs">
               <div className="min-w-0">
-                <p className="font-semibold text-text-primary truncate">
+                <p className="font-medium text-text-primary truncate">
                   {note.ownerName || 'Pemilik Catatan'}{' '}
-                  <span className="text-[10px] font-normal text-text-secondary">
+                  <span className="text-[11px] font-normal text-text-secondary">
                     ({note.ownerEmail || 'Akun Utama'})
                   </span>
                 </p>
               </div>
-              <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 font-mono text-[10px] font-bold shrink-0">
-                Pemilik (Owner)
+              <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 text-[10px] font-semibold shrink-0">
+                Pemilik
               </span>
             </div>
 
             {currentSettings.collaborators.map((collab) => (
               <div
                 key={collab.email}
-                className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-surface border border-border-subtle text-xs"
+                className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-surface border border-border-subtle text-xs"
               >
                 <span className="font-medium text-text-primary truncate flex-1">
                   {collab.email}
@@ -259,28 +269,28 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
                           e.target.value as SharePermission
                         )
                       }
-                      className="bg-subtle border border-border-subtle rounded-lg px-2 py-1 text-[11px] font-semibold text-text-primary focus:outline-none"
+                      className="bg-subtle border border-border-subtle rounded-md px-2 py-1 text-[11px] font-medium text-text-primary focus:outline-none"
                     >
-                      <option value="view">👁️ Hanya Lihat</option>
-                      <option value="comment">💬 Pemberi Komentar</option>
-                      <option value="edit">✏️ Bisa Diedit</option>
+                      <option value="view">Hanya Lihat</option>
+                      <option value="comment">Pemberi Komentar</option>
+                      <option value="edit">Bisa Diedit</option>
                     </select>
                     <button
                       type="button"
                       onClick={() => void handleRemoveCollaborator(collab.email)}
-                      className="p-1 rounded-lg hover:bg-rose-500/15 text-text-secondary hover:text-rose-500 transition"
+                      className="p-1 rounded-md hover:bg-rose-500/15 text-text-secondary hover:text-rose-500 transition"
                       title="Hapus akses"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 ) : (
-                  <span className="text-[11px] font-semibold text-accent-strong">
+                  <span className="text-[11px] font-medium text-text-secondary">
                     {collab.role === 'edit'
-                      ? '✏️ Bisa Diedit'
+                      ? 'Bisa Diedit'
                       : collab.role === 'comment'
-                        ? '💬 Pemberi Komentar'
-                        : '👁️ Hanya Lihat'}
+                        ? 'Pemberi Komentar'
+                        : 'Hanya Lihat'}
                   </span>
                 )}
               </div>
@@ -289,13 +299,13 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
         </div>
 
         {/* 2. Public Link Access & Permission Level */}
-        <div className="rounded-2xl bg-subtle/60 border border-border-subtle p-3.5 space-y-3">
+        <div className="rounded-xl bg-subtle/50 border border-border-subtle p-3 space-y-2.5">
           <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0">
               <div
-                className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
                   currentSettings.isPublicLink
-                    ? 'bg-emerald-500/15 text-emerald-500'
+                    ? 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
                     : 'bg-subtle text-text-secondary'
                 }`}
               >
@@ -305,16 +315,16 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
                   <Lock className="w-4 h-4" />
                 )}
               </div>
-              <div>
-                <p className="text-xs font-bold text-text-primary">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-text-primary truncate">
                   {currentSettings.isPublicLink
-                    ? 'Siapa saja yang memiliki link dapat mengakses'
-                    : 'Dibatasi (Terisolasi Pribadi & Undangan)'}
+                    ? 'Siapa pun yang memiliki tautan dapat melihat'
+                    : 'Akses terbatas (Pribadi & Undangan)'}
                 </p>
-                <p className="text-[11px] text-text-secondary">
+                <p className="text-[11px] text-text-secondary truncate">
                   {currentSettings.isPublicLink
-                    ? 'Pilih hak akses untuk penerima link di bawah'
-                    : 'Hanya kamu dan email yang diundang yang bisa membuka'}
+                    ? 'Atur hak akses publik & komentar di bawah'
+                    : 'Aktifkan tautan agar dapat diakses publik'}
                 </p>
               </div>
             </div>
@@ -322,22 +332,27 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
             {isOwner && (
               <button
                 type="button"
+                role="switch"
+                aria-checked={currentSettings.isPublicLink}
                 onClick={() => void handleTogglePublicLink()}
-                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition shrink-0 ${
-                  currentSettings.isPublicLink
-                    ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 border border-emerald-400/40'
-                    : 'bg-surface border border-border-subtle text-text-primary hover:border-accent-strong'
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                  currentSettings.isPublicLink ? 'bg-sky-600' : 'bg-text-secondary/30'
                 }`}
+                title={currentSettings.isPublicLink ? 'Nonaktifkan tautan publik' : 'Aktifkan tautan publik'}
               >
-                {currentSettings.isPublicLink ? 'Link Aktif' : 'Aktifkan Link'}
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                    currentSettings.isPublicLink ? 'translate-x-4' : 'translate-x-0'
+                  }`}
+                />
               </button>
             )}
           </div>
 
           {currentSettings.isPublicLink && (
-            <div className="space-y-2.5 pt-2 border-t border-border-subtle">
-              <div className="text-[11px] font-semibold text-text-secondary">
-                Hak Akses Link Berbagi:
+            <div className="space-y-2 pt-2 border-t border-border-subtle">
+              <div className="text-[11px] font-medium text-text-secondary">
+                Izin akses tautan:
               </div>
               <div className="grid grid-cols-3 gap-1.5">
                 {ROLE_OPTIONS.map(({ id, label, desc, Icon }) => {
@@ -348,17 +363,17 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
                       type="button"
                       disabled={!isOwner}
                       onClick={() => void handleChangePublicRole(id)}
-                      className={`p-2 rounded-xl border text-left transition ${
+                      className={`p-2 rounded-lg border text-left transition ${
                         active
-                          ? 'bg-accent-strong/15 border-accent-strong text-accent-strong shadow-sm'
+                          ? 'bg-sky-500/12 border-sky-500 text-sky-600 dark:text-sky-300'
                           : 'bg-surface border-border-subtle text-text-secondary hover:text-text-primary'
                       }`}
                     >
-                      <div className="flex items-center gap-1.5 text-xs font-bold">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold">
                         <Icon className="w-3.5 h-3.5 shrink-0" />
                         <span className="truncate">{label}</span>
                       </div>
-                      <p className="text-[9.5px] opacity-80 leading-tight mt-1 line-clamp-2">
+                      <p className="text-[10px] opacity-80 leading-tight mt-1 line-clamp-2">
                         {desc}
                       </p>
                     </button>
@@ -369,17 +384,17 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
           )}
 
           {/* Copy Share Link Bar */}
-          <div className="flex items-center gap-2 pt-1">
+          <div className="flex items-center gap-1.5 pt-1">
             <input
               type="text"
               readOnly
               value={shareUrl}
-              className="flex-1 bg-surface border border-border-subtle rounded-xl px-3 py-1.5 font-mono text-[11px] text-text-secondary focus:outline-none"
+              className="flex-1 bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 font-mono text-[11px] text-text-secondary focus:outline-none"
             />
             <button
               type="button"
               onClick={() => void handleCopyShareLink()}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-accent-strong text-white dark:text-slate-950 text-xs font-semibold hover:opacity-95 transition shrink-0"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition shrink-0"
             >
               {copiedLink ? (
                 <>
@@ -389,12 +404,87 @@ export const ShareNoteModal: React.FC<ShareNoteModalProps> = ({
               ) : (
                 <>
                   <Copy className="w-3.5 h-3.5" />
-                  <span>Salin Link</span>
+                  <span>Salin tautan</span>
                 </>
               )}
             </button>
           </div>
         </div>
+
+        {/* 3. Page Comments / Discussion Toggle (Activated via Bagikan menu) */}
+        {onToggleCommentsPanel && (
+          <div className="rounded-xl bg-subtle/50 border border-border-subtle p-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+                <MessageSquare className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-text-primary">
+                  Komentar &amp; Diskusi Halaman ({note.comments?.length || 0})
+                </p>
+                <p className="text-[11px] text-text-secondary truncate">
+                  Tampilkan panel komentar dan masukan pada halaman ini
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={showCommentsPanel}
+                onClick={onToggleCommentsPanel}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                  showCommentsPanel ? 'bg-sky-600' : 'bg-text-secondary/30'
+                }`}
+                title="Aktifkan diskusi halaman"
+              >
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                    showCommentsPanel ? 'translate-x-4' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* 4. Download Markdown & Print PDF (Inside Bagikan menu) */}
+        {(onExportMarkdown || onPrintPdf) && (
+          <div className="pt-1 border-t border-border-subtle space-y-1.5">
+            <div className="text-[11px] font-medium text-text-secondary">
+              Unduh &amp; Cetak Halaman
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {onExportMarkdown && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onExportMarkdown();
+                    onClose();
+                  }}
+                  className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-subtle hover:bg-subtle/80 border border-border-subtle text-xs font-medium text-text-primary transition"
+                >
+                  <Download className="w-3.5 h-3.5 text-text-secondary" />
+                  <span>Unduh Markdown (.md)</span>
+                </button>
+              )}
+              {onPrintPdf && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    window.setTimeout(() => onPrintPdf(), 80);
+                  }}
+                  className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-subtle hover:bg-subtle/80 border border-border-subtle text-xs font-medium text-text-primary transition"
+                >
+                  <Printer className="w-3.5 h-3.5 text-text-secondary" />
+                  <span>Cetak / Simpan PDF</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
