@@ -24,6 +24,7 @@ import {
   Globe,
   GripVertical,
   Link2,
+  ListTree,
   Loader2,
   Lock,
   LogOut,
@@ -58,7 +59,8 @@ import {
   saveNoteToNeon,
   submitFormResponseToNeon,
   syncCloudStatus,
-  uploadImageToCloudinary
+  uploadImageToCloudinary,
+  uploadMediaToCloud
 } from '../../services/cloudServices';
 import type {
   BlockType,
@@ -74,6 +76,8 @@ import type {
   NoteRecord,
   NoteShareSettings,
   SharePermission,
+  SimpleTableData,
+  VoiceBlockData,
   ChartBlockData
 } from '../../types/miu';
 import {
@@ -123,12 +127,20 @@ import {
   CollaboratorCaretOverlay,
   CollaboratorsHeaderStrip
 } from './CollaboratorOverlays';
+import { extractTocHeadings, FloatingTocOutline } from './FloatingTocOutline';
 import { NotesAuthModal } from './NotesAuthModal';
 import { ShareNoteModal } from './ShareNoteModal';
 import { ChartBlockView } from './blocks/ChartBlockView';
 import { DatabaseBlockView } from './blocks/DatabaseBlockView';
 import { FormBlockView } from './blocks/FormBlockView';
+import { DEFAULT_MERMAID_CODE, MermaidBlockView } from './blocks/MermaidBlockView';
 import { MetricBlockView } from './blocks/MetricBlockView';
+import {
+  createDefaultSimpleTableData,
+  SimpleTableBlockView,
+  simpleTableToMarkdown
+} from './blocks/SimpleTableBlockView';
+import { VoiceBlockView } from './blocks/VoiceBlockView';
 import {
   KANBAN_COLUMNS,
   KanbanBoardView,
@@ -166,6 +178,7 @@ const MathPreview: React.FC<{ tex: string }> = ({ tex }) => {
 
 export const BlockEditor: React.FC = () => {
   const {
+    theme,
     currentUser,
     isPublicShareAccess,
     loginGoogleUser,
@@ -200,6 +213,16 @@ export const BlockEditor: React.FC = () => {
   const activeNote = queriedNote || allNotes[0];
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [showTocOutline, setShowTocOutline] = useState(false);
+  useEffect(() => {
+    if (window.innerWidth >= 1280) {
+      setShowTocOutline(true);
+    }
+  }, []);
+  const tocHeadings = useMemo(
+    () => extractTocHeadings(activeNote?.blocks),
+    [activeNote?.blocks]
+  );
   const [mainViewMode, setMainViewMode] = useState<'document' | 'kanban' | 'calendar'>('document');
   const [searchQuery, setSearchQuery] = useState('');
   const [showIconPicker, setShowIconPicker] = useState(false);
@@ -462,6 +485,27 @@ export const BlockEditor: React.FC = () => {
     });
   };
 
+  const scrollToBlockById = (targetId: string) => {
+    setMainViewMode('document');
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => {
+        const selector = `[data-miu-block-id="${targetId.replace(/"/g, '\\"')}"]`;
+        const targetEl = document.querySelector<HTMLElement>(selector);
+        if (targetEl) {
+          targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        setJumpHighlightBlockId(targetId);
+        if (jumpFlashTimerRef.current) {
+          window.clearTimeout(jumpFlashTimerRef.current);
+        }
+        jumpFlashTimerRef.current = window.setTimeout(() => {
+          jumpFlashTimerRef.current = null;
+          setJumpHighlightBlockId((prev) => (prev === targetId ? null : prev));
+        }, 1500);
+      }, 20);
+    });
+  };
+
   const focusPreviewBlock = (blk: NoteBlockBase) => {
     if (!canEdit) return;
     reportBlockTarget(
@@ -615,7 +659,20 @@ export const BlockEditor: React.FC = () => {
     return allNotes.filter(
       (n) =>
         n.title.toLowerCase().includes(q) ||
-        flattenBlocks(n.blocks).some((b) => b.content.toLowerCase().includes(q))
+        flattenBlocks(n.blocks).some(
+          (b) =>
+            b.content.toLowerCase().includes(q) ||
+            Boolean(b.caption && b.caption.toLowerCase().includes(q)) ||
+            Boolean(
+              b.voiceData?.transcript &&
+                b.voiceData.transcript.toLowerCase().includes(q)
+            ) ||
+            Boolean(
+              b.tableData?.rows?.some((row) =>
+                row.some((cell) => cell.toLowerCase().includes(q))
+              )
+            )
+        )
     );
   }, [myNotes, allNotes, searchQuery]);
 
@@ -1252,6 +1309,31 @@ export const BlockEditor: React.FC = () => {
     }
   };
 
+  // Upload audio file to Cloud Catatan for a Voice Note block
+  const handleUploadAudioForBlock = async (blockId: string, file: File) => {
+    if (!activeNote || !canEdit) return;
+    const targetNoteId = activeNote.id;
+    setUploadingBlockId(blockId);
+    try {
+      const { url } = await uploadMediaToCloud(file);
+      await patchBlockByIdInDb(targetNoteId, blockId, {
+        type: 'voice',
+        content: url,
+        caption: file.name.replace(/\.[^/.]+$/, '') || 'Voice Note',
+        voiceData: {
+          audioUrl: url,
+          language: 'id-ID',
+          transcript: '',
+          createdAt: Date.now()
+        }
+      });
+    } catch {
+      // ignore
+    } finally {
+      setUploadingBlockId(null);
+    }
+  };
+
   // Upload PDF file to Cloudinary & extract text for AI reading
   const handleUploadPdfForBlock = async (blockId: string, file: File) => {
     if (!activeNote || !canEdit) return;
@@ -1369,6 +1451,18 @@ export const BlockEditor: React.FC = () => {
     if (typeof patch.content === 'string') {
       const val = patch.content;
 
+      if (val === '```mermaid ') {
+        const next = mapBlockDeep(freshNote.blocks, id, (b) => ({
+          ...b,
+          type: 'mermaid' as BlockType,
+          caption: b.caption || 'Diagram Mermaid',
+          content: DEFAULT_MERMAID_CODE
+        }));
+        setSlashState(null);
+        await updateNoteBlocks(next);
+        return;
+      }
+
       const mdTriggers: Array<{ prefix: string; type: BlockType; extra?: Partial<NoteBlock> }> = [
         { prefix: '# ', type: 'h1' },
         { prefix: '## ', type: 'h2' },
@@ -1380,7 +1474,8 @@ export const BlockEditor: React.FC = () => {
         { prefix: '[ ] ', type: 'todo', extra: { checked: false } },
         { prefix: '[x] ', type: 'todo', extra: { checked: true } },
         { prefix: '> ', type: 'quote' },
-        { prefix: '>> ', type: 'toggle', extra: { toggleOpen: true, toggleBody: '' } }
+        { prefix: '>> ', type: 'toggle', extra: { toggleOpen: true, toggleBody: '' } },
+        { prefix: '``` ', type: 'code', extra: { language: 'javascript' } }
       ];
 
       for (const trig of mdTriggers) {
@@ -1507,6 +1602,41 @@ export const BlockEditor: React.FC = () => {
         };
       }
 
+      if (type === 'table') {
+        const tableData = b.tableData || createDefaultSimpleTableData();
+        return {
+          ...b,
+          type: 'table',
+          content:
+            (tableData.rows[0] || []).filter(Boolean).slice(0, 4).join(' | ') ||
+            'Tabel Sederhana',
+          tableData
+        };
+      }
+
+      if (type === 'mermaid') {
+        return {
+          ...b,
+          type: 'mermaid',
+          caption: b.caption || 'Diagram Mermaid',
+          content: cleanContent.trim() || DEFAULT_MERMAID_CODE
+        };
+      }
+
+      if (type === 'voice') {
+        return {
+          ...b,
+          type: 'voice',
+          caption: b.caption || cleanContent.trim() || '',
+          content: b.voiceData?.audioUrl || '',
+          voiceData: b.voiceData || {
+            audioUrl: '',
+            language: 'id-ID',
+            transcript: ''
+          }
+        };
+      }
+
       if (type === 'database') {
         const dbData = b.databaseData || createDefaultDatabaseData('blank');
         return {
@@ -1621,7 +1751,10 @@ export const BlockEditor: React.FC = () => {
       type !== 'database' &&
       type !== 'chart' &&
       type !== 'form' &&
-      type !== 'metric'
+      type !== 'metric' &&
+      type !== 'table' &&
+      type !== 'mermaid' &&
+      type !== 'voice'
     ) {
       const updatedBlock = findBlockById(next, blockId);
       if (updatedBlock) {
@@ -1647,14 +1780,25 @@ export const BlockEditor: React.FC = () => {
     const newBlock: NoteBlock = {
       id: newId,
       type,
-      content: '',
+      content: type === 'mermaid' ? DEFAULT_MERMAID_CODE : type === 'table' ? 'Tabel Sederhana' : '',
       ...(type === 'todo' ? { checked: false } : {}),
       ...(type === 'deadline'
         ? { checked: false, dueDate: formatLocalYYYYMMDD(new Date()) }
         : {}),
       ...(type === 'callout' ? { calloutIcon: '💡' } : {}),
       ...(type === 'code' ? { language: 'javascript' } : {}),
-      ...(type === 'toggle' ? { toggleOpen: true, toggleBody: '' } : {})
+      ...(type === 'toggle' ? { toggleOpen: true, toggleBody: '' } : {}),
+      ...(type === 'table' ? { tableData: createDefaultSimpleTableData() } : {}),
+      ...(type === 'mermaid' ? { caption: 'Diagram Mermaid' } : {}),
+      ...(type === 'voice'
+        ? {
+            voiceData: {
+              audioUrl: '',
+              language: 'id-ID',
+              transcript: ''
+            }
+          }
+        : {})
     };
     const nextBlocks = afterId
       ? insertBlocksRelativeDeep(freshNote.blocks, afterId, 'after', [newBlock])
@@ -1665,7 +1809,15 @@ export const BlockEditor: React.FC = () => {
       setEditingLinkId(newId);
     } else if (type === 'video') {
       setEditingVideoId(newId);
-    } else {
+    } else if (
+      type !== 'table' &&
+      type !== 'mermaid' &&
+      type !== 'voice' &&
+      type !== 'database' &&
+      type !== 'chart' &&
+      type !== 'form' &&
+      type !== 'metric'
+    ) {
       setPendingFocusBlockId(newId);
     }
   };
@@ -1993,6 +2145,24 @@ export const BlockEditor: React.FC = () => {
           mdLines.push(`### Formulir: ${b.formData.title}\n${fList}\n`);
         } else if (b.type === 'metric' && b.metricData) {
           mdLines.push(`**Metrik**: ${b.metricData.title}\n`);
+        } else if (b.type === 'table' && b.tableData) {
+          mdLines.push(`${simpleTableToMarkdown(b.tableData)}\n`);
+        } else if (b.type === 'mermaid') {
+          if (b.caption?.trim()) {
+            mdLines.push(`**${b.caption.trim()}**`);
+          }
+          mdLines.push(`\`\`\`mermaid\n${b.content}\n\`\`\`\n`);
+        } else if (b.type === 'voice') {
+          const voiceUrl = b.voiceData?.audioUrl || b.content;
+          const voiceTitle = b.caption || 'Voice Note';
+          if (voiceUrl) {
+            mdLines.push(`[🎙️ ${voiceTitle}](${voiceUrl})\n`);
+          } else {
+            mdLines.push(`**🎙️ ${voiceTitle}**\n`);
+          }
+          if (b.voiceData?.transcript?.trim()) {
+            mdLines.push(`> **Transkrip**: ${b.voiceData.transcript.trim()}\n`);
+          }
         } else if ('columns' in b && b.type === 'columns' && Array.isArray(b.columns)) {
           b.columns.forEach((col, colIdx) => {
             mdLines.push(`<!-- Kolom ${colIdx + 1} -->`);
@@ -2242,6 +2412,29 @@ export const BlockEditor: React.FC = () => {
             position
           );
           await handleUploadPdfForBlock(tempId, file);
+        } else if (
+          file.type.startsWith('audio/') ||
+          /\.(mp3|wav|m4a|webm|ogg|aac)$/i.test(file.name)
+        ) {
+          const tempId = `blk-voice-${stamp}`;
+          await insertBlocksAtDropPoint(
+            [
+              {
+                id: tempId,
+                type: 'voice',
+                content: '',
+                caption: file.name.replace(/\.[^/.]+$/, '') || 'Voice Note',
+                voiceData: {
+                  audioUrl: '',
+                  language: 'id-ID',
+                  transcript: ''
+                }
+              }
+            ],
+            targetBlockId,
+            position
+          );
+          await handleUploadAudioForBlock(tempId, file);
         } else if (
           file.type.startsWith('text/') ||
           /\.(md|markdown|txt)$/i.test(file.name)
@@ -2606,7 +2799,7 @@ export const BlockEditor: React.FC = () => {
                 }
               : undefined
         }
-        className={`${
+        className={`scroll-mt-20 ${
           isInsideColumn
             ? 'group/colblk relative flex items-start gap-1 py-0.5 rounded-lg transition'
             : 'group relative flex items-start gap-1.5 -ml-2 sm:-ml-16 pl-2 sm:pl-16 py-0.5 rounded-lg transition'
@@ -2817,6 +3010,21 @@ export const BlockEditor: React.FC = () => {
                       .join(', ');
                     triggerInlineAIExplain(
                       `Analisis Diagram "${block.chartData.title}" (${block.chartData.kind}): ${summary}`
+                    );
+                  } else if (block.type === 'table' && block.tableData) {
+                    triggerInlineAIExplain(
+                      `Analisis Tabel Sederhana:\n${simpleTableToMarkdown(block.tableData)}`
+                    );
+                  } else if (block.type === 'mermaid') {
+                    triggerInlineAIExplain(
+                      `Jelaskan atau bantu perbaiki diagram Mermaid berikut:\n\`\`\`mermaid\n${block.content}\n\`\`\``
+                    );
+                  } else if (block.type === 'voice') {
+                    const transcript = block.voiceData?.transcript?.trim();
+                    triggerInlineAIExplain(
+                      transcript
+                        ? `Rangkum dan buat poin penting dari Voice Note "${block.caption || 'Voice Note'}":\n${transcript}`
+                        : `Voice Note "${block.caption || 'Voice Note'}" (belum ada transkrip)`
                     );
                   } else if (block.type === 'columns' && block.columns) {
                     const combined = block.columns
@@ -4439,6 +4647,84 @@ export const BlockEditor: React.FC = () => {
             />
           )}
 
+          {/* Lightweight Simple Text Table Block (`/table`) */}
+          {block.type === 'table' && activeNote && (
+            <SimpleTableBlockView
+              block={block}
+              canEdit={canEdit}
+              onUpdateTable={(nextData: SimpleTableData, previewContent: string) =>
+                void handleBlockChange(block.id, {
+                  tableData: nextData,
+                  content: previewContent
+                })
+              }
+              onAskAI={(markdownTable) => {
+                triggerInlineAIExplain(`Analisis Tabel Sederhana:\n${markdownTable}`);
+                setIsAIDrawerOpen(true);
+              }}
+            />
+          )}
+
+          {/* Mermaid Diagram Block (`/mermaid`) */}
+          {block.type === 'mermaid' && activeNote && (
+            <MermaidBlockView
+              block={block}
+              theme={theme}
+              canEdit={canEdit}
+              onChangeCode={(nextCode) =>
+                void handleBlockChange(block.id, { content: nextCode })
+              }
+              onChangeCaption={(nextCaption) =>
+                void handleBlockChange(block.id, { caption: nextCaption })
+              }
+              onAskAI={(code) => {
+                triggerInlineAIExplain(
+                  `Jelaskan atau bantu perbaiki diagram Mermaid berikut:\n\`\`\`mermaid\n${code}\n\`\`\``
+                );
+                setIsAIDrawerOpen(true);
+              }}
+            />
+          )}
+
+          {/* Voice Note Recorder / Player / AI Transcript Block (`/voice`) */}
+          {block.type === 'voice' && activeNote && (
+            <VoiceBlockView
+              block={block}
+              canEdit={canEdit}
+              onUpdateVoice={(patch: {
+                voiceData: VoiceBlockData;
+                content: string;
+                caption?: string;
+              }) => void handleBlockChange(block.id, patch)}
+              onInsertTranscriptAsBlock={(transcript) => {
+                const clean = transcript.trim();
+                if (!clean || !activeNote || !canEdit) return;
+                void (async () => {
+                  const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+                  const newBlk: NoteBlock = {
+                    id: createBlockId(),
+                    type: 'text',
+                    content: clean
+                  };
+                  const nextBlocks = insertBlocksRelativeDeep(
+                    freshNote.blocks,
+                    block.id,
+                    'after',
+                    [newBlk]
+                  );
+                  await updateNoteBlocks(nextBlocks);
+                  setPendingFocusBlockId(newBlk.id);
+                })();
+              }}
+              onAskAI={(transcript, title) => {
+                triggerInlineAIExplain(
+                  `Rangkum dan buat poin penting dari Voice Note "${title}":\n${transcript}`
+                );
+                setIsAIDrawerOpen(true);
+              }}
+            />
+          )}
+
           {/* Notion-Style Multi-Column Layout Container (2, 3, 4, or 5 Columns) */}
           {block.type === 'columns' && !isInsideColumn && (() => {
             const cols = block.columns || [];
@@ -4652,7 +4938,7 @@ export const BlockEditor: React.FC = () => {
                   Lepaskan untuk Menyisipkan ke Catatan
                 </p>
                 <p className="text-xs text-text-secondary">
-                  Mendukung Gambar, Dokumen PDF (AI Reader), dan Teks/Markdown
+                  Mendukung Gambar, Audio/Voice Note, Dokumen PDF (AI Reader), dan Teks/Markdown
                 </p>
               </div>
             </div>
@@ -5120,6 +5406,22 @@ export const BlockEditor: React.FC = () => {
 
               {mainViewMode === 'document' && activeNote && (
                 <>
+                  {tocHeadings.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowTocOutline((v) => !v)}
+                      className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition ${
+                        showTocOutline
+                          ? 'bg-accent-strong/15 text-accent-strong'
+                          : 'text-text-secondary hover:bg-subtle hover:text-text-primary'
+                      }`}
+                      title="Tampilkan / Sembunyikan Daftar Isi (Outline)"
+                    >
+                      <ListTree className="w-3.5 h-3.5" />
+                      <span className="hidden lg:inline">Daftar Isi</span>
+                    </button>
+                  )}
+
                   {canEdit && (
                     <button
                       type="button"
@@ -5312,7 +5614,8 @@ export const BlockEditor: React.FC = () => {
                 </div>
               )}
 
-              {/* Clean Blank Notion Page Container */}
+              {/* Clean Blank Notion Page Container + Floating TOC Rail */}
+              <div className="flex-1 flex items-start relative">
               <div
                 className={`w-full mx-auto pt-12 pb-28 flex-1 flex flex-col transition-all ${
                   activeNote.isFullWidth
@@ -5735,6 +6038,15 @@ export const BlockEditor: React.FC = () => {
                   </div>
                 )}
               </div>
+
+              <FloatingTocOutline
+                blocks={activeNote.blocks}
+                noteTitle={activeNote.title}
+                isOpen={showTocOutline}
+                onToggleOpen={() => setShowTocOutline((v) => !v)}
+                onSelectBlock={(blkId) => scrollToBlockById(blkId)}
+              />
+            </div>
             </div>
           ) : (
             <div className="py-20 text-center space-y-3 my-auto">

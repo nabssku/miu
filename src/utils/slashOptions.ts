@@ -22,12 +22,15 @@ import {
   Link2,
   List,
   ListOrdered,
+  Mic,
   Minus,
   PieChart,
   Quote,
   Sigma,
+  Table,
   Type,
-  Video
+  Video,
+  Workflow
 } from 'lucide-react';
 import type { BlockType, ChartKind } from '../types/miu';
 
@@ -148,6 +151,26 @@ export const SLASH_OPTIONS: SlashOptionItem[] = [
     desc: 'Unggah gambar ke Cloud Catatan',
     category: 'media',
     Icon: ImageIcon
+  },
+  {
+    id: 'table',
+    type: 'table',
+    label: 'Simple Table',
+    shortcut: 'table',
+    keywords: ['table', 'tabel', 'simple', 'grid', 'baris', 'kolom'],
+    desc: 'Tabel teks sederhana untuk perbandingan & ringkasan',
+    category: 'data',
+    Icon: Table
+  },
+  {
+    id: 'mermaid',
+    type: 'mermaid',
+    label: 'Diagram Mermaid',
+    shortcut: 'mermaid',
+    keywords: ['mermaid', 'diagram', 'flowchart', 'mindmap', 'sequence', 'alur', 'bagan'],
+    desc: 'Flowchart, mindmap, & sequence diagram dari teks',
+    category: 'data',
+    Icon: Workflow
   },
   {
     id: 'database',
@@ -274,6 +297,16 @@ export const SLASH_OPTIONS: SlashOptionItem[] = [
     desc: 'Unggah file PDF & ekstrak teks untuk AI',
     category: 'media',
     Icon: FileText
+  },
+  {
+    id: 'voice',
+    type: 'voice',
+    label: 'Voice Note',
+    shortcut: 'voice',
+    keywords: ['voice', 'audio', 'rekam', 'mic', 'suara', 'transkrip'],
+    desc: 'Rekam atau unggah audio dengan player & transkrip AI',
+    category: 'media',
+    Icon: Mic
   },
   {
     id: 'subpage',

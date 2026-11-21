@@ -365,6 +365,8 @@ export async function uploadImageToCloudinary(
   }
 }
 
+export const uploadMediaToCloud = uploadImageToCloudinary;
+
 // ============================================================================
 // GOOGLE OAUTH 2.0 (GOOGLE IDENTITY SERVICES)
 // ============================================================================

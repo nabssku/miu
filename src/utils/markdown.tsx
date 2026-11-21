@@ -481,7 +481,7 @@ export function parseMarkdownToNotionBlocks(markdown: string): Array<Omit<NoteBl
       continue;
     }
 
-    // 1. Fenced Code block
+    // 1. Fenced Code block (or Mermaid diagram)
     if (trimmed.startsWith('```')) {
       const language = trimmed.slice(3).trim().toLowerCase() || 'javascript';
       const codeLines: string[] = [];
@@ -491,11 +491,19 @@ export function parseMarkdownToNotionBlocks(markdown: string): Array<Omit<NoteBl
         i++;
       }
       i++;
-      blocks.push({
-        type: 'code',
-        language,
-        content: codeLines.join('\n')
-      });
+      if (language === 'mermaid') {
+        blocks.push({
+          type: 'mermaid',
+          caption: 'Diagram Mermaid',
+          content: codeLines.join('\n')
+        });
+      } else {
+        blocks.push({
+          type: 'code',
+          language,
+          content: codeLines.join('\n')
+        });
+      }
       continue;
     }
 
@@ -526,28 +534,35 @@ export function parseMarkdownToNotionBlocks(markdown: string): Array<Omit<NoteBl
       continue;
     }
 
-    // 3. Markdown Table -> Convert into clean structured bullet rows (skipping separator lines)
+    // 3. Markdown Table -> Native Simple Table block
     if (
       trimmed.startsWith('|') &&
       i + 1 < lines.length &&
       isMarkdownTableSeparator(lines[i + 1])
     ) {
-      const headers = splitMarkdownTableRow(trimmed).map((h) => stripInlineMarkdown(h));
+      const headers = splitMarkdownTableRow(trimmed).map((h) => h.trim());
+      const bodyRows: string[][] = [];
       i += 2; // skip header & separator
       while (i < lines.length && lines[i].trim().startsWith('|')) {
         if (!isMarkdownTableSeparator(lines[i])) {
-          const cells = splitMarkdownTableRow(lines[i]);
-          const formattedRow = cells
-            .map((cell, idx) => (headers[idx] ? `**${headers[idx]}**: ${cell}` : cell))
-            .join(' • ');
-          if (formattedRow.trim()) {
-            blocks.push({
-              type: 'bullet',
-              content: formattedRow
-            });
-          }
+          bodyRows.push(splitMarkdownTableRow(lines[i]).map((c) => c.trim()));
         }
         i++;
+      }
+      const rawRows = [headers, ...bodyRows].filter((r) => r.length > 0);
+      const colCount = Math.max(2, ...rawRows.map((r) => r.length));
+      const normalizedRows = rawRows.map((r) =>
+        Array.from({ length: colCount }, (_, idx) => r[idx] || '')
+      );
+      if (normalizedRows.length > 0) {
+        blocks.push({
+          type: 'table',
+          content: headers.map((h) => stripInlineMarkdown(h)).filter(Boolean).join(' | '),
+          tableData: {
+            hasHeaderRow: true,
+            rows: normalizedRows
+          }
+        });
       }
       continue;
     }

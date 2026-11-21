@@ -546,6 +546,28 @@ function serializeBlockListForPrompt(
           : undefined;
       const computed = computeMetricValue(srcBlock?.databaseData, activeBlocks, b.metricData);
       lines.push(`[Metrik ${b.metricData.title}: ${computed.displayValue} (${computed.subtitle})]`);
+    } else if (b.type === 'table' && b.tableData?.rows?.length) {
+      const tableMd = b.tableData.rows
+        .slice(0, 40)
+        .map((r, rIdx) => {
+          const line = `| ${r.map((c) => (c || '').replace(/\|/g, '\\|')).join(' | ')} |`;
+          if (rIdx === 0 && b.tableData?.hasHeaderRow !== false) {
+            const sep = `| ${r.map(() => '---').join(' | ')} |`;
+            return `${line}\n${sep}`;
+          }
+          return line;
+        })
+        .join('\n');
+      lines.push(`[Tabel Sederhana]\n${tableMd}`);
+    } else if (b.type === 'mermaid') {
+      lines.push(`[Diagram Mermaid${b.caption ? `: ${b.caption}` : ''}]\n\`\`\`mermaid\n${b.content}\n\`\`\``);
+    } else if (b.type === 'voice') {
+      const title = b.caption || 'Voice Note';
+      const dur = b.voiceData?.durationSec ? `${Math.round(b.voiceData.durationSec)}s` : '';
+      const transcript = b.voiceData?.transcript?.trim() || '';
+      lines.push(
+        `[Voice Note: ${title}${dur ? ` (${dur})` : ''}]${transcript ? `\nTranskrip: ${transcript}` : ''}`
+      );
     } else if ('columns' in b && b.type === 'columns' && Array.isArray(b.columns)) {
       b.columns.forEach((col, colIdx) => {
         lines.push(`[Kolom ${colIdx + 1}/${b.columns?.length || 0}]`);

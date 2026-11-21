@@ -57,7 +57,23 @@ export type BlockType =
   | 'database'
   | 'chart'
   | 'form'
-  | 'metric';
+  | 'metric'
+  | 'table'
+  | 'mermaid'
+  | 'voice';
+
+export interface SimpleTableData {
+  hasHeaderRow?: boolean;
+  rows: string[][];
+}
+
+export interface VoiceBlockData {
+  audioUrl: string;
+  durationSec?: number;
+  transcript?: string;
+  language?: 'id-ID' | 'en-US';
+  createdAt?: number;
+}
 
 export interface NoteBlockBase {
   id: string;
@@ -82,6 +98,8 @@ export interface NoteBlockBase {
   chartData?: ChartBlockData;
   formData?: FormBlockData;
   metricData?: MetricBlockData;
+  tableData?: SimpleTableData;
+  voiceData?: VoiceBlockData;
 }
 
 export interface NoteColumn {

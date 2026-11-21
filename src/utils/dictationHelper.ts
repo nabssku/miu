@@ -79,6 +79,12 @@ export function getBlockTypeLabel(type?: BlockType): string {
       return 'Formulir';
     case 'metric':
       return 'Metrik';
+    case 'table':
+      return 'Tabel Sederhana';
+    case 'mermaid':
+      return 'Diagram Mermaid';
+    case 'voice':
+      return 'Voice Note';
     case 'divider':
       return 'Pemisah';
     default:
