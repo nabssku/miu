@@ -167,6 +167,12 @@ import {
   SidebarWhatsNewButton,
   type SidebarSectionId
 } from './SidebarInboxPopover';
+import {
+  SidebarNoteActionButtons,
+  SidebarNoteContextMenu,
+  type SidebarNoteMenuTarget
+} from './SidebarNoteContextMenu';
+import { SidePeekPanel } from './SidePeekPanel';
 import { PustakaPageView, type PustakaSkillSubTab } from './PustakaPageView';
 import {
   loadActiveSkillNoteIds,
@@ -255,6 +261,13 @@ export const BlockEditor: React.FC = () => {
     useState<SidebarSectionId | null>(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [isInboxOpen, setIsInboxOpen] = useState(false);
+  const [sidebarNoteMenuTarget, setSidebarNoteMenuTarget] =
+    useState<SidebarNoteMenuTarget | null>(null);
+  const [sidePeekNoteId, setSidePeekNoteId] = useState<string | null>(null);
+  const sidePeekNote = useMemo(
+    () => (sidePeekNoteId ? allNotes.find((n) => n.id === sidePeekNoteId) || null : null),
+    [allNotes, sidePeekNoteId]
+  );
   const [pustakaSubTab, setPustakaSubTab] = useState<PustakaSkillSubTab>('active');
   const [activeSkillIdsState, setActiveSkillIdsState] = useState<string[]>(() =>
     loadActiveSkillNoteIds()
@@ -1228,6 +1241,69 @@ export const BlockEditor: React.FC = () => {
       const remaining = myNotes.filter((n) => !idsToDelete.has(n.id));
       if (remaining[0]) setActiveNoteId(remaining[0].id);
     }
+    if (sidePeekNoteId && idsToDelete.has(sidePeekNoteId)) {
+      setSidePeekNoteId(null);
+    }
+  };
+
+  const handleUpdateSpecificNote = async (
+    targetNoteId: string,
+    patch: Partial<NoteRecord>
+  ) => {
+    const fresh = await db.notes.get(targetNoteId);
+    if (!fresh) return;
+    const updatedAt = patch.updatedAt || Date.now();
+    const nextNote: NoteRecord = { ...fresh, ...patch, updatedAt };
+    await db.notes.update(targetNoteId, { ...patch, updatedAt });
+    scheduleNeonSave(nextNote);
+  };
+
+  const handleCopySpecificNoteLink = (targetNote: NoteRecord) => {
+    const nextShare: NoteShareSettings = {
+      ...(targetNote.shareSettings || {
+        isPublicLink: true,
+        publicRole: 'view',
+        collaborators: []
+      }),
+      isPublicLink: true,
+      publicRole: targetNote.shareSettings?.publicRole || 'view'
+    };
+    void handleUpdateSpecificNote(targetNote.id, { shareSettings: nextShare });
+    const url = `${window.location.origin}/app?share=${encodeURIComponent(targetNote.id)}`;
+    void navigator.clipboard.writeText(url);
+  };
+
+  const handleToggleWikiOnNote = async (targetNote: NoteRecord) => {
+    const hasWikiBanner = targetNote.blocks.some(
+      (b) => b.type === 'callout' && b.content.includes('Halaman Wiki Terverifikasi')
+    );
+    const nextBlocks: NoteBlock[] = hasWikiBanner
+      ? targetNote.blocks.filter(
+          (b) =>
+            !(b.type === 'callout' && b.content.includes('Halaman Wiki Terverifikasi'))
+        )
+      : [
+          {
+            id: `blk-wiki-${Date.now()}`,
+            type: 'callout',
+            calloutIcon: '🏛️',
+            content: `Halaman Wiki Terverifikasi • Pemilik: ${
+              targetNote.ownerName || currentUser?.name || 'Pengguna Miu'
+            }`
+          },
+          ...targetNote.blocks
+        ];
+    await handleUpdateSpecificNote(targetNote.id, {
+      blocks:
+        nextBlocks.length > 0
+          ? nextBlocks
+          : [{ id: `blk-${Date.now()}`, type: 'text', content: '' }]
+    });
+  };
+
+  const handleOpenNoteInNewTab = (targetNote: NoteRecord) => {
+    const url = `${window.location.origin}/app?share=${encodeURIComponent(targetNote.id)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
 
   const patchBlockByIdInDb = async (
@@ -2847,7 +2923,22 @@ export const BlockEditor: React.FC = () => {
               e.stopPropagation();
               void handleMoveNoteParent(sourceId, note.id);
             }}
-            onClick={() => openDocumentNote(note.id)}
+            onClick={(e) => {
+              if (e.altKey) {
+                setSidePeekNoteId(note.id);
+              } else {
+                openDocumentNote(note.id);
+              }
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setSidebarNoteMenuTarget({
+                note,
+                x: e.clientX,
+                y: e.clientY
+              });
+            }}
             style={{ paddingLeft: `${8 + depth * 14}px` }}
             className={`group flex items-center justify-between gap-1 pr-1.5 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
               isPageDropTarget
@@ -2879,41 +2970,12 @@ export const BlockEditor: React.FC = () => {
               <span className="truncate">{note.title || 'Tanpa Judul'}</span>
             </div>
 
-            <div className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 shrink-0">
-              {canAddChildHere && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void handleCreateNote(note.id, true);
-                  }}
-                  className="p-0.5 rounded hover:bg-subtle text-text-secondary hover:text-accent-strong"
-                  title="Tambah Subhalaman di dalam halaman ini"
-                >
-                  <Plus className="w-3 h-3" />
-                </button>
-              )}
-              {!isSharedSection && isNoteOwner && (
-                <>
-                  <button
-                    type="button"
-                    onClick={(e) => void handleDuplicateNote(note, e)}
-                    className="p-0.5 rounded hover:bg-subtle text-text-secondary hover:text-text-primary"
-                    title="Duplikat"
-                  >
-                    <Copy className="w-3 h-3" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => void handleDeleteNote(note, e)}
-                    className="p-0.5 rounded hover:bg-subtle text-text-secondary hover:text-rose-500"
-                    title="Hapus"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </>
-              )}
-            </div>
+            <SidebarNoteActionButtons
+              note={note}
+              canAddSubpage={Boolean(canAddChildHere)}
+              onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
+              onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
+            />
           </div>
 
           {hasChildren && !isCollapsed && (
@@ -5485,21 +5547,42 @@ export const BlockEditor: React.FC = () => {
                     const isSelected =
                       note.id === activeNoteId && mainViewMode === 'document';
                     return (
-                      <button
+                      <div
                         key={note.id}
-                        type="button"
-                        onClick={() => openDocumentNote(note.id)}
-                        className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-left transition ${
+                        onClick={(e) => {
+                          if (e.altKey) {
+                            setSidePeekNoteId(note.id);
+                          } else {
+                            openDocumentNote(note.id);
+                          }
+                        }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setSidebarNoteMenuTarget({
+                            note,
+                            x: e.clientX,
+                            y: e.clientY
+                          });
+                        }}
+                        className={`group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
                           isSelected
                             ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
                             : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
                         }`}
                       >
-                        <span className="text-[15px] leading-none shrink-0">
-                          {note.icon || '📄'}
-                        </span>
-                        <span className="truncate">{note.title || 'Tanpa Judul'}</span>
-                      </button>
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <span className="text-[15px] leading-none shrink-0">
+                            {note.icon || '📄'}
+                          </span>
+                          <span className="truncate">{note.title || 'Tanpa Judul'}</span>
+                        </div>
+                        <SidebarNoteActionButtons
+                          note={note}
+                          onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
+                          onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
+                        />
+                      </div>
                     );
                   })}
                 </div>
@@ -5515,23 +5598,44 @@ export const BlockEditor: React.FC = () => {
                             Favorit
                           </div>
                           {favoriteNotes.map((note) => (
-                            <button
+                            <div
                               key={`fav-${note.id}`}
-                              type="button"
-                              onClick={() => openDocumentNote(note.id)}
-                              className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-left transition ${
+                              onClick={(e) => {
+                                if (e.altKey) {
+                                  setSidePeekNoteId(note.id);
+                                } else {
+                                  openDocumentNote(note.id);
+                                }
+                              }}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setSidebarNoteMenuTarget({
+                                  note,
+                                  x: e.clientX,
+                                  y: e.clientY
+                                });
+                              }}
+                              className={`group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
                                 note.id === activeNoteId && mainViewMode === 'document'
                                   ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
                                   : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
                               }`}
                             >
-                              <span className="text-[15px] leading-none shrink-0">
-                                {note.icon || '📄'}
-                              </span>
-                              <span className="truncate flex-1">
-                                {note.title || 'Tanpa Judul'}
-                              </span>
-                            </button>
+                              <div className="flex items-center gap-2 min-w-0 flex-1">
+                                <span className="text-[15px] leading-none shrink-0">
+                                  {note.icon || '📄'}
+                                </span>
+                                <span className="truncate flex-1">
+                                  {note.title || 'Tanpa Judul'}
+                                </span>
+                              </div>
+                              <SidebarNoteActionButtons
+                                note={note}
+                                onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
+                                onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
+                              />
+                            </div>
                           ))}
                         </div>
                       );
@@ -5547,23 +5651,44 @@ export const BlockEditor: React.FC = () => {
                             Terbaru
                           </div>
                           {recentList.map((note) => (
-                            <button
+                            <div
                               key={`rec-${note.id}`}
-                              type="button"
-                              onClick={() => openDocumentNote(note.id)}
-                              className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-left transition ${
+                              onClick={(e) => {
+                                if (e.altKey) {
+                                  setSidePeekNoteId(note.id);
+                                } else {
+                                  openDocumentNote(note.id);
+                                }
+                              }}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setSidebarNoteMenuTarget({
+                                  note,
+                                  x: e.clientX,
+                                  y: e.clientY
+                                });
+                              }}
+                              className={`group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
                                 note.id === activeNoteId && mainViewMode === 'document'
                                   ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
                                   : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
                               }`}
                             >
-                              <span className="text-[15px] leading-none shrink-0">
-                                {note.icon || '📄'}
-                              </span>
-                              <span className="truncate flex-1">
-                                {note.title || 'Tanpa Judul'}
-                              </span>
-                            </button>
+                              <div className="flex items-center gap-2 min-w-0 flex-1">
+                                <span className="text-[15px] leading-none shrink-0">
+                                  {note.icon || '📄'}
+                                </span>
+                                <span className="truncate flex-1">
+                                  {note.title || 'Tanpa Judul'}
+                                </span>
+                              </div>
+                              <SidebarNoteActionButtons
+                                note={note}
+                                onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
+                                onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
+                              />
+                            </div>
                           ))}
                         </div>
                       );
@@ -5604,17 +5729,38 @@ export const BlockEditor: React.FC = () => {
                             Disematkan
                           </div>
                           {pinnedNotes.map((note) => (
-                            <button
+                            <div
                               key={`pin-${note.id}`}
-                              type="button"
-                              onClick={() => openDocumentNote(note.id)}
-                              className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary text-left transition"
+                              onClick={(e) => {
+                                if (e.altKey) {
+                                  setSidePeekNoteId(note.id);
+                                } else {
+                                  openDocumentNote(note.id);
+                                }
+                              }}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setSidebarNoteMenuTarget({
+                                  note,
+                                  x: e.clientX,
+                                  y: e.clientY
+                                });
+                              }}
+                              className="group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary cursor-pointer transition"
                             >
-                              <span className="text-[15px] leading-none shrink-0">
-                                {note.icon || '📌'}
-                              </span>
-                              <span className="truncate">{note.title || 'Tanpa Judul'}</span>
-                            </button>
+                              <div className="flex items-center gap-2 min-w-0 flex-1">
+                                <span className="text-[15px] leading-none shrink-0">
+                                  {note.icon || '📌'}
+                                </span>
+                                <span className="truncate">{note.title || 'Tanpa Judul'}</span>
+                              </div>
+                              <SidebarNoteActionButtons
+                                note={note}
+                                onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
+                                onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
+                              />
+                            </div>
                           ))}
                         </div>
                       );
@@ -5675,17 +5821,38 @@ export const BlockEditor: React.FC = () => {
                             Catatan Rapat AI
                           </div>
                           {voiceNotes.map((vn) => (
-                            <button
+                            <div
                               key={`vn-${vn.id}`}
-                              type="button"
-                              onClick={() => openDocumentNote(vn.id)}
-                              className="w-full flex items-center gap-2 px-2 py-1 rounded-md text-[13.5px] text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary text-left transition"
+                              onClick={(e) => {
+                                if (e.altKey) {
+                                  setSidePeekNoteId(vn.id);
+                                } else {
+                                  openDocumentNote(vn.id);
+                                }
+                              }}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setSidebarNoteMenuTarget({
+                                  note: vn,
+                                  x: e.clientX,
+                                  y: e.clientY
+                                });
+                              }}
+                              className="group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary cursor-pointer transition"
                             >
-                              <span className="text-[15px] leading-none shrink-0">
-                                {vn.icon || '🎙️'}
-                              </span>
-                              <span className="truncate">{vn.title || 'Catatan Rapat'}</span>
-                            </button>
+                              <div className="flex items-center gap-2 min-w-0 flex-1">
+                                <span className="text-[15px] leading-none shrink-0">
+                                  {vn.icon || '🎙️'}
+                                </span>
+                                <span className="truncate">{vn.title || 'Catatan Rapat'}</span>
+                              </div>
+                              <SidebarNoteActionButtons
+                                note={vn}
+                                onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
+                                onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
+                              />
+                            </div>
                           ))}
                           <button
                             type="button"
@@ -6912,7 +7079,64 @@ export const BlockEditor: React.FC = () => {
             </div>
           )}
         </div>
+
+        {/* Right Side Peek Panel (resizable width on left edge, matches image_3.png & image_4.png) */}
+        <SidePeekPanel
+          note={sidePeekNote}
+          allNotes={allNotes}
+          onClose={() => setSidePeekNoteId(null)}
+          onExpandToFullPage={(nId) => openDocumentNote(nId)}
+          onOpenNoteInSidePeek={(nId) => setSidePeekNoteId(nId)}
+          onUpdateSidePeekNote={handleUpdateSpecificNote}
+          onCopyLink={handleCopySpecificNoteLink}
+          onDuplicate={(targetNote) => {
+            const fakeEvent = { stopPropagation: () => {} } as React.MouseEvent;
+            void handleDuplicateNote(targetNote, fakeEvent);
+          }}
+          onDelete={(targetNote) => {
+            const fakeEvent = { stopPropagation: () => {} } as React.MouseEvent;
+            void handleDeleteNote(targetNote, fakeEvent);
+          }}
+        />
       </div>
+
+      {/* Sidebar Note ••• / Right-Click Context Menu (matches image_2.png) */}
+      <SidebarNoteContextMenu
+        target={sidebarNoteMenuTarget}
+        allNotes={allNotes}
+        currentUserName={currentUser?.name}
+        onClose={() => setSidebarNoteMenuTarget(null)}
+        onToggleFavorite={(targetNote) => {
+          void handleUpdateSpecificNote(targetNote.id, {
+            isFavorite: !targetNote.isFavorite
+          });
+        }}
+        onCopyLink={handleCopySpecificNoteLink}
+        onDuplicate={(targetNote) => {
+          const fakeEvent = { stopPropagation: () => {} } as React.MouseEvent;
+          void handleDuplicateNote(targetNote, fakeEvent);
+        }}
+        onRename={(targetNote, newTitle, newIcon) => {
+          void handleUpdateSpecificNote(targetNote.id, {
+            title: newTitle,
+            ...(newIcon ? { icon: newIcon } : {})
+          });
+        }}
+        onMoveToParent={(noteId, newParentId) => {
+          void handleMoveNoteParent(noteId, newParentId);
+        }}
+        onDelete={(targetNote) => {
+          const fakeEvent = { stopPropagation: () => {} } as React.MouseEvent;
+          void handleDeleteNote(targetNote, fakeEvent);
+        }}
+        onToggleWiki={(targetNote) => {
+          void handleToggleWikiOnNote(targetNote);
+        }}
+        onOpenInNewTab={handleOpenNoteInNewTab}
+        onOpenInSidePeek={(targetNote) => {
+          setSidePeekNoteId(targetNote.id);
+        }}
+      />
 
       {/* Share, Comments & Export Modal */}
       {showShareModal && activeNote && (
