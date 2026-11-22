@@ -880,6 +880,39 @@ export const BlockEditor: React.FC = () => {
     [allNotes, currentUser]
   );
 
+  // Notes displayed in the sidebar "Dibagikan" section:
+  // includes notes shared with me AND my own notes with active sharing (public link or collaborators) + their subpages
+  const activeSharedNotes = useMemo(() => {
+    const includedIds = new Set<string>();
+    for (const n of sharedWithMeNotes) {
+      includedIds.add(n.id);
+    }
+    for (const n of myNotes) {
+      const hasPublicLink = Boolean(n.shareSettings?.isPublicLink);
+      const hasCollaborators =
+        Array.isArray(n.shareSettings?.collaborators) &&
+        n.shareSettings.collaborators.length > 0;
+      if (hasPublicLink || hasCollaborators) {
+        includedIds.add(n.id);
+      }
+    }
+    let added = true;
+    while (added) {
+      added = false;
+      for (const candidate of allNotes) {
+        if (
+          candidate.parentId &&
+          includedIds.has(candidate.parentId) &&
+          !includedIds.has(candidate.id)
+        ) {
+          includedIds.add(candidate.id);
+          added = true;
+        }
+      }
+    }
+    return allNotes.filter((n) => includedIds.has(n.id));
+  }, [allNotes, myNotes, sharedWithMeNotes]);
+
   const favoriteNotes = useMemo(() => myNotes.filter((n) => n.isFavorite), [myNotes]);
 
   const visibleNotes = useMemo(() => {
@@ -3651,6 +3684,28 @@ export const BlockEditor: React.FC = () => {
               <span className="text-[15px] leading-none shrink-0">{note.icon || '📄'}</span>
               <span className="truncate">{note.title || 'Tanpa Judul'}</span>
             </div>
+
+            {isSharedSection && (
+              <span
+                className="inline-flex items-center gap-0.5 text-[10px] text-sky-600/80 dark:text-sky-400/85 shrink-0 group-hover:hidden"
+                title={
+                  note.shareSettings?.isPublicLink
+                    ? note.shareSettings.collaborators?.length
+                      ? `Tautan publik aktif • ${note.shareSettings.collaborators.length} kolaborator`
+                      : 'Tautan publik aktif'
+                    : note.shareSettings?.collaborators?.length
+                      ? `Dibagikan ke ${note.shareSettings.collaborators.length} kolaborator`
+                      : 'Dibagikan dengan Anda'
+                }
+              >
+                <Globe className="w-3 h-3" />
+                {Boolean(note.shareSettings?.collaborators?.length) && (
+                  <span className="font-mono font-semibold">
+                    {note.shareSettings?.collaborators?.length}
+                  </span>
+                )}
+              </span>
+            )}
 
             <SidebarNoteActionButtons
               note={note}
@@ -6925,11 +6980,16 @@ export const BlockEditor: React.FC = () => {
                     if (secId === 'shared') {
                       return (
                         <div key="sec-shared" className="space-y-0.5">
-                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
-                            Dibagikan
+                          <div className="px-2 py-0.5 flex items-center justify-between text-[11.5px] font-medium text-text-secondary">
+                            <span>Dibagikan</span>
+                            {activeSharedNotes.length > 0 && (
+                              <span className="text-[10px] font-mono text-sky-600 dark:text-sky-400">
+                                {activeSharedNotes.length}
+                              </span>
+                            )}
                           </div>
-                          {sharedWithMeNotes.length > 0 &&
-                            renderSidebarPageTree(sharedWithMeNotes, null, 0, true)}
+                          {activeSharedNotes.length > 0 &&
+                            renderSidebarPageTree(activeSharedNotes, null, 0, true)}
                           <button
                             type="button"
                             onClick={() => setShowShareModal(true)}
