@@ -66,24 +66,59 @@ export const SIDEBAR_SECTION_CATALOG: SidebarSectionMeta[] = [
 ];
 
 export const DEFAULT_SIDEBAR_SECTIONS: SidebarSectionId[] = [
+  'favorites',
+  'recent',
   'private',
   'shared',
+  'database_views',
   'apps',
   'developer'
 ];
 
-const SIDEBAR_SECTIONS_STORAGE_KEY = 'miu_sidebar_sections_v1';
+const SIDEBAR_SECTIONS_STORAGE_KEY = 'miu_sidebar_sections_v2';
+const LEGACY_SIDEBAR_SECTIONS_KEY = 'miu_sidebar_sections_v1';
 
 export function loadSidebarSections(): SidebarSectionId[] {
   if (typeof window === 'undefined') return DEFAULT_SIDEBAR_SECTIONS;
   try {
-    const raw = window.localStorage.getItem(SIDEBAR_SECTIONS_STORAGE_KEY);
-    if (!raw) return DEFAULT_SIDEBAR_SECTIONS;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return DEFAULT_SIDEBAR_SECTIONS;
     const validIds = new Set(SIDEBAR_SECTION_CATALOG.map((s) => s.id));
-    const filtered = parsed.filter((id): id is SidebarSectionId => validIds.has(id));
-    return filtered.length > 0 ? filtered : DEFAULT_SIDEBAR_SECTIONS;
+    const rawV2 = window.localStorage.getItem(SIDEBAR_SECTIONS_STORAGE_KEY);
+    if (rawV2) {
+      const parsed = JSON.parse(rawV2);
+      if (Array.isArray(parsed)) {
+        const filtered = parsed.filter((id): id is SidebarSectionId =>
+          validIds.has(id)
+        );
+        if (filtered.length > 0) return filtered;
+      }
+    }
+
+    // Migrate from v1 while ensuring core sections ('private', 'shared', 'apps', 'developer') are restored
+    const rawV1 = window.localStorage.getItem(LEGACY_SIDEBAR_SECTIONS_KEY);
+    if (rawV1) {
+      const parsedV1 = JSON.parse(rawV1);
+      if (Array.isArray(parsedV1)) {
+        const filteredV1 = parsedV1.filter((id): id is SidebarSectionId =>
+          validIds.has(id)
+        );
+        const merged = Array.from(
+          new Set<SidebarSectionId>([
+            ...filteredV1,
+            'private',
+            'shared',
+            'apps',
+            'developer'
+          ])
+        );
+        window.localStorage.setItem(
+          SIDEBAR_SECTIONS_STORAGE_KEY,
+          JSON.stringify(merged)
+        );
+        return merged;
+      }
+    }
+
+    return DEFAULT_SIDEBAR_SECTIONS;
   } catch {
     return DEFAULT_SIDEBAR_SECTIONS;
   }
@@ -161,20 +196,25 @@ export const AddSidebarSectionPopover: React.FC<AddSidebarSectionPopoverProps> =
     };
   }, [onClose]);
 
-  const groups: Array<'Halaman' | 'Obrolan' | 'Rapat'> = ['Halaman', 'Obrolan', 'Rapat'];
+  const groups: Array<'Utama' | 'Halaman' | 'Obrolan' | 'Rapat'> = [
+    'Utama',
+    'Halaman',
+    'Obrolan',
+    'Rapat'
+  ];
   const q = query.trim().toLowerCase();
 
   return (
     <div
       ref={ref}
-      className="w-56 rounded-2xl bg-surface border border-border-subtle shadow-[0_18px_46px_-12px_rgba(15,23,42,0.24)] dark:shadow-[0_20px_50px_-10px_rgba(0,0,0,0.75)] p-2.5 space-y-2.5 z-50 text-[13px] text-text-primary select-none"
+      className="w-60 rounded-2xl bg-surface border border-border-subtle shadow-[0_18px_46px_-12px_rgba(15,23,42,0.24)] dark:shadow-[0_20px_50px_-10px_rgba(0,0,0,0.75)] p-2.5 space-y-2.5 z-50 text-[13px] text-text-primary select-none"
     >
       <div className="relative">
         <input
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Cari bagian..."
+          placeholder="Cari bagian (Privat, Favorit...)"
           autoFocus
           className="w-full bg-subtle/40 border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-text-primary placeholder:text-text-secondary/65 focus:outline-none focus:border-sky-500"
         />
@@ -213,9 +253,16 @@ export const AddSidebarSectionPopover: React.FC<AddSidebarSectionPopoverProps> =
                       {renderSidebarSectionIcon(item.id, 'w-4 h-4 text-text-primary shrink-0')}
                       <span className="truncate">{item.label}</span>
                     </span>
-                    {item.hasChevron && (
-                      <ChevronRight className="w-3.5 h-3.5 text-text-secondary shrink-0" />
-                    )}
+                    <span className="inline-flex items-center gap-1 shrink-0">
+                      {isAdded && (
+                        <span className="text-[10.5px] font-semibold text-sky-600 dark:text-sky-400">
+                          Aktif
+                        </span>
+                      )}
+                      {item.hasChevron && (
+                        <ChevronRight className="w-3.5 h-3.5 text-text-secondary shrink-0" />
+                      )}
+                    </span>
                   </button>
                 );
               })}

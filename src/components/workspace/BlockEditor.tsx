@@ -157,6 +157,7 @@ import {
 import { PageActionsMenu } from './PageActionsMenu';
 import {
   AddSidebarSectionPopover,
+  DEFAULT_SIDEBAR_SECTIONS,
   loadSidebarSections,
   renderSidebarSectionIcon,
   saveSidebarSections,
@@ -2988,10 +2989,7 @@ export const BlockEditor: React.FC = () => {
       return (
         <div key={note.id} className="space-y-0.5 relative">
           {isPageDropTarget && dropTargetPosition === 'before' && (
-            <div
-              style={{ marginLeft: `${8 + depth * 14}px` }}
-              className="h-[2px] bg-[#2383E2] rounded-full pointer-events-none"
-            />
+            <div className="h-[2px] bg-[#2383E2] rounded-full mx-1.5 pointer-events-none" />
           )}
           <div
             draggable={Boolean(isNoteOwner && !isSharedSection)}
@@ -3043,8 +3041,7 @@ export const BlockEditor: React.FC = () => {
                 y: e.clientY
               });
             }}
-            style={{ paddingLeft: `${8 + depth * 14}px` }}
-            className={`group flex items-center justify-between gap-1 pr-1.5 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
+            className={`group flex items-center justify-between gap-1 pl-1.5 pr-1.5 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
               isPageDropTarget && dropTargetPosition === 'inside'
                 ? 'bg-[#2383E2]/15 ring-1 ring-[#2383E2] text-text-primary'
                 : isSelected && mainViewMode === 'document'
@@ -3052,7 +3049,7 @@ export const BlockEditor: React.FC = () => {
                   : 'text-text-secondary hover:bg-text-primary/[0.04] dark:hover:bg-white/[0.05] hover:text-text-primary'
             } ${draggedNoteId === note.id ? 'opacity-45' : ''}`}
           >
-            <div className="flex items-center gap-2 min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 min-w-0 flex-1">
               {hasChildren ? (
                 <button
                   type="button"
@@ -3060,7 +3057,7 @@ export const BlockEditor: React.FC = () => {
                     e.stopPropagation();
                     setCollapsedParents((prev) => ({ ...prev, [note.id]: !prev[note.id] }));
                   }}
-                  className="p-0.5 -ml-1 rounded hover:bg-subtle text-text-secondary shrink-0"
+                  className="w-4 h-4 flex items-center justify-center rounded hover:bg-text-primary/[0.08] dark:hover:bg-white/[0.1] text-text-secondary hover:text-text-primary shrink-0 transition"
                   title={isCollapsed ? 'Tampilkan subhalaman' : 'Sembunyikan subhalaman'}
                 >
                   {isCollapsed ? (
@@ -3069,7 +3066,11 @@ export const BlockEditor: React.FC = () => {
                     <ChevronDown className="w-3.5 h-3.5" />
                   )}
                 </button>
-              ) : null}
+              ) : (
+                <span className="w-4 h-4 shrink-0 flex items-center justify-center">
+                  <span className="w-1 h-1 rounded-full bg-text-secondary/25 opacity-0 group-hover:opacity-100 transition" />
+                </span>
+              )}
               <span className="text-[15px] leading-none shrink-0">{note.icon || '📄'}</span>
               <span className="truncate">{note.title || 'Tanpa Judul'}</span>
             </div>
@@ -3082,14 +3083,13 @@ export const BlockEditor: React.FC = () => {
             />
           </div>
           {isPageDropTarget && dropTargetPosition === 'after' && (
-            <div
-              style={{ marginLeft: `${8 + depth * 14}px` }}
-              className="h-[2px] bg-[#2383E2] rounded-full pointer-events-none"
-            />
+            <div className="h-[2px] bg-[#2383E2] rounded-full mx-1.5 pointer-events-none" />
           )}
 
           {hasChildren && !isCollapsed && (
-            <div>{renderSidebarPageTree(pool, note.id, depth + 1, isSharedSection)}</div>
+            <div className="ml-3.5 pl-2 border-l border-border-subtle/75 space-y-0.5 mt-0.5">
+              {renderSidebarPageTree(pool, note.id, depth + 1, isSharedSection)}
+            </div>
           )}
         </div>
       );
@@ -5645,6 +5645,17 @@ export const BlockEditor: React.FC = () => {
                         />
                       </div>
                     )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSidebarSections(DEFAULT_SIDEBAR_SECTIONS);
+                        saveSidebarSections(DEFAULT_SIDEBAR_SECTIONS);
+                      }}
+                      className="w-full mt-1 flex items-center gap-2 px-2 py-1.5 rounded-md text-[12px] text-sky-600 dark:text-sky-400 hover:bg-sky-500/10 transition"
+                    >
+                      <span>Kembalikan semua bagian default</span>
+                    </button>
                   </div>
                 </div>
               ) : searchQuery.trim() ? (
@@ -5738,10 +5749,13 @@ export const BlockEditor: React.FC = () => {
                           </div>
                           {favoriteNotes.map((note) => {
                             const isDropTarget = dropTargetNoteId === `fav-${note.id}`;
+                            const favChildren = allNotes.filter((c) => c.parentId === note.id);
+                            const hasFavChildren = favChildren.length > 0;
+                            const isFavCollapsed = Boolean(collapsedParents[note.id]);
                             return (
-                              <div key={`fav-${note.id}`} className="relative">
+                              <div key={`fav-${note.id}`} className="space-y-0.5 relative">
                                 {isDropTarget && dropTargetPosition === 'before' && (
-                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-2 pointer-events-none" />
+                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-1.5 pointer-events-none" />
                                 )}
                                 <div
                                   draggable
@@ -5796,7 +5810,7 @@ export const BlockEditor: React.FC = () => {
                                       y: e.clientY
                                     });
                                   }}
-                                  className={`group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
+                                  className={`group w-full flex items-center justify-between gap-1 pl-1.5 pr-1.5 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
                                     isDropTarget && dropTargetPosition === 'inside'
                                       ? 'bg-[#2383E2]/15 ring-1 ring-[#2383E2] text-text-primary'
                                       : note.id === activeNoteId && mainViewMode === 'document'
@@ -5804,7 +5818,33 @@ export const BlockEditor: React.FC = () => {
                                         : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
                                   } ${draggedNoteId === note.id ? 'opacity-45' : ''}`}
                                 >
-                                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                    {hasFavChildren ? (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setCollapsedParents((prev) => ({
+                                            ...prev,
+                                            [note.id]: !prev[note.id]
+                                          }));
+                                        }}
+                                        className="w-4 h-4 flex items-center justify-center rounded hover:bg-text-primary/[0.08] dark:hover:bg-white/[0.1] text-text-secondary hover:text-text-primary shrink-0 transition"
+                                        title={
+                                          isFavCollapsed
+                                            ? 'Tampilkan subhalaman'
+                                            : 'Sembunyikan subhalaman'
+                                        }
+                                      >
+                                        {isFavCollapsed ? (
+                                          <ChevronRight className="w-3.5 h-3.5" />
+                                        ) : (
+                                          <ChevronDown className="w-3.5 h-3.5" />
+                                        )}
+                                      </button>
+                                    ) : (
+                                      <span className="w-4 h-4 shrink-0" />
+                                    )}
                                     <span className="text-[15px] leading-none shrink-0">
                                       {note.icon || '📄'}
                                     </span>
@@ -5819,7 +5859,12 @@ export const BlockEditor: React.FC = () => {
                                   />
                                 </div>
                                 {isDropTarget && dropTargetPosition === 'after' && (
-                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-2 pointer-events-none" />
+                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-1.5 pointer-events-none" />
+                                )}
+                                {hasFavChildren && !isFavCollapsed && (
+                                  <div className="ml-3.5 pl-2 border-l border-border-subtle/75 space-y-0.5 mt-0.5">
+                                    {renderSidebarPageTree(allNotes, note.id, 1, false)}
+                                  </div>
                                 )}
                               </div>
                             );
@@ -5829,7 +5874,11 @@ export const BlockEditor: React.FC = () => {
                     }
 
                     if (secId === 'recent') {
-                      const recentList = [...myNotes, ...sharedWithMeNotes]
+                      const combinedPool = [...myNotes, ...sharedWithMeNotes];
+                      const recentList = combinedPool
+                        .filter(
+                          (n) => !n.parentId || !combinedPool.some((p) => p.id === n.parentId)
+                        )
                         .sort(
                           (a, b) =>
                             (a.sortOrder ?? -a.updatedAt) -
@@ -5843,10 +5892,15 @@ export const BlockEditor: React.FC = () => {
                           </div>
                           {recentList.map((note) => {
                             const isDropTarget = dropTargetNoteId === `rec-${note.id}`;
+                            const recChildren = combinedPool.filter(
+                              (c) => c.parentId === note.id
+                            );
+                            const hasRecChildren = recChildren.length > 0;
+                            const isRecCollapsed = Boolean(collapsedParents[note.id]);
                             return (
-                              <div key={`rec-${note.id}`} className="relative">
+                              <div key={`rec-${note.id}`} className="space-y-0.5 relative">
                                 {isDropTarget && dropTargetPosition === 'before' && (
-                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-2 pointer-events-none" />
+                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-1.5 pointer-events-none" />
                                 )}
                                 <div
                                   draggable
@@ -5899,7 +5953,7 @@ export const BlockEditor: React.FC = () => {
                                       y: e.clientY
                                     });
                                   }}
-                                  className={`group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
+                                  className={`group w-full flex items-center justify-between gap-1 pl-1.5 pr-1.5 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
                                     isDropTarget && dropTargetPosition === 'inside'
                                       ? 'bg-[#2383E2]/15 ring-1 ring-[#2383E2] text-text-primary'
                                       : note.id === activeNoteId && mainViewMode === 'document'
@@ -5907,7 +5961,33 @@ export const BlockEditor: React.FC = () => {
                                         : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
                                   } ${draggedNoteId === note.id ? 'opacity-45' : ''}`}
                                 >
-                                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                    {hasRecChildren ? (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setCollapsedParents((prev) => ({
+                                            ...prev,
+                                            [note.id]: !prev[note.id]
+                                          }));
+                                        }}
+                                        className="w-4 h-4 flex items-center justify-center rounded hover:bg-text-primary/[0.08] dark:hover:bg-white/[0.1] text-text-secondary hover:text-text-primary shrink-0 transition"
+                                        title={
+                                          isRecCollapsed
+                                            ? 'Tampilkan subhalaman'
+                                            : 'Sembunyikan subhalaman'
+                                        }
+                                      >
+                                        {isRecCollapsed ? (
+                                          <ChevronRight className="w-3.5 h-3.5" />
+                                        ) : (
+                                          <ChevronDown className="w-3.5 h-3.5" />
+                                        )}
+                                      </button>
+                                    ) : (
+                                      <span className="w-4 h-4 shrink-0" />
+                                    )}
                                     <span className="text-[15px] leading-none shrink-0">
                                       {note.icon || '📄'}
                                     </span>
@@ -5922,7 +6002,12 @@ export const BlockEditor: React.FC = () => {
                                   />
                                 </div>
                                 {isDropTarget && dropTargetPosition === 'after' && (
-                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-2 pointer-events-none" />
+                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-1.5 pointer-events-none" />
+                                )}
+                                {hasRecChildren && !isRecCollapsed && (
+                                  <div className="ml-3.5 pl-2 border-l border-border-subtle/75 space-y-0.5 mt-0.5">
+                                    {renderSidebarPageTree(combinedPool, note.id, 1, false)}
+                                  </div>
                                 )}
                               </div>
                             );
