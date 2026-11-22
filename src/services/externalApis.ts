@@ -191,10 +191,93 @@ export function getNextPrayerInfo(timings: PrayerTimings): {
   };
 }
 
-// --- External AI (Groq Server Proxy + Custom AI Provider) Client ---
+// --- External AI (Miu AI Free Server Proxy + Custom AI Provider) Client ---
 const CUSTOM_AI_STORAGE = 'miu_custom_ai_provider_v1';
+const MIU_FREE_MODEL_STORAGE = 'miu_selected_free_model_v1';
 
-const DEFAULT_GROQ_MODEL = 'qwen/qwen3.8-27b';
+export interface MiuFreeModelOption {
+  id: string;
+  label: string;
+  tag: string;
+  supportsVision?: boolean;
+}
+
+export const MIU_FREE_MODELS: MiuFreeModelOption[] = [
+  {
+    id: 'miu-ai-free',
+    label: 'Miu AI Free',
+    tag: 'Otomatis • Serbaguna'
+  },
+  {
+    id: 'miu-code-free',
+    label: 'Miu Code Free',
+    tag: 'Koding & Teknis'
+  },
+  {
+    id: 'miu-vision-free',
+    label: 'Miu Vision Free',
+    tag: 'Analisis Gambar',
+    supportsVision: true
+  },
+  {
+    id: 'minimax-m3.1-flash-free',
+    label: 'MiniMax M3.1 Flash',
+    tag: 'Cepat & Ringan'
+  },
+  {
+    id: 'nvidia/nemotron-3.5-super-vl-free',
+    label: 'Nemotron 3.5 Super VL',
+    tag: 'Penalaran & Vision',
+    supportsVision: true
+  },
+  {
+    id: 'mistral-large-4-1t-a52b:free',
+    label: 'Mistral Large 4 (1T)',
+    tag: 'Analisis Mendalam'
+  },
+  {
+    id: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+    label: 'Nemotron 3 Ultra 550B',
+    tag: 'Penalaran Kompleks'
+  },
+  {
+    id: 'glm-5.3-flash-free',
+    label: 'GLM 5.3 Flash',
+    tag: 'Responsif & Ringkas'
+  }
+];
+
+const DEFAULT_GROQ_MODEL = 'miu-ai-free';
+
+export function getMiuFreeModelLabel(modelId?: string): string {
+  const clean = (modelId || '').trim();
+  const found = MIU_FREE_MODELS.find((m) => m.id === clean);
+  if (found) return found.label;
+  if (!clean || clean === 'groq-default') return 'Miu AI Free';
+  return clean;
+}
+
+export function loadSelectedMiuFreeModel(): string {
+  if (typeof window === 'undefined') return DEFAULT_GROQ_MODEL;
+  try {
+    const raw = (window.localStorage.getItem(MIU_FREE_MODEL_STORAGE) || '').trim();
+    if (raw && MIU_FREE_MODELS.some((m) => m.id === raw)) {
+      return raw;
+    }
+  } catch {
+    // ignore
+  }
+  return DEFAULT_GROQ_MODEL;
+}
+
+export function saveSelectedMiuFreeModel(modelId: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(MIU_FREE_MODEL_STORAGE, modelId);
+  } catch {
+    // ignore
+  }
+}
 
 export interface AIConfig {
   provider: AIProviderId;
@@ -225,10 +308,15 @@ export const DEFAULT_BASE_URLS: Record<AIProviderId, string> = {
 };
 
 export function loadDefaultGroqConfig(modelOverride?: string): AIConfig {
+  const cleanOverride = (modelOverride || '').trim();
+  const validOverride =
+    cleanOverride && MIU_FREE_MODELS.some((m) => m.id === cleanOverride)
+      ? cleanOverride
+      : '';
   return {
     provider: 'groq',
     apiKey: '',
-    model: modelOverride?.trim() || DEFAULT_GROQ_MODEL,
+    model: validOverride || loadSelectedMiuFreeModel() || DEFAULT_GROQ_MODEL,
     baseUrl: DEFAULT_BASE_URLS.groq,
     ollamaUrl: 'http://localhost:11434'
   };
@@ -781,7 +869,7 @@ export async function runExternalAIStream(
 
     if (!resp.ok || !resp.body) {
       const errData = (await resp.json().catch(() => ({}))) as { error?: string };
-      throw new Error(errData.error || `AI Error (${resp.status}): Gagal menghubungi Groq AI.`);
+      throw new Error(errData.error || `AI Error (${resp.status}): Gagal menghubungi Miu AI.`);
     }
 
     return readOpenAISSEStream(resp.body, onChunk);
@@ -937,10 +1025,10 @@ export async function runExternalAIStream(
     return text;
   }
 
-  // Groq, Custom OpenAI-Compatible, OpenAI & OpenRouter SSE
+  // Miu AI, Custom OpenAI-Compatible, OpenAI & OpenRouter SSE
   const resolveOpenAICompatibleEndpoint = (): string => {
     if (config.provider === 'groq') {
-      return 'https://api.groq.com/openai/v1/chat/completions';
+      return '/api/ai/chat';
     }
     const rawBase = config.baseUrl?.trim();
     if (rawBase) {

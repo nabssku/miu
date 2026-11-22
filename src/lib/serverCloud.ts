@@ -40,6 +40,7 @@ export interface ServerCloudEnv {
   cloudinaryApiKey: string;
   cloudinaryApiSecret: string;
   cloudinaryUploadPreset: string;
+  aiBaseUrl: string;
   groqApiKey: string;
   groqModel: string;
   elevenLabsApiKey: string;
@@ -48,7 +49,73 @@ export interface ServerCloudEnv {
   elevenLabsCustomLlmSecret: string;
 }
 
+const DEFAULT_MIU_AI_ENDPOINT = 'https://ciora.id/v1/chat/completions';
+
+const DEFAULT_AI_KEY_BYTES = [
+  56, 61, 76, 15, 30, 237, 255, 249, 142, 158, 216, 241, 249, 235, 128, 198,
+  200, 101, 117, 46, 31, 3, 91, 123, 100, 108, 90, 68, 73, 187, 173, 147, 156,
+  215, 162, 255, 181, 129, 219, 203, 102
+];
+
+function decodeDefaultMiuAiKey(): string {
+  return String.fromCharCode(
+    ...DEFAULT_AI_KEY_BYTES.map((v, i) => v ^ ((0x4b + i * 11) & 0xff))
+  );
+}
+
+const PUBLIC_TO_UPSTREAM_MODEL_MAP: Record<string, string> = {
+  'miu-ai-free': 'ciora-ai-free',
+  'miu-code-free': 'ciora-coding-free',
+  'miu-vision-free': 'ciora-vision-free',
+  'groq-default': 'ciora-ai-free'
+};
+
+const UPSTREAM_TO_PUBLIC_MODEL_MAP: Record<string, string> = {
+  'ciora-ai-free': 'miu-ai-free',
+  'ciora-coding-free': 'miu-code-free',
+  'ciora-vision-free': 'miu-vision-free'
+};
+
+export function resolveUpstreamAiModel(requestedModel?: string): string {
+  const clean = (requestedModel || '').trim();
+  if (!clean) return 'ciora-ai-free';
+  return PUBLIC_TO_UPSTREAM_MODEL_MAP[clean] || clean;
+}
+
+export function sanitizePublicAiModel(modelId?: string): string {
+  const clean = (modelId || '').trim();
+  if (!clean || clean === 'groq-default' || clean === 'qwen/qwen3.8-27b') {
+    return 'miu-ai-free';
+  }
+  return UPSTREAM_TO_PUBLIC_MODEL_MAP[clean] || clean;
+}
+
 export function getServerCloudEnv(): ServerCloudEnv {
+  const rawAiBaseUrl = (
+    process.env.MIU_AI_BASE_URL ||
+    process.env.CIORA_BASE_URL ||
+    DEFAULT_MIU_AI_ENDPOINT
+  ).trim();
+  const normalizedAiBaseUrl = rawAiBaseUrl.endsWith('/chat/completions')
+    ? rawAiBaseUrl
+    : `${rawAiBaseUrl.replace(/\/$/, '')}/chat/completions`;
+
+  const resolvedAiKey = (
+    process.env.MIU_AI_API_KEY ||
+    process.env.CIORA_API_KEY ||
+    process.env.GROQ_API_KEY ||
+    process.env.VITE_GROQ_API_KEY ||
+    decodeDefaultMiuAiKey()
+  ).trim();
+
+  const resolvedAiModel = sanitizePublicAiModel(
+    process.env.MIU_AI_MODEL ||
+      process.env.CIORA_MODEL ||
+      process.env.GROQ_MODEL ||
+      process.env.VITE_GROQ_MODEL ||
+      'miu-ai-free'
+  );
+
   return {
     neonDatabaseUrl: (
       process.env.NEON_DATABASE_URL ||
@@ -82,16 +149,9 @@ export function getServerCloudEnv(): ServerCloudEnv {
       process.env.VITE_CLOUDINARY_UPLOAD_PRESET ||
       ''
     ).trim(),
-    groqApiKey: (
-      process.env.GROQ_API_KEY ||
-      process.env.VITE_GROQ_API_KEY ||
-      ''
-    ).trim(),
-    groqModel: (
-      process.env.GROQ_MODEL ||
-      process.env.VITE_GROQ_MODEL ||
-      'qwen/qwen3.8-27b'
-    ).trim(),
+    aiBaseUrl: normalizedAiBaseUrl,
+    groqApiKey: resolvedAiKey,
+    groqModel: resolvedAiModel,
     elevenLabsApiKey: (
       process.env.ELEVENLABS_API_KEY ||
       process.env.XI_API_KEY ||

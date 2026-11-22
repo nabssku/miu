@@ -56,9 +56,13 @@ import {
   buildLiveNoteContext,
   DEFAULT_BASE_URLS,
   DEFAULT_MODELS,
+  getMiuFreeModelLabel,
   loadAIConfig,
   loadDefaultGroqConfig,
+  loadSelectedMiuFreeModel,
+  MIU_FREE_MODELS,
   saveAIConfig,
+  saveSelectedMiuFreeModel,
   type AIConfig
 } from '../../services/externalApis';
 import {
@@ -1574,17 +1578,50 @@ export const ExternalAIDrawer: React.FC = () => {
                 </div>
 
                 {aiTab === 'groq' ? (
-                  <div className="text-[11px] text-text-secondary bg-surface border border-border-subtle rounded-xl p-2.5 flex items-center justify-between gap-2">
-                    <span>
-                      Model default:{' '}
-                      <strong className="font-mono text-text-primary">
-                        {defaultGroqConfig.model}
-                      </strong>
-                    </span>
-                    <span className="inline-flex items-center gap-1 text-[10px] text-emerald-500 font-semibold shrink-0">
-                      <CheckCircle2 className="w-3 h-3" />
-                      Siap
-                    </span>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] text-text-secondary px-0.5">
+                      <span>Pilih Model Gratis Miu AI ({MIU_FREE_MODELS.length} model)</span>
+                      <span className="inline-flex items-center gap-1 text-[10px] text-emerald-500 font-semibold shrink-0">
+                        <CheckCircle2 className="w-3 h-3" />
+                        Siap
+                      </span>
+                    </div>
+                    <div className="max-h-44 overflow-y-auto space-y-1 pr-0.5">
+                      {MIU_FREE_MODELS.map((m) => {
+                        const isSelected = defaultGroqConfig.model === m.id;
+                        return (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => {
+                              setAiTab('groq');
+                              setDefaultGroqConfig(loadDefaultGroqConfig(m.id));
+                              saveSelectedMiuFreeModel(m.id);
+                            }}
+                            className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl border text-left transition ${
+                              isSelected
+                                ? 'bg-surface border-sky-500/50 text-text-primary font-semibold shadow-xs'
+                                : 'bg-surface/60 border-border-subtle text-text-secondary hover:bg-surface hover:text-text-primary'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="text-[11.5px] truncate">{m.label}</div>
+                              <div className="text-[10px] text-text-secondary truncate">
+                                {m.tag}
+                              </div>
+                            </div>
+                            <span className="inline-flex items-center gap-1.5 shrink-0">
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-500/12 text-emerald-600 dark:text-emerald-300 text-[9.5px] font-semibold">
+                                Free
+                              </span>
+                              {isSelected && (
+                                <Check className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+                              )}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -2458,7 +2495,9 @@ export const ExternalAIDrawer: React.FC = () => {
                       title="Pilih model atau provider AI"
                     >
                       <span className="truncate">
-                        {aiTab === 'groq' ? 'Otomatis' : activePresetMeta.label}
+                        {aiTab === 'groq'
+                          ? getMiuFreeModelLabel(defaultGroqConfig.model)
+                          : activePresetMeta.label}
                       </span>
                       {openMenu === 'model' ? (
                         <ChevronUp className="w-3 h-3 shrink-0" />
@@ -2468,29 +2507,42 @@ export const ExternalAIDrawer: React.FC = () => {
                     </button>
 
                     {openMenu === 'model' && (
-                      <div className="absolute right-0 bottom-full mb-2 w-60 rounded-xl bg-surface border border-border-subtle shadow-2xl p-1.5 z-50 space-y-0.5 text-xs">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAiTab('groq');
-                            setOpenMenu('none');
-                          }}
-                          className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg transition ${
-                            aiTab === 'groq'
-                              ? 'bg-subtle text-text-primary font-semibold'
-                              : 'text-text-secondary hover:bg-subtle/60 hover:text-text-primary'
-                          }`}
-                        >
-                          <div className="text-left min-w-0">
-                            <div>Otomatis</div>
-                            <div className="text-[10px] font-mono text-text-secondary truncate">
-                              {defaultGroqConfig.model}
-                            </div>
-                          </div>
-                          {aiTab === 'groq' && (
-                            <Check className="w-3.5 h-3.5 text-text-primary shrink-0" />
-                          )}
-                        </button>
+                      <div className="absolute right-0 bottom-full mb-2 w-64 rounded-xl bg-surface border border-border-subtle shadow-2xl p-1.5 z-50 space-y-0.5 text-xs max-h-[70vh] overflow-y-auto">
+                        <div className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-text-secondary flex items-center justify-between">
+                          <span>Miu AI Gratis</span>
+                          <span className="text-emerald-600 dark:text-emerald-400">Free</span>
+                        </div>
+                        {MIU_FREE_MODELS.map((m) => {
+                          const isSelected =
+                            aiTab === 'groq' && defaultGroqConfig.model === m.id;
+                          return (
+                            <button
+                              key={m.id}
+                              type="button"
+                              onClick={() => {
+                                setAiTab('groq');
+                                setDefaultGroqConfig(loadDefaultGroqConfig(m.id));
+                                saveSelectedMiuFreeModel(m.id);
+                                setOpenMenu('none');
+                              }}
+                              className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg transition ${
+                                isSelected
+                                  ? 'bg-subtle text-text-primary font-semibold'
+                                  : 'text-text-secondary hover:bg-subtle/60 hover:text-text-primary'
+                              }`}
+                            >
+                              <div className="text-left min-w-0">
+                                <div className="truncate">{m.label}</div>
+                                <div className="text-[10px] text-text-secondary truncate">
+                                  {m.tag}
+                                </div>
+                              </div>
+                              {isSelected && (
+                                <Check className="w-3.5 h-3.5 text-text-primary shrink-0" />
+                              )}
+                            </button>
+                          );
+                        })}
 
                         <div className="h-px bg-border-subtle my-1" />
                         <div className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-text-secondary">

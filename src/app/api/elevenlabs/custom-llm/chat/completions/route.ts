@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getServerCloudEnv } from '@/lib/serverCloud';
+import { getServerCloudEnv, resolveUpstreamAiModel } from '@/lib/serverCloud';
 
 export const dynamic = 'force-dynamic';
-
-const GROQ_CHAT_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
 
 function buildCorsHeaders() {
   return {
@@ -20,7 +18,7 @@ export async function OPTIONS() {
 
 /**
  * OpenAI-Compatible Custom LLM endpoint for ElevenLabs Conversational AI Agents.
- * Forwards turns to Groq AI (default) or a user-specified OpenAI-compatible Custom Provider,
+ * Forwards turns to Miu AI (default) or a user-specified OpenAI-compatible Custom Provider,
  * stripping internal `<think>...</think>` blocks so the voice agent only speaks clean answers.
  */
 export async function POST(req: NextRequest) {
@@ -55,7 +53,7 @@ export async function POST(req: NextRequest) {
     const customUpstreamModel =
       (req.headers.get('x-miu-upstream-model') || searchParams.get('model') || '').trim();
 
-    let endpoint = GROQ_CHAT_ENDPOINT;
+    let endpoint = env.aiBaseUrl;
     let apiKey = env.groqApiKey;
 
     if (customUpstreamRaw) {
@@ -73,11 +71,14 @@ export async function POST(req: NextRequest) {
     }
 
     const requestedModel = (body.model || '').trim();
-    const targetModel =
+    const rawTargetModel =
       customUpstreamModel ||
       (requestedModel && requestedModel !== 'custom-llm' ? requestedModel : '') ||
       env.groqModel ||
-      'qwen/qwen3.8-27b';
+      'miu-ai-free';
+    const targetModel = customUpstreamRaw
+      ? rawTargetModel
+      : resolveUpstreamAiModel(rawTargetModel);
 
     const shouldStream = body.stream !== false;
     const payload: Record<string, unknown> = {

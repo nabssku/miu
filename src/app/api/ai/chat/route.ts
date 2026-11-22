@@ -1,17 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getServerCloudEnv } from '@/lib/serverCloud';
+import { getServerCloudEnv, resolveUpstreamAiModel } from '@/lib/serverCloud';
 
 export const dynamic = 'force-dynamic';
 
-const GROQ_CHAT_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_VISION_FALLBACK_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
+const MIU_VISION_FALLBACK_MODEL = 'ciora-vision-free';
+const MIU_SECONDARY_VISION_MODEL = 'nvidia/nemotron-3.5-super-vl-free';
+
+function sanitizeErrorDetail(raw: string): string {
+  return raw
+    .replace(/ciora/gi, 'Miu AI')
+    .replace(/groq/gi, 'Miu AI')
+    .slice(0, 180)
+    .trim();
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const { groqApiKey, groqModel } = getServerCloudEnv();
+    const { aiBaseUrl, groqApiKey, groqModel } = getServerCloudEnv();
     if (!groqApiKey) {
       return NextResponse.json(
-        { error: 'GROQ_API_KEY_MISSING' },
+        { error: 'MIU_AI_API_KEY_MISSING' },
         { status: 503 }
       );
     }
@@ -30,16 +38,23 @@ export async function POST(req: NextRequest) {
     const userPrompt = String(body.userPrompt || '');
     const history = Array.isArray(body.history)
       ? body.history
-          .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
+          .filter(
+            (m) =>
+              (m.role === 'user' || m.role === 'assistant') &&
+              typeof m.content === 'string' &&
+              m.content.trim()
+          )
           .slice(-16)
       : [];
     const imageUrl = body.imageUrl ? String(body.imageUrl) : undefined;
     const requestedModel = (body.model || '').trim();
-    const primaryModel = requestedModel && requestedModel !== 'groq-default'
-      ? requestedModel
-      : groqModel || 'qwen/qwen3.8-27b';
+    const primaryModel = resolveUpstreamAiModel(
+      requestedModel && requestedModel !== 'groq-default'
+        ? requestedModel
+        : groqModel || 'miu-ai-free'
+    );
 
-    const sendGroqRequest = async (targetModel: string, withVision: boolean) => {
+    const sendChatRequest = async (targetModel: string, withVision: boolean) => {
       const userContent =
         withVision && imageUrl
           ? [
@@ -48,7 +63,7 @@ export async function POST(req: NextRequest) {
             ]
           : userPrompt;
 
-      return fetch(GROQ_CHAT_ENDPOINT, {
+      return fetch(aiBaseUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -67,17 +82,27 @@ export async function POST(req: NextRequest) {
       });
     };
 
-    let upstream = await sendGroqRequest(primaryModel, Boolean(imageUrl));
+    let upstream = await sendChatRequest(primaryModel, Boolean(imageUrl));
 
-    if (!upstream.ok && imageUrl && upstream.status === 400 && primaryModel !== GROQ_VISION_FALLBACK_MODEL) {
-      upstream = await sendGroqRequest(GROQ_VISION_FALLBACK_MODEL, true);
+    if (
+      !upstream.ok &&
+      imageUrl &&
+      (upstream.status === 400 || upstream.status === 422) &&
+      primaryModel !== MIU_VISION_FALLBACK_MODEL
+    ) {
+      upstream = await sendChatRequest(MIU_VISION_FALLBACK_MODEL, true);
+      if (!upstream.ok && primaryModel !== MIU_SECONDARY_VISION_MODEL) {
+        upstream = await sendChatRequest(MIU_SECONDARY_VISION_MODEL, true);
+      }
     }
 
     if (!upstream.ok || !upstream.body) {
       const errDetail = await upstream.text().catch(() => '');
       return NextResponse.json(
         {
-          error: `GROQ Error (${upstream.status}): ${errDetail.slice(0, 180) || 'Gagal menghubungi layanan AI.'}`
+          error: `Miu AI Error (${upstream.status}): ${
+            sanitizeErrorDetail(errDetail) || 'Gagal menghubungi layanan AI.'
+          }`
         },
         { status: upstream.status || 502 }
       );
