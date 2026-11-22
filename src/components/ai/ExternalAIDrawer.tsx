@@ -209,6 +209,7 @@ export const ExternalAIDrawer: React.FC = () => {
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isAgentRunningRef = useRef(false);
   const agentSwitchedNoteIdRef = useRef<string | null>(null);
@@ -387,10 +388,16 @@ export const ExternalAIDrawer: React.FC = () => {
     el.style.height = `${Math.min(el.scrollHeight, 136)}px`;
   }, [customPrompt]);
 
-  // Smooth auto-scroll on new messages / streaming chunks
+  // Smooth auto-scroll strictly inside the AI chat scroll container (never scrolls outer window)
   useEffect(() => {
     if (messages.length > 0 || loading) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      const container = chatScrollContainerRef.current;
+      if (container) {
+        container.scrollTo({
+          top: container.scrollHeight,
+          behavior: loading ? 'auto' : 'smooth'
+        });
+      }
     }
   }, [messages, loading]);
 
@@ -1008,7 +1015,7 @@ export const ExternalAIDrawer: React.FC = () => {
 
   return (
     <aside
-      className={`${drawerWidthClass} fixed inset-0 z-50 sm:static sm:z-auto shrink-0 h-screen sm:sticky sm:top-0 border-l border-border-subtle bg-surface text-text-primary flex flex-col no-print transition-all duration-200`}
+      className={`${drawerWidthClass} fixed inset-0 z-50 sm:relative sm:inset-auto sm:z-auto shrink-0 h-dvh sm:h-full max-h-dvh overflow-hidden border-l border-border-subtle bg-surface text-text-primary flex flex-col no-print transition-all duration-200`}
     >
       {/* Top Minimal Notion-style Header */}
       <header
@@ -1308,7 +1315,7 @@ export const ExternalAIDrawer: React.FC = () => {
 
       {/* Main Content Area */}
       {interactionMode === 'voice' ? (
-        <div className="flex-1 overflow-y-auto px-3 pb-3 flex flex-col gap-3">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 pb-3 flex flex-col gap-3">
           <ConversationalVoicePanel
             activeNote={activeNote}
             aiTab={aiTab}
@@ -1321,7 +1328,10 @@ export const ExternalAIDrawer: React.FC = () => {
         </div>
       ) : (
         <>
-          <div className="flex-1 overflow-y-auto px-4">
+          <div
+            ref={chatScrollContainerRef}
+            className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4"
+          >
             {messages.length === 0 && !loading && !errorMsg ? (
               /* Clean Bottom-Anchored Welcome State matching image.png */
               <div className="min-h-full flex flex-col justify-end pb-3 pt-8">

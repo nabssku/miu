@@ -6030,7 +6030,7 @@ export const BlockEditor: React.FC = () => {
       />
 
       <div
-        className={`w-full min-h-screen flex bg-surface transition-all relative ${
+        className={`w-full h-full flex bg-surface transition-all relative overflow-hidden print:h-auto print:overflow-visible ${
           isLockedByAuth ? 'blur-[3px] pointer-events-none select-none' : ''
         }`}
         onDragOver={(e) => {
@@ -6069,7 +6069,7 @@ export const BlockEditor: React.FC = () => {
         {isSidebarOpen && (
           <aside
             style={{ width: `${sidebarWidth}px` }}
-            className="h-screen sticky top-0 z-20 shrink-0 border-r border-border-subtle bg-[#F7F7F5] dark:bg-subtle/75 flex flex-col justify-between select-none no-print relative"
+            className="h-full z-20 shrink-0 border-r border-border-subtle bg-[#F7F7F5] dark:bg-subtle/75 flex flex-col justify-between select-none no-print relative overflow-hidden"
           >
             {/* Right-Edge Drag-to-Resize & Click-to-Close Handle with Tooltip (image_4) */}
             <div
@@ -6096,7 +6096,7 @@ export const BlockEditor: React.FC = () => {
             <div
               className={`px-2.5 pt-2.5 pb-2 ${
                 islandPosition === 'top-left' ? 'pt-14' : ''
-              } flex flex-col gap-2 overflow-y-auto overflow-x-hidden flex-1`}
+              } flex flex-col gap-2 min-h-0 overflow-y-auto overscroll-contain overflow-x-hidden flex-1`}
             >
               {/* Top Bar: Sidebar Collapse (Left) + Inbox & New Page (Right) */}
               <div className="flex items-center justify-between gap-1 px-0.5">
@@ -7210,7 +7210,7 @@ export const BlockEditor: React.FC = () => {
         {/* =================================================================== */}
         {/* MAIN PANEL: CLEAN TOP NAVBAR + PUBLIC BANNER + DOCUMENT / PUSTAKA   */}
         {/* =================================================================== */}
-        <div className="flex-1 min-w-0 min-h-screen flex flex-col bg-surface">
+        <div className="flex-1 min-w-0 h-full overflow-y-auto overscroll-contain flex flex-col bg-surface print:h-auto print:overflow-visible">
           {/* Minimal Sticky Top Navbar */}
           <header
             className={`sticky top-0 z-20 px-3 sm:px-4 ${

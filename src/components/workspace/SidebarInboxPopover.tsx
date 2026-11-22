@@ -438,7 +438,7 @@ export const SidebarInboxSlideDrawer: React.FC<SidebarInboxSlideDrawerProps> = (
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
         style={{ width: `${sidebarWidth}px` }}
-        className={`h-screen bg-[#F7F7F5] dark:bg-subtle/95 backdrop-blur-md flex flex-col justify-between select-none transform transition-all duration-300 ease-in-out ${
+        className={`h-full bg-[#F7F7F5] dark:bg-subtle/95 backdrop-blur-md flex flex-col justify-between select-none transform transition-all duration-300 ease-in-out ${
           isOpen
             ? 'translate-x-0 opacity-100 border-r border-border-subtle shadow-[14px_0_36px_-12px_rgba(15,23,42,0.18)] dark:shadow-[16px_0_40px_-10px_rgba(0,0,0,0.7)]'
             : '-translate-x-full opacity-0 border-r-0 shadow-none'

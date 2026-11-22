@@ -14,7 +14,13 @@ export const MiuShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
   const needsWorkspaceHydration = Boolean(pathname?.startsWith('/app'));
 
   return (
-    <div className="min-h-screen relative">
+    <div
+      className={
+        needsWorkspaceHydration
+          ? 'h-dvh max-h-dvh overflow-hidden relative print:h-auto print:max-h-none print:overflow-visible'
+          : 'min-h-screen relative'
+      }
+    >
       {/* Persistent Visually-Hidden YouTube Audio Engine */}
       <HiddenYouTubePlayer />
 

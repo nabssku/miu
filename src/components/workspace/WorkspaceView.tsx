@@ -13,9 +13,9 @@ export const WorkspaceView: React.FC = () => {
 
   return (
     <NotePresenceProvider>
-      <main className="w-full min-h-screen flex bg-surface text-text-primary relative">
+      <main className="w-full h-dvh max-h-dvh overflow-hidden flex bg-surface text-text-primary relative print:h-auto print:max-h-none print:overflow-visible">
         <NoteRealtimeSync />
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 h-full overflow-hidden print:h-auto print:overflow-visible">
           <BlockEditor />
         </div>
         {isAIDrawerOpen ? (

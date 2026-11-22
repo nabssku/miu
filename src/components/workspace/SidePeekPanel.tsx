@@ -454,7 +454,7 @@ export const SidePeekPanel: React.FC<SidePeekPanelProps> = ({
   return (
     <aside
       style={{ width: `${width}px` }}
-      className="h-screen sticky top-0 z-20 shrink-0 border-l border-border-subtle bg-surface text-text-primary flex flex-col relative shadow-[-10px_0_30px_-14px_rgba(15,23,42,0.12)] no-print"
+      className="h-full overflow-hidden z-20 shrink-0 border-l border-border-subtle bg-surface text-text-primary flex flex-col relative shadow-[-10px_0_30px_-14px_rgba(15,23,42,0.12)] no-print"
     >
       {/* Left-Edge Drag-to-Resize & Click-to-Close Handle with Tooltip (Matches image_4.png) */}
       <div
