@@ -91,6 +91,19 @@ export const PageActionsMenu: React.FC<PageActionsMenuProps> = ({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    const handleOpenPageActions = (e: Event) => {
+      const custom = e as CustomEvent<{ subView?: SubView }>;
+      setSubView(custom.detail?.subView || 'main');
+      setSearchAction('');
+      setIsOpen(true);
+    };
+    window.addEventListener('miu:open-page-actions', handleOpenPageActions);
+    return () => {
+      window.removeEventListener('miu:open-page-actions', handleOpenPageActions);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isOpen) return;
     const handlePointerDown = (e: PointerEvent) => {
       const target = e.target as Node | null;
@@ -98,21 +111,51 @@ export const PageActionsMenu: React.FC<PageActionsMenuProps> = ({
       setIsOpen(false);
     };
     const handleKeyDown = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      const key = e.key.toLowerCase();
+
       if (e.key === 'Escape') {
+        e.preventDefault();
         if (subView !== 'main') {
           setSubView('main');
         } else {
           setIsOpen(false);
         }
+        return;
+      }
+
+      if (mod && e.altKey && !e.shiftKey && (key === 'l' || e.code === 'KeyL')) {
+        e.preventDefault();
+        e.stopPropagation();
+        void onCopyActiveShareLink().then(() => {
+          showToast('Tautan halaman aktif & disalin!');
+          setIsOpen(false);
+        });
+        return;
+      }
+
+      if (isOwner && mod && !e.shiftKey && !e.altKey && key === 'd') {
+        e.preventDefault();
+        e.stopPropagation();
+        onDuplicateNote();
+        showToast('Halaman diduplikatkan');
+        setIsOpen(false);
+        return;
+      }
+
+      if (isOwner && mod && e.shiftKey && !e.altKey && key === 'p') {
+        e.preventDefault();
+        e.stopPropagation();
+        setSubView('move');
       }
     };
     window.addEventListener('pointerdown', handlePointerDown);
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
     return () => {
       window.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keydown', handleKeyDown, true);
     };
-  }, [isOpen, subView]);
+  }, [isOpen, subView, isOwner, onCopyActiveShareLink, onDuplicateNote]);
 
   useEffect(() => {
     if (isOpen && subView === 'main') {

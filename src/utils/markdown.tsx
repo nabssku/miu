@@ -22,7 +22,7 @@ export function renderInlineMarkdown(text: string): React.ReactNode[] {
   if (!text) return [];
 
   const tokenRegex =
-    /(`[^`]+`|\$\$[^$]+\$\$|\$[^$\n]+\$|\*\*[^*]+\*\*|__[^_]+__|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>]+|\*[^*\n]+\*|_[^_\n]+_)/g;
+    /(`[^`]+`|\$\$[^$]+\$\$|\$[^$\n]+\$|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|==[^=]+==|<u>[\s\S]+?<\/u>|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>]+|\*[^*\n]+\*|_[^_\n]+_)/g;
 
   const parts = text.split(tokenRegex);
 
@@ -74,6 +74,36 @@ export function renderInlineMarkdown(text: string): React.ReactNode[] {
         <strong key={idx} className="font-bold text-text-primary">
           {renderInlineMarkdown(part.slice(2, -2))}
         </strong>
+      );
+    }
+
+    // Strikethrough ~~...~~
+    if (part.startsWith('~~') && part.endsWith('~~') && part.length > 4) {
+      return (
+        <del key={idx} className="line-through text-text-secondary/80">
+          {renderInlineMarkdown(part.slice(2, -2))}
+        </del>
+      );
+    }
+
+    // Highlight ==...==
+    if (part.startsWith('==') && part.endsWith('==') && part.length > 4) {
+      return (
+        <mark
+          key={idx}
+          className="px-1 py-0.5 rounded bg-amber-300/45 dark:bg-amber-400/25 text-inherit"
+        >
+          {renderInlineMarkdown(part.slice(2, -2))}
+        </mark>
+      );
+    }
+
+    // Underline <u>...</u>
+    if (part.startsWith('<u>') && part.endsWith('</u>') && part.length > 7) {
+      return (
+        <span key={idx} className="underline underline-offset-2 decoration-current">
+          {renderInlineMarkdown(part.slice(3, -4))}
+        </span>
       );
     }
 
@@ -172,6 +202,9 @@ export function stripInlineMarkdown(text: string): string {
     .replace(/\*\*\*([^*]+)\*\*\*/g, '$1')
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/__([^_]+)__/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/==([^=]+)==/g, '$1')
+    .replace(/<\/?u>/gi, '')
     .replace(/\*([^*\n]+)\*/g, '$1')
     .replace(/_([^_\n]+)_/g, '$1')
     .replace(/`([^`]+)`/g, '$1')

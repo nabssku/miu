@@ -599,8 +599,12 @@ export const MiuProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setActivePopover((prev) => (prev === 'dock' ? 'none' : 'dock'));
+        const isWorkspaceApp =
+          typeof window !== 'undefined' && window.location.pathname.startsWith('/app');
+        if (!isWorkspaceApp || e.shiftKey) {
+          e.preventDefault();
+          setActivePopover((prev) => (prev === 'dock' ? 'none' : 'dock'));
+        }
       } else if (e.altKey && e.code === 'Space') {
         e.preventDefault();
         if (!e.repeat) {

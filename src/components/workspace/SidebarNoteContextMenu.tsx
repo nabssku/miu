@@ -131,22 +131,71 @@ export const SidebarNoteContextMenu: React.FC<SidebarNoteContextMenuProps> = ({
   }, [note?.id, target?.x, target?.y]);
 
   useEffect(() => {
-    if (!target) return;
+    if (!target || !note) return;
     const handlePointerDown = (e: PointerEvent) => {
       const node = e.target as Node | null;
       if (node && menuRef.current?.contains(node)) return;
       onClose();
     };
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      const mod = e.metaKey || e.ctrlKey;
+      const key = e.key.toLowerCase();
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (subView !== 'main') {
+          setSubView('main');
+        } else {
+          onClose();
+        }
+        return;
+      }
+
+      if (mod && !e.shiftKey && !e.altKey && key === 'd') {
+        e.preventDefault();
+        e.stopPropagation();
+        onDuplicate(note);
+        onClose();
+        return;
+      }
+
+      if (mod && e.shiftKey && !e.altKey && key === 'r') {
+        e.preventDefault();
+        e.stopPropagation();
+        setSubView('rename');
+        return;
+      }
+
+      if (mod && e.shiftKey && !e.altKey && key === 'p') {
+        e.preventDefault();
+        e.stopPropagation();
+        setSubView('move');
+        return;
+      }
+
+      if (mod && e.shiftKey && !e.altKey && e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        onOpenInNewTab(note);
+        onClose();
+        return;
+      }
+
+      if (mod && e.altKey && !e.shiftKey && (key === 'l' || e.code === 'KeyL')) {
+        e.preventDefault();
+        e.stopPropagation();
+        onCopyLink(note);
+        setCopiedFeedback(true);
+        window.setTimeout(() => onClose(), 350);
+      }
     };
     window.addEventListener('pointerdown', handlePointerDown);
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
     return () => {
       window.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keydown', handleKeyDown, true);
     };
-  }, [target, onClose]);
+  }, [target, note, subView, onClose, onDuplicate, onOpenInNewTab, onCopyLink]);
 
   const stats = useMemo(() => {
     if (!note) return { words: 0, chars: 0, formattedDate: '' };

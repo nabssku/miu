@@ -469,7 +469,7 @@ export const SidePeekPanel: React.FC<SidePeekPanelProps> = ({
         >
           <div>
             <span className="font-semibold text-white">Tutup</span>{' '}
-            <span className="text-slate-300">Klik atau ⌘\</span>
+            <span className="text-slate-300">Klik atau Esc</span>
           </div>
           <div>
             <span className="font-semibold text-white">Ubah ukuran</span>{' '}

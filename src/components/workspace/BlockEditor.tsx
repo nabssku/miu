@@ -26,6 +26,7 @@ import {
   HelpCircle,
   Home,
   Info,
+  Keyboard,
   LayoutGrid,
   Link2,
   ListTree,
@@ -114,6 +115,11 @@ import {
   findAllDatabaseSources,
   sanitizeFormSubmission
 } from '../../utils/databaseHelper';
+import {
+  applyInlineMarkdownShortcut,
+  isEditableElement,
+  resolveBlockConvertShortcut
+} from '../../utils/editorShortcuts';
 import { parseMarkdownToNotionBlocks, renderInlineMarkdown } from '../../utils/markdown';
 import {
   extractTextFromPdfSource,
@@ -136,6 +142,7 @@ import {
   CollaboratorsHeaderStrip
 } from './CollaboratorOverlays';
 import { extractTocHeadings, FloatingTocOutline } from './FloatingTocOutline';
+import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 import { NotesAuthModal } from './NotesAuthModal';
 import { ShareNoteModal } from './ShareNoteModal';
 import { ChartBlockView } from './blocks/ChartBlockView';
@@ -212,6 +219,7 @@ const MathPreview: React.FC<{ tex: string }> = ({ tex }) => {
 export const BlockEditor: React.FC = () => {
   const {
     theme,
+    toggleTheme,
     currentUser,
     isPublicShareAccess,
     loginGoogleUser,
@@ -226,6 +234,7 @@ export const BlockEditor: React.FC = () => {
     updateActiveBlockSelection,
     lastDictationEvent,
     activePopover,
+    setActivePopover,
     isLazytypeActive,
     isAIDrawerOpen,
     setIsAIDrawerOpen,
@@ -280,7 +289,28 @@ export const BlockEditor: React.FC = () => {
   );
   const [quickLinkCopied, setQuickLinkCopied] = useState(false);
   const [copiedMetaField, setCopiedMetaField] = useState<string | null>(null);
+  const [showMetadataFooter, setShowMetadataFooter] = useState(true);
+  const [showShortcutsModal, setShowShortcutsModal] = useState(false);
+  const [shortcutToast, setShortcutToast] = useState<string | null>(null);
+  const shortcutToastTimerRef = useRef<number | null>(null);
   const sidebarSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const blockUndoStackRef = useRef<Record<string, NoteBlock[][]>>({});
+  const blockRedoStackRef = useRef<Record<string, NoteBlock[][]>>({});
+  const lastBlockUndoPushAtRef = useRef<Record<string, number>>({});
+  const lastBlockEditStructuralRef = useRef(false);
+  const globalShortcutHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
+
+  const showShortcutFeedback = (message: string) => {
+    setShortcutToast(message);
+    if (shortcutToastTimerRef.current) {
+      window.clearTimeout(shortcutToastTimerRef.current);
+    }
+    shortcutToastTimerRef.current = window.setTimeout(() => {
+      shortcutToastTimerRef.current = null;
+      setShortcutToast((prev) => (prev === message ? null : prev));
+    }, 2200);
+  };
 
   const [showTocOutline, setShowTocOutline] = useState(true);
   useEffect(() => {
@@ -288,6 +318,10 @@ export const BlockEditor: React.FC = () => {
       const savedW = Number(window.localStorage.getItem('miu_sidebar_width'));
       if (Number.isFinite(savedW) && savedW >= 210 && savedW <= 440) {
         setSidebarWidth(savedW);
+      }
+      const savedFooter = window.localStorage.getItem('miu_show_metadata_footer');
+      if (savedFooter === 'false') {
+        setShowMetadataFooter(false);
       }
     } catch {
       // ignore
@@ -302,10 +336,7 @@ export const BlockEditor: React.FC = () => {
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
-        e.preventDefault();
-        setIsSidebarOpen((v) => !v);
-      }
+      globalShortcutHandlerRef.current(e);
     };
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
@@ -1092,9 +1123,66 @@ export const BlockEditor: React.FC = () => {
     }
   };
 
-  const updateNoteBlocks = async (nextBlocks: NoteBlock[]) => {
-    if (!canEdit) return;
+  const updateNoteBlocks = async (
+    nextBlocks: NoteBlock[],
+    options?: { skipHistory?: boolean; structural?: boolean }
+  ) => {
+    if (!canEdit || !activeNote) return;
+    if (!options?.skipHistory) {
+      const noteId = activeNote.id;
+      const now = Date.now();
+      const isStructural = options?.structural !== false;
+      const prevPushAt = lastBlockUndoPushAtRef.current[noteId] || 0;
+      const shouldPush = isStructural || now - prevPushAt > 700;
+      if (shouldPush) {
+        const currentSnapshot = activeNote.blocks.map((b) => ({
+          ...b,
+          ...(b.columns
+            ? { columns: b.columns.map((c) => ({ ...c, blocks: c.blocks.map((cb) => ({ ...cb })) })) }
+            : {})
+        }));
+        const stack = blockUndoStackRef.current[noteId] || [];
+        stack.push(currentSnapshot);
+        if (stack.length > 40) stack.shift();
+        blockUndoStackRef.current[noteId] = stack;
+        blockRedoStackRef.current[noteId] = [];
+        lastBlockUndoPushAtRef.current[noteId] = now;
+      }
+      lastBlockEditStructuralRef.current = isStructural;
+    }
     await updateNote({ blocks: nextBlocks });
+  };
+
+  const handleUndoBlocks = async () => {
+    if (!activeNote || !canEdit) return;
+    const noteId = activeNote.id;
+    const stack = blockUndoStackRef.current[noteId];
+    if (!stack || stack.length === 0) return;
+    const previous = stack.pop();
+    if (!previous) return;
+    const redoStack = blockRedoStackRef.current[noteId] || [];
+    redoStack.push(activeNote.blocks.map((b) => ({ ...b })));
+    if (redoStack.length > 40) redoStack.shift();
+    blockRedoStackRef.current[noteId] = redoStack;
+    lastBlockEditStructuralRef.current = true;
+    await updateNoteBlocks(previous, { skipHistory: true });
+    showShortcutFeedback('Undo diterapkan (⌘Z)');
+  };
+
+  const handleRedoBlocks = async () => {
+    if (!activeNote || !canEdit) return;
+    const noteId = activeNote.id;
+    const redoStack = blockRedoStackRef.current[noteId];
+    if (!redoStack || redoStack.length === 0) return;
+    const nextSnapshot = redoStack.pop();
+    if (!nextSnapshot) return;
+    const undoStack = blockUndoStackRef.current[noteId] || [];
+    undoStack.push(activeNote.blocks.map((b) => ({ ...b })));
+    if (undoStack.length > 40) undoStack.shift();
+    blockUndoStackRef.current[noteId] = undoStack;
+    lastBlockEditStructuralRef.current = true;
+    await updateNoteBlocks(nextSnapshot, { skipHistory: true });
+    showShortcutFeedback('Redo diterapkan (⌘⇧Z)');
   };
 
   // Create a clean blank Notion page (root or nested subpage) & sync to Neon
@@ -1783,11 +1871,13 @@ export const BlockEditor: React.FC = () => {
   const handleBlockChange = async (id: string, patch: Partial<NoteBlock>) => {
     if (!activeNote || !canEdit) return;
     const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const currentBlk = findBlockById(freshNote.blocks, id);
+    const isPlainTextBlock = !currentBlk || currentBlk.type === 'text';
 
     if (typeof patch.content === 'string') {
       const val = patch.content;
 
-      if (val === '```mermaid ') {
+      if (isPlainTextBlock && val === '```mermaid ') {
         const next = mapBlockDeep(freshNote.blocks, id, (b) => ({
           ...b,
           type: 'mermaid' as BlockType,
@@ -1795,68 +1885,73 @@ export const BlockEditor: React.FC = () => {
           content: DEFAULT_MERMAID_CODE
         }));
         setSlashState(null);
-        await updateNoteBlocks(next);
+        await updateNoteBlocks(next, { structural: true });
         return;
       }
 
-      const mdTriggers: Array<{ prefix: string; type: BlockType; extra?: Partial<NoteBlock> }> = [
-        { prefix: '# ', type: 'h1' },
-        { prefix: '## ', type: 'h2' },
-        { prefix: '### ', type: 'h3' },
-        { prefix: '- ', type: 'bullet' },
-        { prefix: '* ', type: 'bullet' },
-        { prefix: '1. ', type: 'numbered' },
-        { prefix: '[] ', type: 'todo', extra: { checked: false } },
-        { prefix: '[ ] ', type: 'todo', extra: { checked: false } },
-        { prefix: '[x] ', type: 'todo', extra: { checked: true } },
-        { prefix: '> ', type: 'quote' },
-        { prefix: '>> ', type: 'toggle', extra: { toggleOpen: true, toggleBody: '' } },
-        { prefix: '``` ', type: 'code', extra: { language: 'javascript' } }
-      ];
+      if (isPlainTextBlock) {
+        const mdTriggers: Array<{ prefix: string; type: BlockType; extra?: Partial<NoteBlock> }> = [
+          { prefix: '# ', type: 'h1' },
+          { prefix: '## ', type: 'h2' },
+          { prefix: '### ', type: 'h3' },
+          { prefix: '- ', type: 'bullet' },
+          { prefix: '* ', type: 'bullet' },
+          { prefix: '1. ', type: 'numbered' },
+          { prefix: '[] ', type: 'todo', extra: { checked: false } },
+          { prefix: '[ ] ', type: 'todo', extra: { checked: false } },
+          { prefix: '[x] ', type: 'todo', extra: { checked: true } },
+          { prefix: '> ', type: 'quote' },
+          { prefix: '" ', type: 'quote' },
+          { prefix: '>> ', type: 'toggle', extra: { toggleOpen: true, toggleBody: '' } },
+          { prefix: '! ', type: 'callout', extra: { calloutIcon: '💡' } },
+          { prefix: '``` ', type: 'code', extra: { language: 'javascript' } },
+          { prefix: '$$ ', type: 'math' }
+        ];
 
-      for (const trig of mdTriggers) {
-        if (val.startsWith(trig.prefix)) {
-          const stripped = val.slice(trig.prefix.length);
-          const next = mapBlockDeep(freshNote.blocks, id, (b) => ({
-            ...b,
-            type: trig.type,
-            content: stripped,
-            ...(trig.extra || {})
-          }));
-          const updatedTargetBlk = findBlockById(next, id);
-          setSlashState(null);
-          await updateNoteBlocks(next);
-          if (updatedTargetBlk) {
-            reportBlockTarget(
-              updatedTargetBlk,
-              'content',
-              stripped.length,
-              stripped.length,
-              'focus'
-            );
+        for (const trig of mdTriggers) {
+          if (val.startsWith(trig.prefix)) {
+            const stripped = val.slice(trig.prefix.length);
+            const next = mapBlockDeep(freshNote.blocks, id, (b) => ({
+              ...b,
+              type: trig.type,
+              content: stripped,
+              ...(trig.extra || {})
+            }));
+            const updatedTargetBlk = findBlockById(next, id);
+            setSlashState(null);
+            await updateNoteBlocks(next, { structural: true });
+            if (updatedTargetBlk) {
+              reportBlockTarget(
+                updatedTargetBlk,
+                'content',
+                stripped.length,
+                stripped.length,
+                'focus'
+              );
+            }
+            setPendingFocusBlockId(id);
+            return;
           }
-          setPendingFocusBlockId(id);
+        }
+
+        if (val === '---') {
+          const newTextId = createBlockId();
+          const newTextBlk: NoteBlock = { id: newTextId, type: 'text', content: '' };
+          let next = mapBlockDeep(freshNote.blocks, id, (b) => ({
+            ...b,
+            type: 'divider',
+            content: ''
+          }));
+          next = insertBlocksRelativeDeep(next, id, 'after', [newTextBlk]);
+          setSlashState(null);
+          await updateNoteBlocks(next, { structural: true });
+          reportBlockTarget(newTextBlk, 'content', 0, 0, 'focus');
+          setPendingFocusBlockId(newTextId);
           return;
         }
       }
 
-      if (val === '---') {
-        const newTextId = createBlockId();
-        const newTextBlk: NoteBlock = { id: newTextId, type: 'text', content: '' };
-        let next = mapBlockDeep(freshNote.blocks, id, (b) => ({
-          ...b,
-          type: 'divider',
-          content: ''
-        }));
-        next = insertBlocksRelativeDeep(next, id, 'after', [newTextBlk]);
-        setSlashState(null);
-        await updateNoteBlocks(next);
-        reportBlockTarget(newTextBlk, 'content', 0, 0, 'focus');
-        setPendingFocusBlockId(newTextId);
-        return;
-      }
-
-      if (val.startsWith('/') && !val.includes(' ')) {
+      if (isPlainTextBlock && val.startsWith('/') && !val.includes(' ')) {
         setSlashState({
           blockId: id,
           query: val.slice(1),
@@ -1868,7 +1963,9 @@ export const BlockEditor: React.FC = () => {
     }
 
     const next = mapBlockDeep(freshNote.blocks, id, (b) => ({ ...b, ...patch }));
-    await updateNoteBlocks(next);
+    await updateNoteBlocks(next, {
+      structural: patch.type !== undefined
+    });
   };
 
   const applySlashCommand = async (
@@ -2366,11 +2463,65 @@ export const BlockEditor: React.FC = () => {
     setIsSelectMode(false);
   };
 
+  const handleDuplicateSelectedBlocks = async () => {
+    if (!activeNote || !canEdit || selectedBlockIds.length === 0) return;
+    const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
+    const selectedSet = new Set(selectedBlockIds);
+    const nextBlocks: NoteBlock[] = [];
+    let duplicatedCount = 0;
+    for (const blk of freshNote.blocks) {
+      nextBlocks.push(blk);
+      if (selectedSet.has(blk.id)) {
+        nextBlocks.push(cloneBlockDeep(blk));
+        duplicatedCount++;
+      }
+    }
+    if (duplicatedCount > 0) {
+      await updateNoteBlocks(nextBlocks, { structural: true });
+      showShortcutFeedback(`${duplicatedCount} blok diduplikatkan (⌘D)`);
+    }
+  };
+
   const handleMoveBlock = async (id: string, dir: -1 | 1) => {
     if (!activeNote || !canEdit) return;
     const freshNote = (await db.notes.get(activeNote.id)) || activeNote;
     setMenuBlockId(null);
-    await updateNoteBlocks(moveBlockStepDeep(freshNote.blocks, id, dir));
+    await updateNoteBlocks(moveBlockStepDeep(freshNote.blocks, id, dir), {
+      structural: true
+    });
+  };
+
+  const focusAdjacentEditableBlock = (currentBlockId: string, dir: -1 | 1) => {
+    if (!activeNote) return;
+    const editableTypes = new Set<BlockType>([
+      'text',
+      'h1',
+      'h2',
+      'h3',
+      'bullet',
+      'numbered',
+      'todo',
+      'deadline',
+      'toggle',
+      'quote',
+      'callout',
+      'code',
+      'math'
+    ]);
+    const flat = flattenBlocks(activeNote.blocks).filter((b) =>
+      editableTypes.has(b.type)
+    );
+    const idx = flat.findIndex((b) => b.id === currentBlockId);
+    if (idx === -1) return;
+    const targetIdx = idx + dir;
+    if (targetIdx < 0) {
+      titleInputRef.current?.focus();
+      return;
+    }
+    const nextBlk = flat[targetIdx];
+    if (!nextBlk) return;
+    setEditingBlockId(nextBlk.id);
+    setPendingFocusBlockId(nextBlk.id);
   };
 
   const handleBlockKeyDown = (
@@ -2414,7 +2565,165 @@ export const BlockEditor: React.FC = () => {
       }
     }
 
-    if (e.key === 'Enter' && !e.shiftKey && block.type !== 'code' && block.type !== 'callout') {
+    const mod = e.metaKey || e.ctrlKey;
+    const key = e.key.toLowerCase();
+    const el = e.currentTarget;
+
+    // 1. Inline Markdown Formatting Shortcuts (Cmd/Ctrl + B / I / U / E / Shift+S / Shift+H)
+    if (
+      canEdit &&
+      mod &&
+      !e.altKey &&
+      block.type !== 'code' &&
+      block.type !== 'math' &&
+      block.type !== 'mermaid'
+    ) {
+      let openMarker: string | null = null;
+      let closeMarker: string | null = null;
+
+      if (!e.shiftKey && key === 'b') {
+        openMarker = '**';
+        closeMarker = '**';
+      } else if (!e.shiftKey && key === 'i') {
+        openMarker = '*';
+        closeMarker = '*';
+      } else if (!e.shiftKey && key === 'u') {
+        openMarker = '<u>';
+        closeMarker = '</u>';
+      } else if (!e.shiftKey && key === 'e') {
+        openMarker = '`';
+        closeMarker = '`';
+      } else if (e.shiftKey && key === 's') {
+        openMarker = '~~';
+        closeMarker = '~~';
+      } else if (e.shiftKey && key === 'h') {
+        openMarker = '==';
+        closeMarker = '==';
+      }
+
+      if (openMarker && closeMarker) {
+        e.preventDefault();
+        e.stopPropagation();
+        const start = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+        const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+        const formatted = applyInlineMarkdownShortcut(
+          el.value,
+          start,
+          end,
+          openMarker,
+          closeMarker
+        );
+        void handleBlockChange(block.id, { content: formatted.nextValue });
+        window.requestAnimationFrame(() => {
+          const host = blockRefs.current[block.id];
+          if (host && 'setSelectionRange' in host) {
+            host.focus();
+            host.setSelectionRange(
+              formatted.nextSelectionStart,
+              formatted.nextSelectionEnd
+            );
+          }
+        });
+        return;
+      }
+    }
+
+    // 2. Quick Block Type Conversion (Cmd/Ctrl + Alt + 0..9)
+    if (canEdit) {
+      const convertType = resolveBlockConvertShortcut(e);
+      if (convertType) {
+        e.preventDefault();
+        e.stopPropagation();
+        void applySlashCommand(block.id, convertType);
+        return;
+      }
+    }
+
+    // 3. Reorder Block Up/Down (Cmd/Ctrl+Shift+Up/Down or Alt+Up/Down)
+    if (
+      canEdit &&
+      (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+      ((mod && e.shiftKey && !e.altKey) || (!mod && e.altKey && !e.shiftKey))
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      const dir: -1 | 1 = e.key === 'ArrowUp' ? -1 : 1;
+      void handleMoveBlock(block.id, dir).then(() => {
+        setPendingFocusBlockId(block.id);
+      });
+      return;
+    }
+
+    // 4. Duplicate Current Block (Cmd/Ctrl+Shift+D)
+    if (canEdit && mod && e.shiftKey && !e.altKey && key === 'd') {
+      e.preventDefault();
+      e.stopPropagation();
+      void handleDuplicateBlock(block);
+      showShortcutFeedback('Blok diduplikatkan (⌘⇧D)');
+      return;
+    }
+
+    // 5. Smart Cmd/Ctrl+Enter (toggle todo/deadline/toggle or exit code/callout/math block)
+    if (canEdit && mod && !e.shiftKey && !e.altKey && e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (block.type === 'todo' || block.type === 'deadline') {
+        void handleBlockChange(block.id, { checked: !block.checked });
+      } else if (block.type === 'toggle') {
+        void handleBlockChange(block.id, { toggleOpen: !block.toggleOpen });
+      } else {
+        void handleAddBlockAfter(block.id, 'text');
+      }
+      return;
+    }
+
+    // 6. Tab indentation inside code blocks
+    if (canEdit && e.key === 'Tab' && !mod && !e.altKey && block.type === 'code') {
+      e.preventDefault();
+      const start = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+      const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+      const nextVal = `${el.value.slice(0, start)}  ${el.value.slice(end)}`;
+      void handleBlockChange(block.id, { content: nextVal });
+      window.requestAnimationFrame(() => {
+        const host = blockRefs.current[block.id];
+        if (host && 'setSelectionRange' in host) {
+          host.setSelectionRange(start + 2, start + 2);
+        }
+      });
+      return;
+    }
+
+    // 7. Smooth ArrowUp / ArrowDown navigation across blocks
+    if (!mod && !e.altKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const start = typeof el.selectionStart === 'number' ? el.selectionStart : 0;
+      const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+      const isTextarea = el.tagName.toLowerCase() === 'textarea';
+      if (e.key === 'ArrowUp') {
+        const onFirstLine = !isTextarea || !el.value.slice(0, start).includes('\n');
+        if (onFirstLine) {
+          e.preventDefault();
+          focusAdjacentEditableBlock(block.id, -1);
+          return;
+        }
+      } else if (e.key === 'ArrowDown') {
+        const onLastLine = !isTextarea || !el.value.slice(end).includes('\n');
+        if (onLastLine) {
+          e.preventDefault();
+          focusAdjacentEditableBlock(block.id, 1);
+          return;
+        }
+      }
+    }
+
+    // 8. Enter creates next block (except multiline code/callout/math blocks)
+    if (
+      e.key === 'Enter' &&
+      !e.shiftKey &&
+      !mod &&
+      block.type !== 'code' &&
+      block.type !== 'callout' &&
+      block.type !== 'math'
+    ) {
       e.preventDefault();
       if (
         !block.content.trim() &&
@@ -2430,12 +2739,269 @@ export const BlockEditor: React.FC = () => {
       return;
     }
 
-    if (e.key === 'Backspace' && block.content === '') {
+    // 9. Backspace at start of block converts non-text block back to text, or deletes empty text block
+    if (e.key === 'Backspace' && !mod && !e.altKey) {
+      const start = typeof el.selectionStart === 'number' ? el.selectionStart : 0;
+      const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+      if (start === 0 && end === 0) {
+        if (block.type !== 'text') {
+          e.preventDefault();
+          void handleBlockChange(block.id, { type: 'text' });
+          return;
+        }
+        if (block.content === '') {
+          e.preventDefault();
+          void handleDeleteBlock(block.id);
+        }
+      }
+    }
+  };
+
+  // Keep global note shortcut handler always synced with latest React state/closures
+  globalShortcutHandlerRef.current = (e: KeyboardEvent) => {
+    // Let SidebarNoteContextMenu handle shortcuts while its menu is open
+    if (sidebarNoteMenuTarget) return;
+
+    const mod = e.metaKey || e.ctrlKey;
+    const key = e.key.toLowerCase();
+    const editingInput = isEditableElement(e.target);
+
+    // 1. Toggle Sidebar (Cmd/Ctrl + \)
+    if (mod && !e.shiftKey && !e.altKey && (e.key === '\\' || e.code === 'Backslash')) {
       e.preventDefault();
-      if (block.type !== 'text') {
-        void handleBlockChange(block.id, { type: 'text' });
-      } else {
-        void handleDeleteBlock(block.id);
+      setIsSidebarOpen((v) => !v);
+      return;
+    }
+
+    // 2. Close Side Peek (Cmd/Ctrl + Shift + \)
+    if (mod && e.shiftKey && !e.altKey && (e.key === '\\' || e.key === '|' || e.code === 'Backslash')) {
+      if (sidePeekNoteId) {
+        e.preventDefault();
+        setSidePeekNoteId(null);
+      }
+      return;
+    }
+
+    // 3. Focus Sidebar Search "Cari atau tanya" (Cmd/Ctrl + K)
+    if (mod && !e.shiftKey && !e.altKey && (key === 'k' || e.code === 'KeyK')) {
+      e.preventDefault();
+      if (document.activeElement === sidebarSearchInputRef.current && !searchQuery) {
+        setActivePopover(activePopover === 'dock' ? 'none' : 'dock');
+        return;
+      }
+      setIsSidebarOpen(true);
+      window.setTimeout(() => {
+        sidebarSearchInputRef.current?.focus();
+        sidebarSearchInputRef.current?.select();
+      }, 20);
+      return;
+    }
+
+    // 4. Toggle Miu AI Assistant Drawer (Cmd/Ctrl + J)
+    if (mod && !e.shiftKey && !e.altKey && (key === 'j' || e.code === 'KeyJ')) {
+      e.preventDefault();
+      setIsAIDrawerOpen(!isAIDrawerOpen);
+      return;
+    }
+
+    // 5. Open / Close Keyboard Shortcuts Guide Modal (Cmd/Ctrl + /)
+    if (mod && !e.shiftKey && !e.altKey && (e.key === '/' || e.code === 'Slash')) {
+      e.preventDefault();
+      setShowShortcutsModal((v) => !v);
+      return;
+    }
+
+    // 6. Toggle Bottom Metadata Footer Strip (Cmd/Ctrl + Shift + .)
+    if (mod && e.shiftKey && !e.altKey && (e.code === 'Period' || e.key === '.' || e.key === '>')) {
+      e.preventDefault();
+      setShowMetadataFooter((prev) => {
+        const next = !prev;
+        try {
+          window.localStorage.setItem('miu_show_metadata_footer', String(next));
+        } catch {
+          // ignore
+        }
+        showShortcutFeedback(
+          next
+            ? 'Bilah info bawah ditampilkan (⌘⇧.)'
+            : 'Bilah info bawah disembunyikan (tekan ⌘⇧. untuk menampilkan)'
+        );
+        return next;
+      });
+      return;
+    }
+
+    // 7. Toggle Dark / Light Theme (Cmd/Ctrl + Shift + L)
+    if (mod && e.shiftKey && !e.altKey && (key === 'l' || e.code === 'KeyL')) {
+      e.preventDefault();
+      toggleTheme();
+      showShortcutFeedback(theme === 'dark' ? 'Mode Terang aktif (⌘⇧L)' : 'Mode Gelap aktif (⌘⇧L)');
+      return;
+    }
+
+    // 8. Copy Active Page Link (Cmd/Ctrl + Alt + L)
+    if (mod && e.altKey && !e.shiftKey && (key === 'l' || e.code === 'KeyL')) {
+      if (activeNote) {
+        e.preventDefault();
+        void handleCopyActiveShareLink().then(() => {
+          showShortcutFeedback('Tautan halaman aktif & disalin (⌘⌥L)');
+        });
+      }
+      return;
+    }
+
+    // 9. Duplicate Selected Blocks or Active Note (Cmd/Ctrl + D)
+    if (mod && !e.shiftKey && !e.altKey && (key === 'd' || e.code === 'KeyD')) {
+      e.preventDefault();
+      if (selectedBlockIds.length > 0 && canEdit) {
+        void handleDuplicateSelectedBlocks();
+      } else if (activeNote && isOwner) {
+        const fakeEvent = { stopPropagation: () => {} } as React.MouseEvent;
+        void handleDuplicateNote(activeNote, fakeEvent).then(() => {
+          showShortcutFeedback('Halaman diduplikatkan (⌘D)');
+        });
+      }
+      return;
+    }
+
+    // 10. Rename Active Note (Cmd/Ctrl + Shift + R)
+    if (mod && e.shiftKey && !e.altKey && (key === 'r' || e.code === 'KeyR')) {
+      if (activeNote && canEdit) {
+        e.preventDefault();
+        setMainViewMode('document');
+        window.setTimeout(() => {
+          titleInputRef.current?.focus();
+          titleInputRef.current?.select();
+        }, 30);
+        showShortcutFeedback('Ganti nama halaman aktif (⌘⇧R)');
+      }
+      return;
+    }
+
+    // 11. Move Active Note To Another Parent (Cmd/Ctrl + Shift + P)
+    if (mod && e.shiftKey && !e.altKey && (key === 'p' || e.code === 'KeyP')) {
+      if (activeNote && isOwner) {
+        e.preventDefault();
+        setMainViewMode('document');
+        window.setTimeout(() => {
+          window.dispatchEvent(
+            new CustomEvent('miu:open-page-actions', { detail: { subView: 'move' } })
+          );
+        }, 20);
+      }
+      return;
+    }
+
+    // 12. Open Active Note in New Tab (Cmd/Ctrl + Shift + Enter)
+    if (mod && e.shiftKey && !e.altKey && e.key === 'Enter') {
+      if (activeNote) {
+        e.preventDefault();
+        handleOpenNoteInNewTab(activeNote);
+      }
+      return;
+    }
+
+    // 13. Create New Page (Alt + N or Cmd/Ctrl + Alt + N)
+    if (e.altKey && !e.shiftKey && (e.code === 'KeyN' || key === 'n')) {
+      if (currentUser) {
+        e.preventDefault();
+        void handleCreateNote(null, true).then(() => {
+          showShortcutFeedback('Halaman baru dibuat (Alt+N)');
+        });
+      }
+      return;
+    }
+
+    // 14. Block Undo (Cmd/Ctrl + Z)
+    if (mod && !e.shiftKey && !e.altKey && (key === 'z' || e.code === 'KeyZ')) {
+      const hasUndo =
+        Boolean(activeNote) &&
+        (blockUndoStackRef.current[activeNote?.id || '']?.length || 0) > 0;
+      if (hasUndo && (!editingInput || lastBlockEditStructuralRef.current)) {
+        e.preventDefault();
+        void handleUndoBlocks();
+      }
+      return;
+    }
+
+    // 15. Block Redo (Cmd/Ctrl + Shift + Z or Ctrl + Y)
+    if (
+      (mod && e.shiftKey && !e.altKey && (key === 'z' || e.code === 'KeyZ')) ||
+      (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && (key === 'y' || e.code === 'KeyY'))
+    ) {
+      const hasRedo =
+        Boolean(activeNote) &&
+        (blockRedoStackRef.current[activeNote?.id || '']?.length || 0) > 0;
+      if (hasRedo && (!editingInput || lastBlockEditStructuralRef.current)) {
+        e.preventDefault();
+        void handleRedoBlocks();
+      }
+      return;
+    }
+
+    // 16. Delete Selected Blocks (Delete / Backspace outside editable input)
+    if (
+      !editingInput &&
+      !mod &&
+      !e.altKey &&
+      (e.key === 'Delete' || e.key === 'Backspace') &&
+      selectedBlockIds.length > 0 &&
+      canEdit
+    ) {
+      e.preventDefault();
+      const count = selectedBlockIds.length;
+      void handleDeleteSelectedBlocks().then(() => {
+        showShortcutFeedback(`${count} blok dihapus`);
+      });
+      return;
+    }
+
+    // 17. Select All Blocks (Cmd/Ctrl + A outside editable input)
+    if (
+      !editingInput &&
+      mod &&
+      !e.shiftKey &&
+      !e.altKey &&
+      (key === 'a' || e.code === 'KeyA') &&
+      mainViewMode === 'document' &&
+      activeNote &&
+      canEdit
+    ) {
+      e.preventDefault();
+      handleSelectAllBlocks();
+      return;
+    }
+
+    // 18. Layered Escape Dismiss
+    if (e.key === 'Escape') {
+      if (showShortcutsModal) {
+        setShowShortcutsModal(false);
+        return;
+      }
+      if (slashState) {
+        setSlashState(null);
+        return;
+      }
+      if (selectedBlockIds.length > 0 || isSelectMode) {
+        setSelectedBlockIds([]);
+        setLastSelectedBlockId(null);
+        setIsSelectMode(false);
+        return;
+      }
+      if (menuBlockId) {
+        setMenuBlockId(null);
+        return;
+      }
+      if (showIconPicker || showCoverPicker || showShareModal || isInboxOpen || showUserMenu) {
+        setShowIconPicker(false);
+        setShowCoverPicker(false);
+        setShowShareModal(false);
+        setIsInboxOpen(false);
+        setShowUserMenu(false);
+        return;
+      }
+      if (sidePeekNoteId) {
+        setSidePeekNoteId(null);
       }
     }
   };
@@ -4100,6 +4666,36 @@ export const BlockEditor: React.FC = () => {
                             toggleBody: e.target.value
                           })
                         }
+                        onKeyDown={(e) => {
+                          const mod = e.metaKey || e.ctrlKey;
+                          const key = e.key.toLowerCase();
+                          if (canEdit && mod && !e.altKey) {
+                            let openM: string | null = null;
+                            let closeM: string | null = null;
+                            if (!e.shiftKey && key === 'b') { openM = '**'; closeM = '**'; }
+                            else if (!e.shiftKey && key === 'i') { openM = '*'; closeM = '*'; }
+                            else if (!e.shiftKey && key === 'u') { openM = '<u>'; closeM = '</u>'; }
+                            else if (!e.shiftKey && key === 'e') { openM = '`'; closeM = '`'; }
+                            else if (e.shiftKey && key === 's') { openM = '~~'; closeM = '~~'; }
+                            else if (e.shiftKey && key === 'h') { openM = '=='; closeM = '=='; }
+                            if (openM && closeM) {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              const el = e.currentTarget;
+                              const start = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+                              const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+                              const formatted = applyInlineMarkdownShortcut(el.value, start, end, openM, closeM);
+                              void handleBlockChange(block.id, { toggleBody: formatted.nextValue });
+                              window.requestAnimationFrame(() => {
+                                const host = toggleBodyRefs.current[block.id];
+                                if (host) {
+                                  host.focus();
+                                  host.setSelectionRange(formatted.nextSelectionStart, formatted.nextSelectionEnd);
+                                }
+                              });
+                            }
+                          }
+                        }}
                         placeholder={canEdit ? 'Ketik isi di dalam toggle...' : ''}
                         className="w-full bg-transparent text-sm text-text-primary focus:outline-none resize-none"
                       />
@@ -4152,6 +4748,7 @@ export const BlockEditor: React.FC = () => {
                       onChange={(e) =>
                         void handleBlockChange(block.id, { content: e.target.value })
                       }
+                      onKeyDown={(e) => handleBlockKeyDown(e, block)}
                       placeholder="Ketik isi callout..."
                       className="w-full bg-transparent text-sm leading-relaxed text-text-primary focus:outline-none resize-none"
                     />
@@ -4311,6 +4908,7 @@ export const BlockEditor: React.FC = () => {
                   onChange={(e) =>
                     void handleBlockChange(block.id, { content: e.target.value })
                   }
+                  onKeyDown={(e) => handleBlockKeyDown(e, block)}
                   placeholder="Ketik kode..."
                   className="w-full p-3 bg-transparent font-mono text-xs leading-relaxed text-slate-100 focus:outline-none resize-y rounded-b-[11px]"
                 />
@@ -5484,6 +6082,15 @@ export const BlockEditor: React.FC = () => {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        if (searchQuery) {
+                          setSearchQuery('');
+                        } else {
+                          e.currentTarget.blur();
+                        }
+                      }
+                    }}
                     placeholder="Cari atau tanya"
                     className="w-full bg-transparent text-[13px] text-text-primary placeholder:text-text-secondary/65 focus:outline-none pr-8"
                   />
@@ -5496,9 +6103,17 @@ export const BlockEditor: React.FC = () => {
                       ✕
                     </button>
                   ) : (
-                    <span className="px-1.5 py-0.5 rounded bg-subtle border border-border-subtle/80 text-[10px] font-mono font-medium text-text-secondary shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sidebarSearchInputRef.current?.focus();
+                        sidebarSearchInputRef.current?.select();
+                      }}
+                      title="Cari atau tanya (⌘K)"
+                      className="px-1.5 py-0.5 rounded bg-subtle hover:bg-text-primary/10 border border-border-subtle/80 text-[10px] font-mono font-medium text-text-secondary shrink-0 transition"
+                    >
                       ⌘K
-                    </span>
+                    </button>
                   )}
                 </div>
               </div>
@@ -6433,6 +7048,15 @@ export const BlockEditor: React.FC = () => {
                 </button>
 
                 <div className="flex items-center gap-0.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setShowShortcutsModal(true)}
+                    className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-text-primary/[0.06] transition"
+                    title="Pintasan keyboard (⌘/)"
+                    aria-label="Pintasan keyboard"
+                  >
+                    <Keyboard className="w-3.5 h-3.5" />
+                  </button>
                   <SidebarWhatsNewButton />
                   <SidebarQuickLauncherPopover
                     onOpenSkillLibrary={() => {
@@ -6461,6 +7085,20 @@ export const BlockEditor: React.FC = () => {
                         </p>
                       </div>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowUserMenu(false);
+                        setShowShortcutsModal(true);
+                      }}
+                      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-subtle text-text-primary transition text-left"
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <Keyboard className="w-3.5 h-3.5 text-text-secondary" />
+                        <span>Pintasan Keyboard</span>
+                      </span>
+                      <span className="text-[10px] font-mono text-text-secondary">⌘/</span>
+                    </button>
                     <button
                       type="button"
                       onClick={() => {
@@ -7118,7 +7756,10 @@ export const BlockEditor: React.FC = () => {
                             <BlockCollaboratorPointers pointers={titlePointers} />
                           )}
                           <input
-                            ref={(el) => setCaretHostRef('__title__', 'title', el)}
+                            ref={(el) => {
+                              titleInputRef.current = el;
+                              setCaretHostRef('__title__', 'title', el);
+                            }}
                             type="text"
                             readOnly={!canEdit}
                             value={activeNote.title}
@@ -7137,6 +7778,9 @@ export const BlockEditor: React.FC = () => {
                                 } else {
                                   void handleAddBlockAfter(undefined, 'text');
                                 }
+                              } else if (e.key === 'ArrowDown' && activeNote.blocks[0]) {
+                                e.preventDefault();
+                                setPendingFocusBlockId(activeNote.blocks[0].id);
                               }
                             }}
                             placeholder="Tanpa Judul"
@@ -7382,69 +8026,86 @@ export const BlockEditor: React.FC = () => {
                 />
               </div>
 
-              {/* Bottom Metadata Strip (matching image.png & image_4.png) */}
-              <footer className="sticky bottom-0 z-10 px-4 py-1 bg-surface/95 backdrop-blur-sm border-t border-border-subtle/60 flex items-center justify-between gap-3 text-[10px] font-mono text-text-secondary/80 overflow-x-auto no-print">
-                <div className="flex items-center gap-4 min-w-0">
-                  {(
-                    [
-                      {
-                        key: 'user',
-                        label: 'PENGGUNA',
-                        val: currentUser?.id || 'local-guest'
-                      },
-                      {
-                        key: 'workspace',
-                        label: 'RUANG KERJA',
-                        val: activeCourseId || 'workspace-main'
-                      },
-                      {
-                        key: 'page',
-                        label: 'HALAMAN',
-                        val: activeNote.id
-                      },
-                      {
-                        key: 'block',
-                        label: 'BLOK',
-                        val:
-                          activeBlockTarget?.blockId ||
-                          activeNote.blocks[0]?.id ||
-                          'blk-root'
+              {/* Bottom Metadata Strip (toggleable via ⌘⇧.) */}
+              {showMetadataFooter && (
+                <footer className="sticky bottom-0 z-10 px-4 py-1 bg-surface/95 backdrop-blur-sm border-t border-border-subtle/60 flex items-center justify-between gap-3 text-[10px] font-mono text-text-secondary/80 overflow-x-auto no-print">
+                  <div className="flex items-center gap-4 min-w-0">
+                    {(
+                      [
+                        {
+                          key: 'user',
+                          label: 'PENGGUNA',
+                          val: currentUser?.id || 'local-guest'
+                        },
+                        {
+                          key: 'workspace',
+                          label: 'RUANG KERJA',
+                          val: activeCourseId || 'workspace-main'
+                        },
+                        {
+                          key: 'page',
+                          label: 'HALAMAN',
+                          val: activeNote.id
+                        },
+                        {
+                          key: 'block',
+                          label: 'BLOK',
+                          val:
+                            activeBlockTarget?.blockId ||
+                            activeNote.blocks[0]?.id ||
+                            'blk-root'
+                        }
+                      ] as const
+                    ).map((meta) => (
+                      <button
+                        key={meta.key}
+                        type="button"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(meta.val);
+                          setCopiedMetaField(meta.key);
+                          window.setTimeout(
+                            () =>
+                              setCopiedMetaField((prev) =>
+                                prev === meta.key ? null : prev
+                              ),
+                            1500
+                          );
+                        }}
+                        className="inline-flex items-center gap-1 hover:text-text-primary transition shrink-0"
+                        title={`Salin ID ${meta.label}: ${meta.val}`}
+                      >
+                        <span className="font-semibold text-text-secondary/65">
+                          {meta.label}
+                        </span>
+                        <span className="truncate max-w-[110px]">{meta.val}</span>
+                        {copiedMetaField === meta.key ? (
+                          <Check className="w-2.5 h-2.5 text-emerald-500" />
+                        ) : (
+                          <Copy className="w-2.5 h-2.5 opacity-60" />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMetadataFooter(false);
+                      try {
+                        window.localStorage.setItem('miu_show_metadata_footer', 'false');
+                      } catch {
+                        // ignore
                       }
-                    ] as const
-                  ).map((meta) => (
-                    <button
-                      key={meta.key}
-                      type="button"
-                      onClick={() => {
-                        void navigator.clipboard.writeText(meta.val);
-                        setCopiedMetaField(meta.key);
-                        window.setTimeout(
-                          () =>
-                            setCopiedMetaField((prev) =>
-                              prev === meta.key ? null : prev
-                            ),
-                          1500
-                        );
-                      }}
-                      className="inline-flex items-center gap-1 hover:text-text-primary transition shrink-0"
-                      title={`Salin ID ${meta.label}: ${meta.val}`}
-                    >
-                      <span className="font-semibold text-text-secondary/65">
-                        {meta.label}
-                      </span>
-                      <span className="truncate max-w-[110px]">{meta.val}</span>
-                      {copiedMetaField === meta.key ? (
-                        <Check className="w-2.5 h-2.5 text-emerald-500" />
-                      ) : (
-                        <Copy className="w-2.5 h-2.5 opacity-60" />
-                      )}
-                    </button>
-                  ))}
-                </div>
-                <span className="text-[10px] text-text-secondary/60 shrink-0">
-                  ⌘⇧.
-                </span>
-              </footer>
+                      showShortcutFeedback(
+                        'Bilah info bawah disembunyikan (tekan ⌘⇧. untuk menampilkan)'
+                      );
+                    }}
+                    title="Sembunyikan bilah info bawah (⌘⇧.)"
+                    className="text-[10px] text-text-secondary/70 hover:text-text-primary px-1.5 py-0.5 rounded hover:bg-subtle shrink-0 transition"
+                  >
+                    ⌘⇧.
+                  </button>
+                </footer>
+              )}
             </div>
           ) : (
             <div className="py-20 text-center space-y-3 my-auto">
@@ -7531,6 +8192,24 @@ export const BlockEditor: React.FC = () => {
           onUpdateShareSettings={handleUpdateShareSettings}
           onClose={() => setShowShareModal(false)}
         />
+      )}
+
+      {/* Keyboard Shortcuts Reference Modal (⌘/) */}
+      <KeyboardShortcutsModal
+        isOpen={showShortcutsModal}
+        onClose={() => setShowShortcutsModal(false)}
+      />
+
+      {/* Floating Shortcut Feedback Toast */}
+      {shortcutToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[130] px-3.5 py-2 rounded-xl bg-slate-900/95 dark:bg-slate-800/95 text-white text-xs font-medium shadow-2xl border border-white/10 flex items-center gap-2 pointer-events-none no-print"
+        >
+          <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span>{shortcutToast}</span>
+        </div>
       )}
     </>
   );
