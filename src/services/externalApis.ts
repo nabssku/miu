@@ -798,30 +798,67 @@ async function readOpenAISSEStream(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let rawFull = '';
+  let rawAllBytes = '';
   let buffer = '';
+
+  const processLine = (rawLine: string) => {
+    const line = rawLine.trim();
+    if (!line.startsWith('data:')) return;
+    const dataStr = line.slice(5).trim();
+    if (!dataStr || dataStr === '[DONE]') return;
+    try {
+      const json = JSON.parse(dataStr);
+      const delta =
+        json?.choices?.[0]?.delta?.content ??
+        json?.choices?.[0]?.message?.content ??
+        '';
+      if (typeof delta === 'string' && delta) {
+        rawFull += delta;
+        onChunk(cleanAIThinkingTags(rawFull));
+      }
+    } catch {
+      // ignore partial chunk
+    }
+  };
 
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    const decoded = decoder.decode(value, { stream: true });
+    rawAllBytes += decoded;
+    buffer += decoded;
     const lines = buffer.split('\n');
     buffer = lines.pop() || '';
     for (const line of lines) {
-      if (!line.startsWith('data:')) continue;
-      const dataStr = line.slice(5).trim();
-      if (!dataStr || dataStr === '[DONE]') continue;
-      try {
-        const json = JSON.parse(dataStr);
-        const delta = json?.choices?.[0]?.delta?.content || '';
-        if (delta) {
-          rawFull += delta;
-          onChunk(cleanAIThinkingTags(rawFull));
-        }
-      } catch {
-        // ignore partial chunk
-      }
+      processLine(line);
     }
   }
+
+  // Flush remaining bytes in decoder & buffer
+  const tail = decoder.decode();
+  if (tail) {
+    rawAllBytes += tail;
+    buffer += tail;
+  }
+  if (buffer.trim()) {
+    for (const line of buffer.split('\n')) {
+      processLine(line);
+    }
+  }
+
+  // Fallback if upstream returned a plain non-streaming JSON completion object
+  if (!rawFull && rawAllBytes.trim().startsWith('{')) {
+    try {
+      const json = JSON.parse(rawAllBytes.trim());
+      const content = json?.choices?.[0]?.message?.content;
+      if (typeof content === 'string' && content) {
+        rawFull = content;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   const finalCleaned = cleanAIThinkingTags(rawFull);
   onChunk(finalCleaned);
   return finalCleaned;

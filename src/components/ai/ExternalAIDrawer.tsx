@@ -210,6 +210,8 @@ export const ExternalAIDrawer: React.FC = () => {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const isAgentRunningRef = useRef(false);
+  const agentSwitchedNoteIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const saved = loadAIConfig();
@@ -247,6 +249,16 @@ export const ExternalAIDrawer: React.FC = () => {
 
   // Load saved threads per note and restore active thread if reopened
   useEffect(() => {
+    if (isAgentRunningRef.current) {
+      return;
+    }
+    if (
+      agentSwitchedNoteIdRef.current &&
+      agentSwitchedNoteIdRef.current === activeNoteId
+    ) {
+      agentSwitchedNoteIdRef.current = null;
+      return;
+    }
     try {
       const raw = localStorage.getItem(`miu_ai_chats_${activeNoteId}`);
       const normalized = normalizeStoredAIChatThreads(raw ? JSON.parse(raw) : []);
@@ -272,16 +284,37 @@ export const ExternalAIDrawer: React.FC = () => {
     setShowQuizCards(false);
   }, [activeNoteId]);
 
-  const persistChatThreads = (next: AIChatThread[], nextActiveId: string | null) => {
+  const persistChatThreads = (
+    next: AIChatThread[],
+    nextActiveId: string | null,
+    targetNoteId: string = activeNoteId
+  ) => {
     const trimmed = next.slice(0, 25);
     setChatThreads(trimmed);
     try {
-      localStorage.setItem(`miu_ai_chats_${activeNoteId}`, JSON.stringify(trimmed));
+      localStorage.setItem(`miu_ai_chats_${targetNoteId}`, JSON.stringify(trimmed));
       if (nextActiveId) {
-        sessionStorage.setItem(`miu_ai_active_thread_${activeNoteId}`, nextActiveId);
+        sessionStorage.setItem(`miu_ai_active_thread_${targetNoteId}`, nextActiveId);
       } else {
-        sessionStorage.removeItem(`miu_ai_active_thread_${activeNoteId}`);
+        sessionStorage.removeItem(`miu_ai_active_thread_${targetNoteId}`);
       }
+    } catch {
+      // ignore storage quota errors
+    }
+  };
+
+  const persistThreadToTargetNote = (
+    targetNoteId: string,
+    thread: AIChatThread
+  ) => {
+    if (!targetNoteId) return;
+    try {
+      const raw = localStorage.getItem(`miu_ai_chats_${targetNoteId}`);
+      const existing = normalizeStoredAIChatThreads(raw ? JSON.parse(raw) : []);
+      const merged = [thread, ...existing.filter((t) => t.id !== thread.id)].slice(0, 25);
+      localStorage.setItem(`miu_ai_chats_${targetNoteId}`, JSON.stringify(merged));
+      sessionStorage.setItem(`miu_ai_active_thread_${targetNoteId}`, thread.id);
+      setChatThreads(merged);
     } catch {
       // ignore storage quota errors
     }
@@ -739,6 +772,9 @@ export const ExternalAIDrawer: React.FC = () => {
 
     let latestText = '';
     let latestTools: AIToolExecutionRecord[] = [];
+    const originNoteId = activeNoteId;
+    let switchedNoteId: string | null = null;
+    isAgentRunningRef.current = true;
     try {
       const result = await runAgentWithToolsStream({
         config: activeConfig,
@@ -754,7 +790,18 @@ export const ExternalAIDrawer: React.FC = () => {
           currentUser,
           connectionsConfig,
           activeSkillIds,
-          onSetActiveNoteId: (targetId) => setActiveNoteId(targetId),
+          onSetActiveNoteId: (targetId) => {
+            switchedNoteId = targetId;
+            agentSwitchedNoteIdRef.current = targetId;
+            setActiveNoteId(targetId);
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(
+                new CustomEvent('miu:open-document-note', {
+                  detail: { noteId: targetId }
+                })
+              );
+            }
+          },
           onActivateSkillNoteId: (skillId) =>
             setActiveSkillIds((prev) => Array.from(new Set([...prev, skillId])))
         },
@@ -800,7 +847,10 @@ export const ExternalAIDrawer: React.FC = () => {
           updatedAt: Date.now()
         };
         const others = chatThreads.filter((t) => t.id !== threadId);
-        persistChatThreads([nextThread, ...others], threadId);
+        persistChatThreads([nextThread, ...others], threadId, originNoteId);
+        if (switchedNoteId && switchedNoteId !== originNoteId) {
+          persistThreadToTargetNote(switchedNoteId, nextThread);
+        }
       } else {
         setMessages(priorMessages);
       }
@@ -829,7 +879,10 @@ export const ExternalAIDrawer: React.FC = () => {
             updatedAt: Date.now()
           };
           const others = chatThreads.filter((t) => t.id !== threadId);
-          persistChatThreads([nextThread, ...others], threadId);
+          persistChatThreads([nextThread, ...others], threadId, originNoteId);
+          if (switchedNoteId && switchedNoteId !== originNoteId) {
+            persistThreadToTargetNote(switchedNoteId, nextThread);
+          }
         } else {
           setMessages(priorMessages);
         }
@@ -840,6 +893,7 @@ export const ExternalAIDrawer: React.FC = () => {
         );
       }
     } finally {
+      isAgentRunningRef.current = false;
       abortControllerRef.current = null;
       setLoading(false);
     }

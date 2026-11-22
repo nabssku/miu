@@ -386,9 +386,20 @@ export const BlockEditor: React.FC = () => {
       setActiveSkillIdsState(loadActiveSkillNoteIds());
       setMainViewMode('pustaka');
     };
+    const handleOpenDocumentNote = (e: Event) => {
+      const custom = e as CustomEvent<{ noteId?: string }>;
+      if (custom.detail?.noteId) {
+        setActiveNoteId(custom.detail.noteId);
+        setMainViewMode('document');
+      }
+    };
     window.addEventListener('miu:open-pustaka-page', handleOpenPustaka);
-    return () => window.removeEventListener('miu:open-pustaka-page', handleOpenPustaka);
-  }, []);
+    window.addEventListener('miu:open-document-note', handleOpenDocumentNote);
+    return () => {
+      window.removeEventListener('miu:open-pustaka-page', handleOpenPustaka);
+      window.removeEventListener('miu:open-document-note', handleOpenDocumentNote);
+    };
+  }, [setActiveNoteId]);
   const [searchQuery, setSearchQuery] = useState('');
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [showCoverPicker, setShowCoverPicker] = useState(false);

@@ -396,40 +396,205 @@ export interface ParsedToolCall {
   arguments: Record<string, unknown>;
 }
 
+const KNOWN_MIU_TOOL_NAMES = new Set([
+  'web_search',
+  'list_notes',
+  'read_note',
+  'search_notes',
+  'create_note',
+  'update_note',
+  'delete_note',
+  'open_note',
+  'create_skill',
+  'browse_skill_library',
+  'install_skill_from_library',
+  'call_external_connection'
+]);
+
+function escapeControlCharsInJsonStrings(raw: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+      } else if (ch === '\\') {
+        out += ch;
+        escaped = true;
+      } else if (ch === '"') {
+        out += ch;
+        inString = false;
+      } else if (ch === '\n') {
+        out += '\\n';
+      } else if (ch === '\r') {
+        out += '\\r';
+      } else if (ch === '\t') {
+        out += '\\t';
+      } else {
+        out += ch;
+      }
+    } else {
+      if (ch === '"') inString = true;
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function normalizeParsedToolObject(rawObj: Record<string, unknown>): ParsedToolCall | null {
+  const toolName = String(rawObj.name || rawObj.tool || rawObj.function || '').trim();
+  if (!toolName || !KNOWN_MIU_TOOL_NAMES.has(toolName)) return null;
+
+  const rawArgs =
+    rawObj.arguments ?? rawObj.args ?? rawObj.params ?? rawObj.parameters;
+  if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
+    return { name: toolName, arguments: rawArgs as Record<string, unknown> };
+  }
+  if (typeof rawArgs === 'string' && rawArgs.trim().startsWith('{')) {
+    try {
+      const nested = JSON.parse(escapeControlCharsInJsonStrings(rawArgs.trim()));
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+        return { name: toolName, arguments: nested as Record<string, unknown> };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Fallback: top-level flat arguments e.g. {"name":"create_note","title":"...","markdownContent":"..."}
+  const flatArgs: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rawObj)) {
+    if (k !== 'name' && k !== 'tool' && k !== 'function') {
+      flatArgs[k] = v;
+    }
+  }
+  return { name: toolName, arguments: flatArgs };
+}
+
+function parseToolCallJsonCandidate(rawCandidate: string): ParsedToolCall | null {
+  let cleaned = rawCandidate.trim();
+  if (!cleaned) return null;
+
+  // Strip optional inner ```json ... ``` fences
+  cleaned = cleaned
+    .replace(/^```(?:json|miu_tool|tool_call)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+
+  // 1. Strict JSON.parse
+  try {
+    const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return normalizeParsedToolObject(parsed);
+    }
+  } catch {
+    // try relaxed JSON below
+  }
+
+  // 2. Relaxed JSON.parse (escapes literal newlines/tabs inside JSON string literals & fixes trailing commas)
+  try {
+    const fixed = escapeControlCharsInJsonStrings(cleaned).replace(/,\s*([}\]])/g, '$1');
+    const parsed = JSON.parse(fixed) as Record<string, unknown>;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return normalizeParsedToolObject(parsed);
+    }
+  } catch {
+    // try regex field extractor below
+  }
+
+  // 3. Last-resort regex field extraction for create_note / update_note / web_search
+  const nameMatch = cleaned.match(/"(?:name|tool)"\s*:\s*"([a-z0-9_]+)"/i);
+  const toolName = nameMatch?.[1]?.trim() || '';
+  if (!toolName || !KNOWN_MIU_TOOL_NAMES.has(toolName)) return null;
+
+  const extractStringField = (keys: string[]): string => {
+    for (const k of keys) {
+      const m = cleaned.match(new RegExp(`"${k}"\\s*:\\s*"([\\s\\S]*?)"\\s*(?:,|\\})`, 'i'));
+      if (m?.[1] !== undefined) {
+        return m[1]
+          .replace(/\\n/g, '\n')
+          .replace(/\\t/g, '\t')
+          .replace(/\\"/g, '"');
+      }
+    }
+    return '';
+  };
+
+  if (toolName === 'create_note' || toolName === 'update_note') {
+    const title = extractStringField(['title', 'newTitle', 'titleQuery']);
+    const icon = extractStringField(['icon']);
+    const md = extractStringField([
+      'markdownContent',
+      'contentMarkdown',
+      'content',
+      'body',
+      'markdown',
+      'text'
+    ]);
+    const noteId = extractStringField(['noteId']);
+    const mode = extractStringField(['mode']);
+    return {
+      name: toolName,
+      arguments: {
+        ...(title ? { title, newTitle: title } : {}),
+        ...(icon ? { icon } : {}),
+        ...(md ? { markdownContent: md } : {}),
+        ...(noteId ? { noteId } : {}),
+        ...(mode ? { mode } : {}),
+        openAfterCreate: true
+      }
+    };
+  }
+
+  if (toolName === 'web_search' || toolName === 'search_notes') {
+    const query = extractStringField(['query', 'q']);
+    if (query) return { name: toolName, arguments: { query } };
+  }
+
+  return null;
+}
+
 export function extractToolCallsFromText(text: string): ParsedToolCall[] {
   const calls: ParsedToolCall[] = [];
   if (!text) return calls;
 
-  // Match <tool_call>{...}</tool_call> or ```tool_call ... ```
   const patterns = [
     /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi,
-    /```tool_call\s*([\s\S]*?)\s*```/gi
+    /<function_call>\s*([\s\S]*?)\s*<\/function_call>/gi,
+    /```(?:tool_call|miu_tool)\s*([\s\S]*?)\s*```/gi,
+    /```json\s*(\{[\s\S]*?"(?:name|tool)"\s*:\s*"[a-z0-9_]+"[\s\S]*?\})\s*```/gi
   ];
+
+  const seenFingerprints = new Set<string>();
+  const pushUnique = (parsed: ParsedToolCall | null) => {
+    if (!parsed) return;
+    const fp = `${parsed.name}:${JSON.stringify(parsed.arguments).slice(0, 160)}`;
+    if (seenFingerprints.has(fp)) return;
+    seenFingerprints.add(fp);
+    calls.push(parsed);
+  };
 
   for (const regex of patterns) {
     let match: RegExpExecArray | null;
     while ((match = regex.exec(text)) !== null) {
-      const inner = (match[1] || '').trim();
-      if (!inner) continue;
-      try {
-        const parsed = JSON.parse(inner) as {
-          name?: unknown;
-          tool?: unknown;
-          arguments?: unknown;
-          params?: unknown;
-        };
-        const toolName = String(parsed.name || parsed.tool || '').trim();
-        const rawArgs = parsed.arguments ?? parsed.params ?? {};
-        const args =
-          rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
-            ? (rawArgs as Record<string, unknown>)
-            : {};
-        if (toolName) {
-          calls.push({ name: toolName, arguments: args });
-        }
-      } catch {
-        // ignore malformed JSON tool call
-      }
+      pushUnique(parseToolCallJsonCandidate(match[1] || ''));
+    }
+  }
+
+  // Handle unclosed trailing <tool_call>{...} when model hits token limit or forgets closing tag
+  if (calls.length === 0) {
+    const unclosedMatch = text.match(/<tool_call>\s*(\{[\s\S]+)$/i);
+    if (unclosedMatch?.[1]) {
+      pushUnique(parseToolCallJsonCandidate(unclosedMatch[1]));
     }
   }
 
@@ -440,16 +605,19 @@ export function stripToolCallsFromText(text: string): string {
   if (!text) return '';
   let cleaned = text
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
-    .replace(/```tool_call[\s\S]*?```/gi, '');
+    .replace(/<function_call>[\s\S]*?<\/function_call>/gi, '')
+    .replace(/```(?:tool_call|miu_tool)[\s\S]*?```/gi, '')
+    .replace(
+      /```json\s*\{[\s\S]*?"(?:name|tool)"\s*:\s*"(?:web_search|list_notes|read_note|search_notes|create_note|update_note|delete_note|open_note|create_skill|browse_skill_library|install_skill_from_library|call_external_connection)"[\s\S]*?\}\s*```/gi,
+      ''
+    );
 
   // Also strip an unclosed trailing <tool_call>... while streaming
-  const openIdx = cleaned.indexOf('<tool_call>');
-  if (openIdx !== -1) {
-    cleaned = cleaned.slice(0, openIdx);
-  }
-  const fenceIdx = cleaned.indexOf('```tool_call');
-  if (fenceIdx !== -1) {
-    cleaned = cleaned.slice(0, fenceIdx);
+  for (const marker of ['<tool_call>', '<function_call>', '```tool_call', '```miu_tool']) {
+    const idx = cleaned.indexOf(marker);
+    if (idx !== -1) {
+      cleaned = cleaned.slice(0, idx);
+    }
   }
   return cleaned.trim();
 }
@@ -695,9 +863,17 @@ export async function executeAIAgentToolCall(
         }
 
         const now = Date.now();
-        const title = String(args.title || 'Catatan Baru').trim();
+        const title = String(args.title || args.name || 'Catatan Baru').trim();
         const icon = String(args.icon || (title.toLowerCase().includes('skill.md') ? '🧩' : '📄')).trim();
-        const mdContent = String(args.markdownContent || args.content || '').trim();
+        const mdContent = String(
+          args.markdownContent ??
+            args.contentMarkdown ??
+            args.content ??
+            args.body ??
+            args.markdown ??
+            args.text ??
+            ''
+        ).trim();
         const parsedBlocks = mdContent ? parseMarkdownToNotionBlocks(mdContent) : [];
 
         const blocks: NoteBlock[] =
@@ -781,7 +957,15 @@ export async function executeAIAgentToolCall(
         const now = Date.now();
         let nextBlocks = [...(target.blocks || [])];
         const mode = String(args.mode || 'append_markdown').trim();
-        const mdContent = String(args.markdownContent || args.content || '').trim();
+        const mdContent = String(
+          args.markdownContent ??
+            args.contentMarkdown ??
+            args.content ??
+            args.body ??
+            args.markdown ??
+            args.text ??
+            ''
+        ).trim();
         const targetBlockId = typeof args.blockId === 'string' ? args.blockId.trim() : '';
 
         if (mode === 'replace_all_markdown' && mdContent) {
@@ -1270,7 +1454,12 @@ export function buildAgentToolsSystemAddendum(
     '\n\n=== KEMAMPUAN TOOL CALLING & AGENT WORKSPACE ===',
     'Kamu memiliki akses langsung ke tool eksekusi nyata. Jika pengguna meminta kamu mencari informasi di internet/web, membaca/membuat/mengubah/menghapus catatan, membuat skill.md, atau memanggil API eksternal, kamu WAJIB memanggil tool dengan menulis blok XML berikut (bisa lebih dari satu jika diperlukan):',
     '<tool_call>{"name": "nama_tool", "arguments": {...}}</tool_call>',
-    'Setelah kamu menulis <tool_call>...</tool_call>, BERHENTI dan tunggu sistem memberikan <tool_response> sebelum menyusun jawaban akhir kepada pengguna.',
+    'ATURAN WAJIB:',
+    '1. Setelah kamu menulis <tool_call>...</tool_call>, BERHENTI dan tunggu sistem memberikan <tool_response> sebelum menyusun jawaban akhir kepada pengguna.',
+    '2. JANGAN PERNAH mengklaim bahwa catatan sudah dibuat, disimpan, atau dibuka di workspace jika kamu belum mengeluarkan tag <tool_call>...</tool_call> dan menerima <tool_response>.',
+    '3. Di dalam JSON arguments (khususnya `markdownContent`), gunakan `\\n` untuk baris baru dan `\\"` untuk tanda kutip ganda agar JSON valid.',
+    'Contoh WAJIB saat pengguna meminta dibuatkan catatan baru/terpisah di workspace:',
+    '<tool_call>{"name":"create_note","arguments":{"title":"Rangkuman Modul 4","icon":"📝","markdownContent":"## Ringkasan Utama\\n- Poin 1\\n- Poin 2","openAfterCreate":true}}</tool_call>',
     '\nDaftar Tool yang Tersedia:'
   ];
 
@@ -1330,6 +1519,134 @@ export function buildAgentToolsSystemAddendum(
   return lines.join('\n');
 }
 
+export function detectExplicitCreateNoteIntent(
+  userPrompt: string,
+  history: AIChatMessage[] = []
+): boolean {
+  const prompt = String(userPrompt || '').trim();
+  if (!prompt) return false;
+
+  // Exclude skill creation/install intents so they route to create_skill / install_skill_from_library
+  if (/\b(skill\.md|pustaka\s+skill|instal(?:l)?\s+skill|buat(?:kan)?\s+skill)\b/i.test(prompt)) {
+    return false;
+  }
+
+  // Exclude explicit cancellations/negations
+  if (/^\s*(jangan|tidak|ga\s+usah|gak\s+usah|enggak|batal|cancel|no)\b/i.test(prompt)) {
+    return false;
+  }
+
+  const directCreatePattern =
+    /\b(buat(?:kan|lah)?|bikin(?:kan|lah)?|tambah(?:kan)?|simpan(?:kan)?|jadikan|tulis(?:kan)?|create|make|save|generate)\b[\s\S]{0,60}\b(catatan|halaman|note|page|ringkasan\s+terpisah|rangkuman\s+terpisah)\b/i;
+  const separateWorkspaceNotePattern =
+    /\b(catatan|halaman|note|page)\b[\s\S]{0,40}\b(terpisah|baru|di\s*workspace|di\s*miu)\b/i;
+
+  if (directCreatePattern.test(prompt) || separateWorkspaceNotePattern.test(prompt)) {
+    return true;
+  }
+
+  // Also catch affirmative follow-up like "iya buatkan" / "oke gas" right after AI offered to create a note
+  const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant');
+  if (lastAssistant?.content && prompt.length <= 120) {
+    const offeredCreateNote =
+      /(?:mau|ingin|apakah|perlu|boleh)\s+(?:saya\s+|aku\s+)?(?:buat(?:kan)?|bikin(?:kan)?|simpan(?:kan)?|create)[\s\S]{0,60}\b(catatan|halaman|note|page)\b/i.test(
+        lastAssistant.content
+      );
+    const affirmativeReply =
+      /\b(iya|ya|yes|oke|ok|boleh|silakan|gas|buatkan|bikinkan|lanjut|setuju|mau)\b/i.test(
+        prompt
+      );
+    if (offeredCreateNote && affirmativeReply) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function sanitizeNoteTitle(raw: string): string {
+  const cleaned = raw
+    .replace(/^#+\s*/, '')
+    .replace(/\*\*/g, '')
+    .replace(/[`"“”'‘’]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  return cleaned.length > 80 ? `${cleaned.slice(0, 77).trim()}...` : cleaned;
+}
+
+export function inferFallbackNoteTitle(
+  userPrompt: string,
+  history: AIChatMessage[],
+  generatedText: string
+): string {
+  // 1. Explicit quoted title in user prompt (e.g. buatkan catatan "Rangkuman Modul 4")
+  const userQuoteMatch = userPrompt.match(/["“']([^"”']{3,80})["”']/);
+  if (userQuoteMatch?.[1]) {
+    const t = sanitizeNoteTitle(userQuoteMatch[1]);
+    if (t) return t;
+  }
+
+  // 2. Suggested page/note title in most recent assistant message (e.g. misal halaman "Rangkuman Modul 4")
+  const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant');
+  if (lastAssistant?.content) {
+    const suggestedMatch = lastAssistant.content.match(
+      /(?:halaman|catatan|note|page|judul)\s+["“']([^"”']{3,80})["”']/i
+    );
+    if (suggestedMatch?.[1]) {
+      const t = sanitizeNoteTitle(suggestedMatch[1]);
+      if (t) return t;
+    }
+  }
+
+  // 3. First markdown heading from generated text (avoid overly generic headings if possible)
+  const headingMatch = generatedText.match(/^#{1,3}\s+(.+)$/m);
+  if (headingMatch?.[1]) {
+    const t = sanitizeNoteTitle(headingMatch[1]);
+    if (t && t.length >= 4 && !/^(ringkasan|rangkuman|catatan|hasil)$/i.test(t)) {
+      return t;
+    }
+  }
+
+  // 4. Look for "Modul X" / "Bab X" / "Materi ..." in prompt or recent history
+  const combinedRecent = [
+    userPrompt,
+    ...history.slice(-4).map((m) => m.content)
+  ].join('\n');
+  const modulMatch = combinedRecent.match(
+    /\b((?:modul|bab|pertemuan|chapter|minggu|week)\s+\d+(?:\s*[-:]\s*[^\n.,;!?]{3,40})?)\b/i
+  );
+  if (modulMatch?.[1]) {
+    const t = sanitizeNoteTitle(`Rangkuman ${modulMatch[1]}`);
+    if (t) return t;
+  }
+
+  if (headingMatch?.[1]) {
+    const t = sanitizeNoteTitle(headingMatch[1]);
+    if (t) return t;
+  }
+
+  return 'Ringkasan Catatan';
+}
+
+function stripTrailingOfferParagraph(markdown: string): string {
+  const trimmed = markdown.trim();
+  if (!trimmed) return '';
+  const paragraphs = trimmed.split(/\n{2,}/);
+  if (paragraphs.length > 1) {
+    const last = paragraphs[paragraphs.length - 1];
+    if (
+      /(?:mau|ingin|apakah|perlu)\s+(?:saya\s+|aku\s+)?(?:buat(?:kan)?|bikin(?:kan)?|lanjut|bantu)/i.test(
+        last
+      ) &&
+      last.includes('?')
+    ) {
+      return paragraphs.slice(0, -1).join('\n\n').trim();
+    }
+  }
+  return trimmed;
+}
+
 export async function runAgentWithToolsStream(params: {
   config: AIConfig;
   baseSystemPrompt: string;
@@ -1364,8 +1681,13 @@ export async function runAgentWithToolsStream(params: {
   let currentPrompt = userPrompt;
   let accumulatedVisibleText = '';
   const executions: AIToolExecutionRecord[] = [];
+  const wantsCreateNote =
+    toolContext.connectionsConfig.notesCrudEnabled &&
+    detectExplicitCreateNoteIntent(userPrompt, history);
+  let didRetryCreateNote = false;
+  let firstDraftBeforeRetry = '';
 
-  for (let step = 0; step < 4; step++) {
+  for (let step = 0; step < 5; step++) {
     if (signal?.aborted) break;
 
     let stepRawOutput = '';
@@ -1388,15 +1710,96 @@ export async function runAgentWithToolsStream(params: {
 
     const parsedCalls = extractToolCallsFromText(stepRawOutput);
     const stepVisible = stripToolCallsFromText(stepRawOutput);
+
+    if (parsedCalls.length === 0) {
+      const hasCreatedNoteAlready = executions.some(
+        (e) =>
+          (e.name === 'create_note' || e.name === 'create_skill') &&
+          e.status === 'done'
+      );
+
+      if (wantsCreateNote && !hasCreatedNoteAlready && !signal?.aborted) {
+        if (!didRetryCreateNote) {
+          didRetryCreateNote = true;
+          firstDraftBeforeRetry = stepVisible;
+          workingHistory.push(
+            { role: 'user', content: currentPrompt },
+            { role: 'assistant', content: stepRawOutput }
+          );
+          currentPrompt =
+            'SISTEM: Kamu belum memanggil tool `create_note`, sehingga catatan BELUM benar-benar dibuat di workspace pengguna! Sekarang WAJIB keluarkan HANYA satu blok XML berikut dengan isi Markdown lengkap (gunakan \\n untuk baris baru di dalam string JSON): <tool_call>{"name":"create_note","arguments":{"title":"Judul Catatan","icon":"📝","markdownContent":"## Ringkasan\\n- Poin penting...","openAfterCreate":true}}</tool_call>';
+          continue;
+        }
+
+        // Ultimate programmatic safety net if the model still refused to emit <tool_call>
+        const lastAssistantContent = stripTrailingOfferParagraph(
+          [...history].reverse().find((m) => m.role === 'assistant')?.content || ''
+        );
+        const cleanStepVisible = stripTrailingOfferParagraph(stepVisible);
+        const cleanFirstDraft = stripTrailingOfferParagraph(firstDraftBeforeRetry);
+
+        // Pick the richest markdown body available (model's generated draft or prior assistant PDF analysis)
+        const candidates = [cleanStepVisible, cleanFirstDraft, lastAssistantContent].filter(
+          (c) => c.length >= 80 && !/^(baik|oke|siap|catatan.+berhasil\s+dibuat)/i.test(c)
+        );
+        const fallbackMarkdown =
+          candidates[0] ||
+          cleanFirstDraft ||
+          lastAssistantContent ||
+          cleanStepVisible;
+
+        if (fallbackMarkdown) {
+          const fallbackTitle = inferFallbackNoteTitle(
+            userPrompt,
+            history,
+            fallbackMarkdown
+          );
+          const fallbackCall: ParsedToolCall = {
+            name: 'create_note',
+            arguments: {
+              title: fallbackTitle,
+              icon: '📝',
+              markdownContent: fallbackMarkdown,
+              openAfterCreate: true
+            }
+          };
+          const execId = `tool-${Date.now()}-${step}-fallback`;
+          const record: AIToolExecutionRecord = {
+            id: execId,
+            name: fallbackCall.name,
+            label: buildToolDisplayLabel(fallbackCall),
+            status: 'running'
+          };
+          executions.push(record);
+          onToolExecutionsUpdate([...executions]);
+
+          const result = await executeAIAgentToolCall(fallbackCall, toolContext);
+          record.status = result.ok ? 'done' : 'error';
+          record.summary = result.summary;
+          onToolExecutionsUpdate([...executions]);
+
+          if (result.ok) {
+            accumulatedVisibleText = `Catatan **"${fallbackTitle}"** berhasil dibuat dan dibuka di workspace Anda (${result.summary}).`;
+            onTextChunk(accumulatedVisibleText);
+            break;
+          }
+        }
+      }
+
+      if (stepVisible) {
+        accumulatedVisibleText = [accumulatedVisibleText, stepVisible]
+          .filter(Boolean)
+          .join('\n\n');
+        onTextChunk(accumulatedVisibleText);
+      }
+      break;
+    }
+
     if (stepVisible) {
       accumulatedVisibleText = [accumulatedVisibleText, stepVisible]
         .filter(Boolean)
         .join('\n\n');
       onTextChunk(accumulatedVisibleText);
-    }
-
-    if (parsedCalls.length === 0) {
-      break;
     }
 
     const toolResultsBlocks: string[] = [];
