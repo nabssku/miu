@@ -241,7 +241,9 @@ export const BlockEditor: React.FC = () => {
   const allNotes = useLiveQuery(
     async () => {
       const list = await db.notes.toArray();
-      return list.sort((a, b) => a.createdAt - b.createdAt);
+      return list.sort(
+        (a, b) => (a.sortOrder ?? a.createdAt) - (b.sortOrder ?? b.createdAt)
+      );
     },
     [],
     []
@@ -259,6 +261,9 @@ export const BlockEditor: React.FC = () => {
   );
   const [draggedSidebarSection, setDraggedSidebarSection] =
     useState<SidebarSectionId | null>(null);
+  const [dropTargetPosition, setDropTargetPosition] = useState<
+    'before' | 'inside' | 'after'
+  >('inside');
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [sidebarNoteMenuTarget, setSidebarNoteMenuTarget] =
@@ -2646,6 +2651,96 @@ export const BlockEditor: React.FC = () => {
     }
   };
 
+  const computeNoteDropPosition = (
+    e: React.DragEvent<HTMLElement>,
+    allowInside = true
+  ): 'before' | 'inside' | 'after' => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const relY = e.clientY - rect.top;
+    const ratio = rect.height > 0 ? relY / rect.height : 0.5;
+    if (!allowInside) {
+      return ratio < 0.5 ? 'before' : 'after';
+    }
+    if (ratio < 0.28) return 'before';
+    if (ratio > 0.72) return 'after';
+    return 'inside';
+  };
+
+  const handleSidebarNoteDrop = async (
+    sourceId: string,
+    targetNote: NoteRecord,
+    position: 'before' | 'inside' | 'after',
+    extraPatch?: Partial<NoteRecord>
+  ) => {
+    if (!sourceId || sourceId === targetNote.id) return;
+    const sourceNote = allNotes.find((n) => n.id === sourceId);
+    if (!sourceNote) return;
+
+    if (position === 'inside') {
+      if (extraPatch && Object.keys(extraPatch).length > 0) {
+        await handleUpdateSpecificNote(sourceId, extraPatch);
+      }
+      await handleMoveNoteParent(sourceId, targetNote.id);
+      return;
+    }
+
+    // Reordering 'before' or 'after' targetNote at the same parentId level
+    const nextParentId = targetNote.parentId ?? null;
+    if (nextParentId) {
+      let ancestorId: string | null | undefined = nextParentId;
+      const visited = new Set<string>();
+      while (ancestorId && !visited.has(ancestorId)) {
+        if (ancestorId === sourceId) return;
+        visited.add(ancestorId);
+        ancestorId = allNotes.find((n) => n.id === ancestorId)?.parentId;
+      }
+    }
+
+    const siblings = allNotes
+      .filter(
+        (n) =>
+          (n.parentId ?? null) === nextParentId &&
+          n.id !== sourceId
+      )
+      .sort((a, b) => (a.sortOrder ?? a.createdAt) - (b.sortOrder ?? b.createdAt));
+
+    const targetIndex = siblings.findIndex((n) => n.id === targetNote.id);
+    const insertIndex =
+      targetIndex === -1
+        ? siblings.length
+        : position === 'before'
+          ? targetIndex
+          : targetIndex + 1;
+
+    const reordered = [...siblings];
+    reordered.splice(insertIndex, 0, sourceNote);
+
+    const baseOrder = 1000000;
+    const now = Date.now();
+    for (let i = 0; i < reordered.length; i++) {
+      const item = reordered[i];
+      const nextOrder = baseOrder + i * 1000;
+      const isMovedItem = item.id === sourceId;
+      if (
+        isMovedItem ||
+        item.sortOrder !== nextOrder
+      ) {
+        const patch: Partial<NoteRecord> = {
+          sortOrder: nextOrder,
+          ...(isMovedItem
+            ? {
+                parentId: nextParentId,
+                updatedAt: now,
+                ...(extraPatch || {})
+              }
+            : {})
+        };
+        await db.notes.update(item.id, patch);
+        scheduleNeonSave({ ...item, ...patch });
+      }
+    }
+  };
+
   const scheduledDeadlineCount = useMemo(() => {
     let count = 0;
     for (const n of [...myNotes, ...sharedWithMeNotes]) {
@@ -2891,7 +2986,13 @@ export const BlockEditor: React.FC = () => {
       const isPageDropTarget = dropTargetNoteId === note.id;
 
       return (
-        <div key={note.id} className="space-y-0.5">
+        <div key={note.id} className="space-y-0.5 relative">
+          {isPageDropTarget && dropTargetPosition === 'before' && (
+            <div
+              style={{ marginLeft: `${8 + depth * 14}px` }}
+              className="h-[2px] bg-[#2383E2] rounded-full pointer-events-none"
+            />
+          )}
           <div
             draggable={Boolean(isNoteOwner && !isSharedSection)}
             onDragStart={(e) => {
@@ -2909,19 +3010,22 @@ export const BlockEditor: React.FC = () => {
                 return;
               }
               e.preventDefault();
+              const pos = computeNoteDropPosition(e, true);
               setDropTargetNoteId(note.id);
+              setDropTargetPosition(pos);
             }}
             onDragLeave={() => {
               if (dropTargetNoteId === note.id) setDropTargetNoteId(null);
             }}
             onDrop={(e) => {
               const sourceId = e.dataTransfer.getData('application/miu-note-id') || draggedNoteId;
+              const pos = computeNoteDropPosition(e, true);
               setDraggedNoteId(null);
               setDropTargetNoteId(null);
               if (!sourceId || sourceId === note.id || isSharedSection || !isNoteOwner) return;
               e.preventDefault();
               e.stopPropagation();
-              void handleMoveNoteParent(sourceId, note.id);
+              void handleSidebarNoteDrop(sourceId, note, pos);
             }}
             onClick={(e) => {
               if (e.altKey) {
@@ -2941,12 +3045,12 @@ export const BlockEditor: React.FC = () => {
             }}
             style={{ paddingLeft: `${8 + depth * 14}px` }}
             className={`group flex items-center justify-between gap-1 pr-1.5 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
-              isPageDropTarget
-                ? 'bg-accent-strong/15 ring-1 ring-accent-strong text-text-primary'
+              isPageDropTarget && dropTargetPosition === 'inside'
+                ? 'bg-[#2383E2]/15 ring-1 ring-[#2383E2] text-text-primary'
                 : isSelected && mainViewMode === 'document'
                   ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
                   : 'text-text-secondary hover:bg-text-primary/[0.04] dark:hover:bg-white/[0.05] hover:text-text-primary'
-            } ${draggedNoteId === note.id ? 'opacity-50' : ''}`}
+            } ${draggedNoteId === note.id ? 'opacity-45' : ''}`}
           >
             <div className="flex items-center gap-2 min-w-0 flex-1">
               {hasChildren ? (
@@ -2977,6 +3081,12 @@ export const BlockEditor: React.FC = () => {
               onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
             />
           </div>
+          {isPageDropTarget && dropTargetPosition === 'after' && (
+            <div
+              style={{ marginLeft: `${8 + depth * 14}px` }}
+              className="h-[2px] bg-[#2383E2] rounded-full pointer-events-none"
+            />
+          )}
 
           {hasChildren && !isCollapsed && (
             <div>{renderSidebarPageTree(pool, note.id, depth + 1, isSharedSection)}</div>
@@ -5591,105 +5701,232 @@ export const BlockEditor: React.FC = () => {
                 <div className="space-y-3 pt-1">
                   {sidebarSections.map((secId) => {
                     if (secId === 'favorites') {
-                      if (favoriteNotes.length === 0) return null;
+                      if (favoriteNotes.length === 0 && !draggedNoteId) return null;
                       return (
                         <div key="sec-favorites" className="space-y-0.5">
-                          <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
-                            Favorit
+                          <div
+                            onDragOver={(e) => {
+                              if (!draggedNoteId) return;
+                              e.preventDefault();
+                              setDropTargetNoteId('FAVORITES_ROOT');
+                            }}
+                            onDragLeave={() => {
+                              if (dropTargetNoteId === 'FAVORITES_ROOT') {
+                                setDropTargetNoteId(null);
+                              }
+                            }}
+                            onDrop={(e) => {
+                              const sourceId =
+                                e.dataTransfer.getData('application/miu-note-id') ||
+                                draggedNoteId;
+                              setDraggedNoteId(null);
+                              setDropTargetNoteId(null);
+                              if (!sourceId) return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void handleUpdateSpecificNote(sourceId, { isFavorite: true });
+                            }}
+                            className={`px-2 py-0.5 rounded-md text-[11.5px] font-medium text-text-secondary transition ${
+                              dropTargetNoteId === 'FAVORITES_ROOT'
+                                ? 'bg-[#2383E2]/15 ring-1 ring-[#2383E2] text-text-primary'
+                                : ''
+                            }`}
+                          >
+                            {dropTargetNoteId === 'FAVORITES_ROOT'
+                              ? 'Lepas ke Favorit'
+                              : 'Favorit'}
                           </div>
-                          {favoriteNotes.map((note) => (
-                            <div
-                              key={`fav-${note.id}`}
-                              onClick={(e) => {
-                                if (e.altKey) {
-                                  setSidePeekNoteId(note.id);
-                                } else {
-                                  openDocumentNote(note.id);
-                                }
-                              }}
-                              onContextMenu={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setSidebarNoteMenuTarget({
-                                  note,
-                                  x: e.clientX,
-                                  y: e.clientY
-                                });
-                              }}
-                              className={`group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
-                                note.id === activeNoteId && mainViewMode === 'document'
-                                  ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
-                                  : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
-                              }`}
-                            >
-                              <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <span className="text-[15px] leading-none shrink-0">
-                                  {note.icon || '📄'}
-                                </span>
-                                <span className="truncate flex-1">
-                                  {note.title || 'Tanpa Judul'}
-                                </span>
+                          {favoriteNotes.map((note) => {
+                            const isDropTarget = dropTargetNoteId === `fav-${note.id}`;
+                            return (
+                              <div key={`fav-${note.id}`} className="relative">
+                                {isDropTarget && dropTargetPosition === 'before' && (
+                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-2 pointer-events-none" />
+                                )}
+                                <div
+                                  draggable
+                                  onDragStart={(e) => {
+                                    e.dataTransfer.setData('application/miu-note-id', note.id);
+                                    e.dataTransfer.effectAllowed = 'move';
+                                    setDraggedNoteId(note.id);
+                                  }}
+                                  onDragEnd={() => {
+                                    setDraggedNoteId(null);
+                                    setDropTargetNoteId(null);
+                                  }}
+                                  onDragOver={(e) => {
+                                    if (!draggedNoteId || draggedNoteId === note.id) return;
+                                    e.preventDefault();
+                                    const pos = computeNoteDropPosition(e, true);
+                                    setDropTargetNoteId(`fav-${note.id}`);
+                                    setDropTargetPosition(pos);
+                                  }}
+                                  onDragLeave={() => {
+                                    if (dropTargetNoteId === `fav-${note.id}`) {
+                                      setDropTargetNoteId(null);
+                                    }
+                                  }}
+                                  onDrop={(e) => {
+                                    const sourceId =
+                                      e.dataTransfer.getData('application/miu-note-id') ||
+                                      draggedNoteId;
+                                    const pos = computeNoteDropPosition(e, true);
+                                    setDraggedNoteId(null);
+                                    setDropTargetNoteId(null);
+                                    if (!sourceId || sourceId === note.id) return;
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    void handleSidebarNoteDrop(sourceId, note, pos, {
+                                      isFavorite: true
+                                    });
+                                  }}
+                                  onClick={(e) => {
+                                    if (e.altKey) {
+                                      setSidePeekNoteId(note.id);
+                                    } else {
+                                      openDocumentNote(note.id);
+                                    }
+                                  }}
+                                  onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setSidebarNoteMenuTarget({
+                                      note,
+                                      x: e.clientX,
+                                      y: e.clientY
+                                    });
+                                  }}
+                                  className={`group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
+                                    isDropTarget && dropTargetPosition === 'inside'
+                                      ? 'bg-[#2383E2]/15 ring-1 ring-[#2383E2] text-text-primary'
+                                      : note.id === activeNoteId && mainViewMode === 'document'
+                                        ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
+                                        : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                                  } ${draggedNoteId === note.id ? 'opacity-45' : ''}`}
+                                >
+                                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                                    <span className="text-[15px] leading-none shrink-0">
+                                      {note.icon || '📄'}
+                                    </span>
+                                    <span className="truncate flex-1">
+                                      {note.title || 'Tanpa Judul'}
+                                    </span>
+                                  </div>
+                                  <SidebarNoteActionButtons
+                                    note={note}
+                                    onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
+                                    onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
+                                  />
+                                </div>
+                                {isDropTarget && dropTargetPosition === 'after' && (
+                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-2 pointer-events-none" />
+                                )}
                               </div>
-                              <SidebarNoteActionButtons
-                                note={note}
-                                onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
-                                onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
-                              />
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       );
                     }
 
                     if (secId === 'recent') {
                       const recentList = [...myNotes, ...sharedWithMeNotes]
-                        .sort((a, b) => b.updatedAt - a.updatedAt)
-                        .slice(0, 5);
+                        .sort(
+                          (a, b) =>
+                            (a.sortOrder ?? -a.updatedAt) -
+                            (b.sortOrder ?? -b.updatedAt)
+                        )
+                        .slice(0, 6);
                       return (
                         <div key="sec-recent" className="space-y-0.5">
                           <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
                             Terbaru
                           </div>
-                          {recentList.map((note) => (
-                            <div
-                              key={`rec-${note.id}`}
-                              onClick={(e) => {
-                                if (e.altKey) {
-                                  setSidePeekNoteId(note.id);
-                                } else {
-                                  openDocumentNote(note.id);
-                                }
-                              }}
-                              onContextMenu={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setSidebarNoteMenuTarget({
-                                  note,
-                                  x: e.clientX,
-                                  y: e.clientY
-                                });
-                              }}
-                              className={`group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
-                                note.id === activeNoteId && mainViewMode === 'document'
-                                  ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
-                                  : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
-                              }`}
-                            >
-                              <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <span className="text-[15px] leading-none shrink-0">
-                                  {note.icon || '📄'}
-                                </span>
-                                <span className="truncate flex-1">
-                                  {note.title || 'Tanpa Judul'}
-                                </span>
+                          {recentList.map((note) => {
+                            const isDropTarget = dropTargetNoteId === `rec-${note.id}`;
+                            return (
+                              <div key={`rec-${note.id}`} className="relative">
+                                {isDropTarget && dropTargetPosition === 'before' && (
+                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-2 pointer-events-none" />
+                                )}
+                                <div
+                                  draggable
+                                  onDragStart={(e) => {
+                                    e.dataTransfer.setData('application/miu-note-id', note.id);
+                                    e.dataTransfer.effectAllowed = 'move';
+                                    setDraggedNoteId(note.id);
+                                  }}
+                                  onDragEnd={() => {
+                                    setDraggedNoteId(null);
+                                    setDropTargetNoteId(null);
+                                  }}
+                                  onDragOver={(e) => {
+                                    if (!draggedNoteId || draggedNoteId === note.id) return;
+                                    e.preventDefault();
+                                    const pos = computeNoteDropPosition(e, true);
+                                    setDropTargetNoteId(`rec-${note.id}`);
+                                    setDropTargetPosition(pos);
+                                  }}
+                                  onDragLeave={() => {
+                                    if (dropTargetNoteId === `rec-${note.id}`) {
+                                      setDropTargetNoteId(null);
+                                    }
+                                  }}
+                                  onDrop={(e) => {
+                                    const sourceId =
+                                      e.dataTransfer.getData('application/miu-note-id') ||
+                                      draggedNoteId;
+                                    const pos = computeNoteDropPosition(e, true);
+                                    setDraggedNoteId(null);
+                                    setDropTargetNoteId(null);
+                                    if (!sourceId || sourceId === note.id) return;
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    void handleSidebarNoteDrop(sourceId, note, pos);
+                                  }}
+                                  onClick={(e) => {
+                                    if (e.altKey) {
+                                      setSidePeekNoteId(note.id);
+                                    } else {
+                                      openDocumentNote(note.id);
+                                    }
+                                  }}
+                                  onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setSidebarNoteMenuTarget({
+                                      note,
+                                      x: e.clientX,
+                                      y: e.clientY
+                                    });
+                                  }}
+                                  className={`group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
+                                    isDropTarget && dropTargetPosition === 'inside'
+                                      ? 'bg-[#2383E2]/15 ring-1 ring-[#2383E2] text-text-primary'
+                                      : note.id === activeNoteId && mainViewMode === 'document'
+                                        ? 'bg-text-primary/[0.06] dark:bg-white/[0.08] font-medium text-text-primary'
+                                        : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                                  } ${draggedNoteId === note.id ? 'opacity-45' : ''}`}
+                                >
+                                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                                    <span className="text-[15px] leading-none shrink-0">
+                                      {note.icon || '📄'}
+                                    </span>
+                                    <span className="truncate flex-1">
+                                      {note.title || 'Tanpa Judul'}
+                                    </span>
+                                  </div>
+                                  <SidebarNoteActionButtons
+                                    note={note}
+                                    onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
+                                    onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
+                                  />
+                                </div>
+                                {isDropTarget && dropTargetPosition === 'after' && (
+                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-2 pointer-events-none" />
+                                )}
                               </div>
-                              <SidebarNoteActionButtons
-                                note={note}
-                                onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
-                                onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
-                              />
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       );
                     }
@@ -5728,40 +5965,88 @@ export const BlockEditor: React.FC = () => {
                           <div className="px-2 py-0.5 text-[11.5px] font-medium text-text-secondary">
                             Disematkan
                           </div>
-                          {pinnedNotes.map((note) => (
-                            <div
-                              key={`pin-${note.id}`}
-                              onClick={(e) => {
-                                if (e.altKey) {
-                                  setSidePeekNoteId(note.id);
-                                } else {
-                                  openDocumentNote(note.id);
-                                }
-                              }}
-                              onContextMenu={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setSidebarNoteMenuTarget({
-                                  note,
-                                  x: e.clientX,
-                                  y: e.clientY
-                                });
-                              }}
-                              className="group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary cursor-pointer transition"
-                            >
-                              <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <span className="text-[15px] leading-none shrink-0">
-                                  {note.icon || '📌'}
-                                </span>
-                                <span className="truncate">{note.title || 'Tanpa Judul'}</span>
+                          {pinnedNotes.map((note) => {
+                            const isDropTarget = dropTargetNoteId === `pin-${note.id}`;
+                            return (
+                              <div key={`pin-${note.id}`} className="relative">
+                                {isDropTarget && dropTargetPosition === 'before' && (
+                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-2 pointer-events-none" />
+                                )}
+                                <div
+                                  draggable
+                                  onDragStart={(e) => {
+                                    e.dataTransfer.setData('application/miu-note-id', note.id);
+                                    e.dataTransfer.effectAllowed = 'move';
+                                    setDraggedNoteId(note.id);
+                                  }}
+                                  onDragEnd={() => {
+                                    setDraggedNoteId(null);
+                                    setDropTargetNoteId(null);
+                                  }}
+                                  onDragOver={(e) => {
+                                    if (!draggedNoteId || draggedNoteId === note.id) return;
+                                    e.preventDefault();
+                                    const pos = computeNoteDropPosition(e, true);
+                                    setDropTargetNoteId(`pin-${note.id}`);
+                                    setDropTargetPosition(pos);
+                                  }}
+                                  onDragLeave={() => {
+                                    if (dropTargetNoteId === `pin-${note.id}`) {
+                                      setDropTargetNoteId(null);
+                                    }
+                                  }}
+                                  onDrop={(e) => {
+                                    const sourceId =
+                                      e.dataTransfer.getData('application/miu-note-id') ||
+                                      draggedNoteId;
+                                    const pos = computeNoteDropPosition(e, true);
+                                    setDraggedNoteId(null);
+                                    setDropTargetNoteId(null);
+                                    if (!sourceId || sourceId === note.id) return;
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    void handleSidebarNoteDrop(sourceId, note, pos);
+                                  }}
+                                  onClick={(e) => {
+                                    if (e.altKey) {
+                                      setSidePeekNoteId(note.id);
+                                    } else {
+                                      openDocumentNote(note.id);
+                                    }
+                                  }}
+                                  onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setSidebarNoteMenuTarget({
+                                      note,
+                                      x: e.clientX,
+                                      y: e.clientY
+                                    });
+                                  }}
+                                  className={`group w-full flex items-center justify-between gap-1.5 px-2 py-1 rounded-md text-[13.5px] cursor-pointer transition ${
+                                    isDropTarget && dropTargetPosition === 'inside'
+                                      ? 'bg-[#2383E2]/15 ring-1 ring-[#2383E2] text-text-primary'
+                                      : 'text-text-secondary hover:bg-text-primary/[0.04] hover:text-text-primary'
+                                  } ${draggedNoteId === note.id ? 'opacity-45' : ''}`}
+                                >
+                                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                                    <span className="text-[15px] leading-none shrink-0">
+                                      {note.icon || '📌'}
+                                    </span>
+                                    <span className="truncate">{note.title || 'Tanpa Judul'}</span>
+                                  </div>
+                                  <SidebarNoteActionButtons
+                                    note={note}
+                                    onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
+                                    onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
+                                  />
+                                </div>
+                                {isDropTarget && dropTargetPosition === 'after' && (
+                                  <div className="h-[2px] bg-[#2383E2] rounded-full mx-2 pointer-events-none" />
+                                )}
                               </div>
-                              <SidebarNoteActionButtons
-                                note={note}
-                                onOpenMenu={(target) => setSidebarNoteMenuTarget(target)}
-                                onCreateSubpage={(pId) => void handleCreateNote(pId, true)}
-                              />
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       );
                     }

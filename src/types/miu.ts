@@ -285,6 +285,7 @@ export interface NoteRecord {
   blocks: NoteBlock[];
   shareSettings?: NoteShareSettings;
   comments?: NoteComment[];
+  sortOrder?: number;
   createdAt: number;
   updatedAt: number;
 }
